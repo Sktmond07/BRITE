@@ -13,7 +13,6 @@ class ComposerStaticInit2185d2f99bcd56787481d9357a5972d3
         ),
         'P' =>
         array (
-            'Paymongo\\' => 9,
             'PHPMailer\\PHPMailer\\' => 20,
         ),
     );
@@ -22,10 +21,6 @@ class ComposerStaticInit2185d2f99bcd56787481d9357a5972d3
         'Twilio\\' =>
         array (
             0 => __DIR__ . '/..' . '/twilio/sdk/src/Twilio',
-        ),
-        'Paymongo\\' =>
-        array (
-            0 => __DIR__ . '/..' . '/paymongo/paymongo-php/src',
         ),
         'PHPMailer\\PHPMailer\\' =>
         array (

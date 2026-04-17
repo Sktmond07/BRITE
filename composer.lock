@@ -4,54 +4,8 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "2b304ce0a6450ad15d61bc675e4ffd9d",
+    "content-hash": "4b8a25fa71f3506d65bba397ae4f3996",
     "packages": [
-        {
-            "name": "paymongo/paymongo-php",
-            "version": "v0.0.0",
-            "source": {
-                "type": "git",
-                "url": "https://github.com/paymongo/paymongo-php.git",
-                "reference": "48ce4f38b366d8ca73f426cd3b04fe1d7d59f5bd"
-            },
-            "dist": {
-                "type": "zip",
-                "url": "https://api.github.com/repos/paymongo/paymongo-php/zipball/48ce4f38b366d8ca73f426cd3b04fe1d7d59f5bd",
-                "reference": "48ce4f38b366d8ca73f426cd3b04fe1d7d59f5bd",
-                "shasum": ""
-            },
-            "require": {
-                "ext-curl": "*",
-                "ext-json": "*",
-                "ext-mbstring": "*",
-                "php": ">=5.6.0"
-            },
-            "require-dev": {
-                "phpunit/phpunit": "^9.1"
-            },
-            "type": "library",
-            "autoload": {
-                "psr-4": {
-                    "Paymongo\\": "src/"
-                }
-            },
-            "notification-url": "https://packagist.org/downloads/",
-            "license": [
-                "MIT"
-            ],
-            "description": "PayMongo PHP Library",
-            "homepage": "https://paymongo.com/",
-            "keywords": [
-                "api",
-                "payment processing",
-                "paymongo"
-            ],
-            "support": {
-                "issues": "https://github.com/paymongo/paymongo-php/issues",
-                "source": "https://github.com/paymongo/paymongo-php/tree/v0.0.0"
-            },
-            "time": "2022-11-21T06:10:32+00:00"
-        },
         {
             "name": "phpmailer/phpmailer",
             "version": "v7.0.2",

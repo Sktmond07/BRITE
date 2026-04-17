@@ -7,6 +7,5 @@ $baseDir = dirname($vendorDir);
 
 return array(
     'Twilio\\' => array($vendorDir . '/twilio/sdk/src/Twilio'),
-    'Paymongo\\' => array($vendorDir . '/paymongo/paymongo-php/src'),
     'PHPMailer\\PHPMailer\\' => array($vendorDir . '/phpmailer/phpmailer/src'),
 );
