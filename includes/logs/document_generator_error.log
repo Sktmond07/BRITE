@@ -1,0 +1,8 @@
+2026-04-06 06:55:25 - Attempting to generate document for request ID: 26
+2026-04-06 06:55:25 - Exception: TCPDF library not found. Please install it via composer.
+2026-04-06 06:55:25 - Stack trace: #0 C:\xampp\htdocs\BRITE\includes\document_generators\BarangayIDGenerator.php(7): BaseDocumentGenerator->setupPDF()
+#1 C:\xampp\htdocs\BRITE\includes\document_generators\BaseDocumentGenerator.php(243): BarangayIDGenerator->generateSpecificDocument(Array, Array, 'C:\\xampp\\htdocs...')
+#2 C:\xampp\htdocs\BRITE\includes\document_generators\DocumentGeneratorFactory.php(63): BaseDocumentGenerator->generateDocument(26)
+#3 C:\xampp\htdocs\BRITE\admin\dashboard.php(362): DocumentGeneratorFactory->generateDocument(26)
+#4 C:\xampp\htdocs\BRITE\admin\dashboard.php(412): updateRequestStatus(Object(mysqli), 26, 'approved', NULL)
+#5 {main}

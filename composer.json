@@ -1,0 +1,8 @@
+{
+    "require": {
+        "phpmailer/phpmailer": "^7.0",
+        "tecnickcom/tcpdf": "^6.11",
+        "twilio/sdk": "^8.11",
+        "paymongo/paymongo-php": "^0.0.0"
+    }
+}

@@ -1,0 +1,299 @@
+/* === GLOBAL RESET === */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+  font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+}
+
+/* === LOGO CONTAINER STYLES === */
+.logo-container {
+  width: 200px;
+  height: 200px;
+  background: white;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 4px solid rgba(255, 255, 255, 0.3); /* Thicker border */
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25); /* Enhanced shadow */
+  overflow: hidden;
+  margin: 0 auto 25px auto;
+}
+
+.logo-container img {
+  width: 102%;
+  height: 102%;
+  object-fit: contain;
+  border-radius: 50%;
+}
+/* Split the container into scrollable body + fixed footer */
+.container {
+  display: flex;
+  flex-direction: column;
+  max-height: 90vh; /* keep within screen */
+}
+
+.form-body {
+  flex: 1;
+  overflow-y: auto; /* scroll only inputs */
+  padding-right: 5px; /* space for scrollbar */
+}
+
+.form-footer {
+  margin-top: 15px;
+  flex-shrink: 0; /* footer stays fixed */
+}
+
+/* Scrollbar style for inputs area */
+.form-body::-webkit-scrollbar {
+  width: 6px;
+}
+.form-body::-webkit-scrollbar-thumb {
+  background-color: #43e97b;
+  border-radius: 6px;
+}
+.form-body::-webkit-scrollbar-track {
+  background: #f1f1f1;
+}
+
+
+/* === PAGE WRAPPER === */
+.login-wrapper {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 100vh;
+  padding: 20px;
+  background: linear-gradient(150deg,  #43e97b 20%,#11612e 80%);
+}
+
+/* === LEFT SIDE (Info / Logo / Design) === */
+.login-info {
+  flex: 1;
+  color: #fff;
+  padding: 40px;
+  text-align: center; /* Center align for logo container */
+}
+
+.login-info h1 {
+  font-size: 36px;
+  margin-bottom: 20px;
+  font-weight: bold;
+}
+
+.login-info p {
+  font-size: 16px;
+  line-height: 1.5;
+  max-width: 420px;
+  margin: 0 auto; /* Center the paragraph */
+}
+
+/* Remove the old img styles since we're using logo-container 
+
+/* === RIGHT SIDE (Form Container) === */
+.login-form {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+/* === FORM CONTAINER === */
+.container {
+  background: #ffffff;
+  padding: 30px;
+  border-radius: 12px;
+  width: 100%;
+  max-width: 380px;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.15);
+}
+
+.form-title {
+  font-size: 26px;
+  color: #333;
+  margin-bottom: 20px;
+  text-align: center;
+}
+
+/* === INPUT GROUPS === */
+.input-group {
+  margin-bottom: 18px;
+  position: relative;
+}
+
+.input-group label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 14px;
+  color: #444;
+}
+
+.input-group i {
+  position: absolute;
+  top: 40px;
+  left: 10px;
+  color: #777;
+}
+
+.input-group input {
+  width: 100%;
+  padding: 12px 12px 12px 36px;
+  border: 1px solid #ccc;
+  border-radius: 8px;
+  outline: none;
+  font-size: 14px;
+  transition: border-color 0.3s;
+}
+
+.input-group input:focus {
+  border-color: #43e97b;
+  box-shadow: 0 0 5px rgba(67, 233, 123, 0.4);
+}
+/* === IMPROVED GENDER SELECT STYLE === */
+.input-group select {
+  width: 100%;
+  padding: 12px 40px 12px 36px;
+  border: 1px solid #ccc;
+  border-radius: 10px;
+  background: linear-gradient(135deg, #ffffff, #f7f7f7);
+  color: #333;
+  font-size: 14px;
+  outline: none;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  appearance: none; /* removes default browser arrow */
+
+  /* Custom dropdown arrow */
+  background-image: url("data:image/svg+xml;charset=US-ASCII,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8'%3E%3Cpath fill='%2343e97b' d='M6 8L0 0h12z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 14px center;
+  background-size: 12px 8px;
+}
+
+/* Hover + Focus Effects */
+.input-group select:hover {
+  border-color: #43e97b;
+  background: linear-gradient(135deg, #ffffff, #e9fdf0);
+  box-shadow: 0 0 6px rgba(67, 233, 123, 0.3);
+}
+
+.input-group select:focus {
+  border-color: #43e97b;
+  background: #fff;
+  box-shadow: 0 0 8px rgba(67, 233, 123, 0.4);
+}
+
+/* Adjust dropdown text color for placeholder option */
+.input-group select option[disabled] {
+  color: #aaa;
+}
+
+
+
+/* === BUTTONS === */
+.btn {
+  width: 100%;
+  padding: 12px;
+  border: none;
+  border-radius: 8px;
+  background: #43e97b;
+  color: #fff;
+  font-size: 16px;
+  cursor: pointer;
+  transition: background 0.3s;
+  margin-top: 10px;
+}
+
+.btn:hover {
+  background: #36c76d;
+}
+
+.link {
+  margin-top: 20px;
+  text-align: center;
+}
+
+.link p {
+  font-size: 14px;
+  color: #555;
+  margin-bottom: 8px;
+}
+
+.link button {
+  padding: 8px 16px;
+  border: none;
+  border-radius: 8px;
+  background: #4facfe;
+  color: #fff;
+  cursor: pointer;
+  transition: background 0.3s;
+}
+
+.link button:hover {
+  background: #3a8edb;
+}
+
+/* === RECOVER PASSWORD === */
+.recover {
+  margin: 10px 0;
+  text-align: right;
+}
+
+.recover a {
+  font-size: 13px;
+  color: #4facfe;
+  text-decoration: none;
+}
+
+.recover a:hover {
+  text-decoration: underline;
+}
+
+/* === SCROLLABLE FORM (Register) === */
+.login-form .container {
+  max-height: 90vh;         /* prevent overflow */
+  overflow-y: auto;         /* enable vertical scroll */
+  scrollbar-width: thin;    /* firefox */
+  scrollbar-color: #43e97b #f1f1f1;
+}
+
+/* Chrome, Edge, Safari scrollbar */
+.login-form .container::-webkit-scrollbar {
+  width: 6px;
+}
+.login-form .container::-webkit-scrollbar-thumb {
+  background-color: #43e97b;
+  border-radius: 6px;
+}
+.login-form .container::-webkit-scrollbar-track {
+  background: #f1f1f1;
+}
+
+/* === RESPONSIVE DESIGN === */
+@media (max-width: 768px) {
+  .login-wrapper {
+    flex-direction: column;
+    text-align: center;
+  }
+
+  .login-info {
+    padding: 20px;
+  }
+
+  .login-info h1 {
+    font-size: 28px;
+  }
+
+  .logo-container {
+    width: 100px;
+    height: 100px;
+    margin: 0 auto 15px auto;
+  }
+
+  .login-form {
+    width: 100%;
+    margin-top: 20px;
+  }
+}
+
