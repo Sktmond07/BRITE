@@ -149,7 +149,7 @@ if ($qr_data) {
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mark_completed']) && isset($_POST['request_id'])) {
     $request_id = intval($_POST['request_id']);
     
-    $updateSql = "UPDATE document_requests SET status = 'completed', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'approved'";
+   $updateSql = "UPDATE document_requests SET status = 'claimed', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status IN ('approved', 'unclaimed')";
     $updateStmt = mysqli_prepare($conn, $updateSql);
     mysqli_stmt_bind_param($updateStmt, "i", $request_id);
     
@@ -875,7 +875,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mark_completed']) && 
                                 <div class="info-label">Status:</div>
                                 <div class="info-value">
                                     <span class="status-badge <?php echo strtolower($doc['status']); ?>">
-                                        <i class="fas <?php echo $doc['status'] == 'approved' ? 'fa-check-circle' : ($doc['status'] == 'completed' ? 'fa-check-double' : 'fa-clock'); ?>"></i>
+                                        <i class="fas <?php echo $doc['status'] == 'approved' ? 'fa-check-circle' : ($doc['status'] == 'claimed' ? 'fa-check-double' : 'fa-clock'); ?>"></i>
+<?php echo ucfirst($doc['status']); ?>
                                         <?php echo ucfirst($doc['status']); ?>
                                     </span>
                                 </div>
@@ -943,14 +944,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mark_completed']) && 
                     </div>
                     
                     <div class="action-buttons">
-                        <?php if ($doc['status'] === 'approved'): ?>
-                            <form method="POST" action="" style="display: inline;">
-                                <input type="hidden" name="request_id" value="<?php echo $doc['id']; ?>">
-                                <button type="submit" name="mark_completed" class="btn-complete" onclick="return confirm('Mark this document as completed? The resident can now claim their document.');">
-                                    <i class="fas fa-check-double"></i> Mark as Completed
-                                </button>
-                            </form>
-                        <?php endif; ?>
+                        <?php if ($doc['status'] === 'approved' || $doc['status'] === 'unclaimed'): ?>
+    <form method="POST" action="" style="display: inline;">
+        <input type="hidden" name="request_id" value="<?php echo $doc['id']; ?>">
+        <button type="submit" name="mark_completed" class="btn-complete" onclick="return confirm('Mark this document as claimed? The resident has received the document.');">
+            <i class="fas fa-check-double"></i> Mark as Claimed
+        </button>
+    </form>
+<?php endif; ?>
                         
                         <?php if ($doc['document_path'] && file_exists(__DIR__ . '/../generated_documents/' . $doc['document_path'])): ?>
                             <a href="../generated_documents/<?php echo urlencode($doc['document_path']); ?>" class="btn-download" target="_blank">

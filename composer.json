@@ -2,6 +2,7 @@
     "require": {
         "phpmailer/phpmailer": "^7.0",
         "tecnickcom/tcpdf": "^6.11",
-        "twilio/sdk": "^8.11"
+        "twilio/sdk": "^8.11",
+        "minishlink/web-push": "^8.0"
     }
 }

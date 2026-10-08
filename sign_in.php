@@ -6,7 +6,38 @@ if (isset($_SESSION['user_id'])) {
         header('Location: resident/dashboard.php');
         exit();
     } elseif ($_SESSION['user_type'] === 'admin') {
-        header('Location: admin/dashboard.php');
+        // Check role for admin redirection
+        require 'config/database.php';
+        $user_id = $_SESSION['user_id'];
+        $roleQuery = "SELECT admin_role FROM admin WHERE id = ?";
+        $stmt = mysqli_prepare($conn, $roleQuery);
+        mysqli_stmt_bind_param($stmt, "i", $user_id);
+        mysqli_stmt_execute($stmt);
+        $result = mysqli_stmt_get_result($stmt);
+        if ($row = mysqli_fetch_assoc($result)) {
+            $role = $row['admin_role'];
+            switch($role) {
+                case 'captain':
+                    header('Location: admin/dashboards/captain_dashboard.php');
+                    break;
+                case 'secretary':
+                    header('Location: admin/dashboards/secretary_dashboard.php');
+                    break;
+                case 'kagawad':
+                    header('Location: admin/dashboards/kagawad_dashboard.php');
+                    break;
+                case 'lupon':
+                    header('Location: admin/dashboards/lupon_dashboard.php');
+                    break;
+                case 'super_admin':
+                    header('Location: admin/dashboard.php');
+                    break;
+                default:
+                    header('Location: admin/dashboard.php');
+            }
+        } else {
+            header('Location: admin/dashboard.php');
+        }
         exit();
     }
 }
@@ -48,9 +79,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $user_id = '';
             $user_name = '';
             $user_email = '';
+            $user_role = '';
             
             // First, check in admin table
-            $adminQuery = "SELECT id, username, email, password FROM admin WHERE (username = ? OR email = ?) AND is_active = 1";
+            $adminQuery = "SELECT id, username, email, password, admin_role FROM admin WHERE (username = ? OR email = ?) AND is_active = 1";
             $stmt = mysqli_prepare($conn, $adminQuery);
             mysqli_stmt_bind_param($stmt, "ss", $username, $username);
             mysqli_stmt_execute($stmt);
@@ -66,6 +98,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $user_id = $admin['id'];
                     $user_name = $admin['username'];
                     $user_email = $admin['email'];
+                    $user_role = $admin['admin_role'];
                 }
             }
             mysqli_stmt_close($stmt);
@@ -110,14 +143,39 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $_SESSION['user_type'] = $user_type;
                 $_SESSION['logged_in'] = true;
                 $_SESSION['login_time'] = time();
+                $_SESSION['last_activity'] = time();
+                
+                // Store role in session for admin users
+                if ($user_type === 'admin') {
+                    $_SESSION['admin_role'] = $user_role;
+                }
                 
                 // Update last login based on user type
                 if ($user_type === 'admin') {
                     $updateQuery = "UPDATE admin SET last_login = NOW() WHERE id = ?";
-                    $redirect_url = 'admin/dashboard.php';
+                    // Set redirect URL based on role
+                    switch($user_role) {
+                        case 'captain':
+                            $redirect_url = 'admin/dashboards/captain_dashboard.php';
+                            break;
+                        case 'secretary':
+                            $redirect_url = 'admin/dashboards/secretary_dashboard.php';
+                            break;
+                        case 'kagawad':
+                            $redirect_url = 'admin/dashboards/kagawad_dashboard.php';
+                            break;
+                        case 'lupon':
+                            $redirect_url = 'admin/dashboards/lupon_dashboard.php';
+                            break;
+                        case 'super_admin':
+                            $redirect_url = 'admin/dashboard.php';
+                            break;
+                        default:
+                            $redirect_url = 'admin/dashboard.php';
+                    }
                 } else {
                     $updateQuery = "UPDATE resident SET last_login = NOW() WHERE id = ?";
-                   $redirect_url = 'resident/dashboard.php';
+                    $redirect_url = 'resident/dashboard.php';
                 }
                 
                 $updateStmt = mysqli_prepare($conn, $updateQuery);
@@ -244,7 +302,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     .pending-icon {
       animation: pulseWarning 1.5s ease-in-out infinite;
     }
-    
+    /* Override the existing input-group i styles for password field */
+.password-field i {
+  position: absolute !important;
+  top: 70% !important;
+  transform: translateY(-50%) !important;
+}
+
+.input-group .password-field i:first-child {
+  left: 12px;
+}
+
+#togglePassword {
+  right: 12px;
+  left: auto !important;
+}
+
+/* Make sure input has proper padding */
+.password-field input {
+  padding-left: 40px;
+  padding-right: 40px;
+}
 
   </style>
 </head>
@@ -255,7 +333,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         <img src="logo.jpg" alt="Barangay logo" onerror="this.src='https://via.placeholder.com/120'">
       </div>
       <h1>BRITE - San Bartolome</h1>
-      <p>Welcome to HealthHub – JBLMGH Sto. Tomas. The smart way to book and manage your hospital appointments.</p>
+      <p>Welcome to BRITE – your easy and convenient way to request documents, file complaints, and connect with your barangay..</p>
     </div>
 
     <div class="login-form">
@@ -453,14 +531,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <input type="text" name="username" id="username" placeholder="Username or Email" required value="<?php echo isset($_POST['username']) ? htmlspecialchars($_POST['username']) : ''; ?>">
           </div>
 
-        <div class="input-group">
+  <div class="input-group">
   <label for="password">Password</label>
-  <div class="input-container">
+  <div class="password-field">
     <i class="fas fa-lock"></i>
-    <div class="password-wrapper">
-      <input type="password" name="password" id="password" placeholder="Password" required>
-     
-    </div>
+    <input type="password" name="password" id="password" placeholder="Password" required>
+    <i class="fas fa-eye" id="togglePassword"></i>
   </div>
 </div>
 
@@ -470,34 +546,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         <div class="link">
           <p>Don't have an account yet?</p>
-          <a href="sign_up.php"><button type="button">Sign Up</button></a>
+          <a href="sign_up.php"><button type="button">Create Account</button></a>
         </div>
       </div>
     </div>
   </div>
 
   <script>
-    // Toggle password visibility
-    const togglePassword = document.getElementById('togglePassword');
-    const passwordInput = document.getElementById('password');
+   // Toggle password visibility
+const togglePassword = document.getElementById('togglePassword');
+const passwordInput = document.getElementById('password');
+
+if (togglePassword && passwordInput) {
+  togglePassword.addEventListener('click', function() {
+    // Toggle the type attribute
+    const type = passwordInput.getAttribute('type') === 'password' ? 'text' : 'password';
+    passwordInput.setAttribute('type', type);
     
-    if (togglePassword && passwordInput) {
-      togglePassword.addEventListener('click', function() {
-        // Toggle the type attribute
-        const type = passwordInput.getAttribute('type') === 'password' ? 'text' : 'password';
-        passwordInput.setAttribute('type', type);
-        
-        // Toggle the eye icon
-        this.classList.toggle('fa-eye');
-        this.classList.toggle('fa-eye-slash');
-        
-        // Add a subtle animation effect
-        this.style.transform = 'scale(1.1)';
-        setTimeout(() => {
-          this.style.transform = 'scale(1)';
-        }, 200);
-      });
-    }
+    // Toggle the eye icon
+    this.classList.toggle('fa-eye');
+    this.classList.toggle('fa-eye-slash');
+    
+    // Add a subtle animation effect
+    this.style.transform = 'scale(1.1)';
+    setTimeout(() => {
+      this.style.transform = 'translateY(-50%) scale(1)';
+    }, 200);
+  });
+}
     
     // Prevent back button after logout
     if (window.history && window.history.replaceState) {

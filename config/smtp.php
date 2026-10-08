@@ -7,7 +7,7 @@ function getSMTPConfig() {
         'port' => 587,                            // 587 for TLS, 465 for SSL
         'auth' => true,                           // Enable authentication
         'username' => 'guevarraraymond10@gmail.com',     // Your email address
-        'password' => 'mnla crmt xjok olr ',        // Your app-specific password
+        'password' => 'nqbu andg mwqt rrml',        // Your app-specific password
         'encryption' => 'tls',                    // 'tls' or 'ssl'
         
         // Email Settings

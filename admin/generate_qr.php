@@ -3,7 +3,17 @@
 session_start();
 
 require_once __DIR__ . '/../config/database.php';
-require_once __DIR__ . '/qrcode/phpqrcode.php';  // Use phpqrcode library
+
+// **FIX: Correct path to phpqrcode library**
+$qrLibPath = __DIR__ . '/qrcode/phpqrcode.php';
+
+if (!file_exists($qrLibPath)) {
+    error_log("QR library not found at: " . $qrLibPath);
+    http_response_code(500);
+    exit();
+}
+
+require_once $qrLibPath;
 
 // Handle QR generation request (silent mode - no output)
 if (isset($_GET['request_id'])) {
@@ -50,9 +60,6 @@ if (isset($_GET['request_id'])) {
     $qrPath = $qrDir . $qrFilename;
     
     // Parameters: text, outfile, error_correction_level, pixel_size, margin
-    // QR_ECLEVEL_H = High error correction (30%)
-    // Size 10 = good readable size
-    // Margin 2 = 2 modules margin
     QRcode::png($qrPayload, $qrPath, QR_ECLEVEL_H, 10, 2);
     
     // Check if file was created successfully
@@ -63,6 +70,9 @@ if (isset($_GET['request_id'])) {
         $updateStmt = mysqli_prepare($conn, $updateSql);
         mysqli_stmt_bind_param($updateStmt, "ssi", $relativePath, $verificationCode, $request_id);
         mysqli_stmt_execute($updateStmt);
+        error_log("QR Code generated: " . $relativePath);
+    } else {
+        error_log("Failed to generate QR code for request_id: " . $request_id);
     }
     
     // Silent exit - no output
@@ -78,18 +88,16 @@ if (isset($_GET['test'])) {
     if (extension_loaded('gd')) {
         echo "<p style='color:green'>✓ GD extension is loaded</p>";
     } else {
-        echo "<p style='color:red'>✗ GD extension is NOT loaded - phpqrcode requires GD</p>";
+        echo "<p style='color:red'>✗ GD extension is NOT loaded</p>";
         echo "<p>Please enable GD extension in php.ini</p>";
-        exit();
     }
     
-    // Check if phpqrcode library exists
-    $qrLibPath = __DIR__ . '/qrcode/phpqrcode.php';
-    if (file_exists($qrLibPath)) {
-        echo "<p style='color:green'>✓ phpqrcode.php found at: $qrLibPath</p>";
+    // Check if phpqrcode.php exists
+    if (file_exists(__DIR__ . '/qrcode/phpqrcode.php')) {
+        echo "<p style='color:green'>✓ phpqrcode.php found</p>";
+        echo "<p>Path: " . __DIR__ . "/qrcode/phpqrcode.php</p>";
     } else {
-        echo "<p style='color:red'>✗ phpqrcode.php not found at: $qrLibPath</p>";
-        exit();
+        echo "<p style='color:red'>✗ phpqrcode.php not found at: " . __DIR__ . "/qrcode/phpqrcode.php</p>";
     }
     
     // Create test directory
@@ -99,83 +107,7 @@ if (isset($_GET['test'])) {
         echo "<p>Created directory: $testDir</p>";
     }
     
-    // Check if directory is writable
-    if (is_writable($testDir)) {
-        echo "<p style='color:green'>✓ Directory is writable: $testDir</p>";
-    } else {
-        echo "<p style='color:red'>✗ Directory is NOT writable: $testDir</p>";
-    }
-    
-    // Generate test QR code
-    $testData = "Test QR Code - " . date('Y-m-d H:i:s');
-    $testFile = $testDir . 'test_phpqrcode.png';
-    
-    QRcode::png($testData, $testFile, QR_ECLEVEL_H, 10, 2);
-    
-    if (file_exists($testFile) && filesize($testFile) > 0) {
-        echo "<p style='color:green'>✓ Test QR code generated successfully!</p>";
-        echo "<img src='../generated_qrcodes/test_phpqrcode.png' style='border:1px solid #ccc;padding:10px;'>";
-        echo "<p>File size: " . filesize($testFile) . " bytes</p>";
-        echo "<p>File path: " . realpath($testFile) . "</p>";
-    } else {
-        echo "<p style='color:red'>✗ Failed to generate test QR code</p>";
-        echo "<p>Check error logs for more details.</p>";
-    }
-    
+    echo "<p>QR library will be used when approving documents.</p>";
+    echo "<p><a href='?request_id=54'>Test QR for request ID 54</a></p>";
     exit();
 }
-
-// Batch generate for all approved requests without QR
-if (isset($_GET['batch_generate']) && $_GET['batch_generate'] == 'silent') {
-    $sql = "SELECT dr.id, dr.document_type, r.first_name, r.last_name, r.email 
-            FROM document_requests dr 
-            JOIN resident r ON dr.resident_id = r.id 
-            WHERE dr.status = 'approved' AND (dr.qr_code_path IS NULL OR dr.qr_code_path = '')";
-    $result = mysqli_query($conn, $sql);
-    
-    $generated = 0;
-    $failed = 0;
-    
-    while ($row = mysqli_fetch_assoc($result)) {
-        $verificationCode = md5($row['id'] . $row['email'] . time() . $generated);
-        $qrPayload = json_encode([
-            'request_id' => $row['id'],
-            'document_type' => $row['document_type'],
-            'resident_name' => $row['first_name'] . ' ' . $row['last_name'],
-            'resident_email' => $row['email'],
-            'issue_date' => date('Y-m-d H:i:s'),
-            'verification_code' => $verificationCode
-        ]);
-        
-        $qrDir = __DIR__ . '/../generated_qrcodes/';
-        if (!file_exists($qrDir)) mkdir($qrDir, 0777, true);
-        
-        $qrFilename = 'qr_document_' . $row['id'] . '_' . time() . '_' . $generated . '.png';
-        $qrPath = $qrDir . $qrFilename;
-        
-        // Generate QR code using phpqrcode
-        QRcode::png($qrPayload, $qrPath, QR_ECLEVEL_H, 10, 2);
-        
-        if (file_exists($qrPath) && filesize($qrPath) > 0) {
-            $relativePath = 'generated_qrcodes/' . $qrFilename;
-            $updateSql = "UPDATE document_requests SET qr_code_path = ?, qr_verification_code = ? WHERE id = ?";
-            $updateStmt = mysqli_prepare($conn, $updateSql);
-            mysqli_stmt_bind_param($updateStmt, "ssi", $relativePath, $verificationCode, $row['id']);
-            
-            if (mysqli_stmt_execute($updateStmt)) {
-                $generated++;
-            } else {
-                $failed++;
-            }
-        } else {
-            $failed++;
-        }
-        
-        // Small delay to avoid overwhelming the server
-        usleep(50000);
-    }
-    
-    // Silent exit
-    exit();
-}
-?>

@@ -9,6 +9,37 @@ if (!isset($_SESSION['user_id']) || $_SESSION['user_type'] !== 'admin') {
 }
 
 $request_id = isset($_GET['request_id']) ? intval($_GET['request_id']) : 0;
+$admin_id = $_SESSION['user_id'];
+
+// Get current admin role for proper redirect
+$roleSql = "SELECT admin_role, full_name FROM admin WHERE id = ?";
+$roleStmt = mysqli_prepare($conn, $roleSql);
+mysqli_stmt_bind_param($roleStmt, "i", $admin_id);
+mysqli_stmt_execute($roleStmt);
+$roleResult = mysqli_stmt_get_result($roleStmt);
+$adminData = mysqli_fetch_assoc($roleResult);
+$adminRole = $adminData['admin_role'];
+$adminFullName = $adminData['full_name'];
+
+// Determine dashboard URL based on role
+function getDashboardUrl($role) {
+    switch($role) {
+        case 'captain':
+            return 'dashboards/captain_dashboard.php';
+        case 'secretary':
+            return 'dashboards/secretary_dashboard.php';
+        case 'kagawad':
+            return 'dashboards/kagawad_dashboard.php';
+        case 'lupon':
+            return 'dashboards/lupon_dashboard.php';
+        case 'super_admin':
+        default:
+            return 'dashboard.php';
+    }
+}
+
+$dashboardUrl = getDashboardUrl($adminRole);
+$dashboardLabel =' Dashboard';
 
 // Get document info if request_id is provided
 $documentInfo = null;
@@ -31,8 +62,11 @@ if ($request_id > 0) {
         die("Database connection failed");
     }
     
-    // Main document request query - includes id_documents_path from document_requests table
-    $sql = "SELECT dr.document_path, dr.document_type, dr.status, dr.request_date, dr.admin_notes, dr.purpose, dr.quantity, dr.fee, dr.id_document_path,
+    // Main document request query - includes processor info
+    $sql = "SELECT dr.document_path, dr.document_type, dr.status, dr.request_date, dr.admin_notes, 
+                   dr.purpose, dr.quantity, dr.fee, dr.id_document_path,
+                   dr.approved_by_name, dr.approved_at, dr.completed_by_name, dr.completed_at,
+                   dr.rejected_by_name, dr.rejected_at,
                    r.first_name, r.last_name, r.id as resident_id
             FROM document_requests dr 
             JOIN resident r ON dr.resident_id = r.id 
@@ -699,9 +733,9 @@ function formatCustomFieldValue($fieldName, $value) {
         </div>
         <div class="nav-buttons">
             <button class="action-btn print" onclick="printDocument()"><i class="fas fa-print"></i> Print</button>
-                    <button class="action-btn download" onclick="downloadDocument()"><i class="fas fa-download"></i> Download</button>
-            <a href="dashboard.php" class="nav-btn dashboard">
-                <i class="fas fa-tachometer-alt"></i> Dashboard
+            <button class="action-btn download" onclick="downloadDocument()"><i class="fas fa-download"></i> Download</button>
+            <a href="<?php echo $dashboardUrl; ?>" class="nav-btn dashboard">
+                <i class="fas fa-tachometer-alt"></i> <?php echo $dashboardLabel; ?>
             </a>
         </div>
     </div>
@@ -738,16 +772,37 @@ function formatCustomFieldValue($fieldName, $value) {
                     <label><i class="fas fa-tag"></i> Status</label>
                     <div class="info-value">
                         <span class="status-badge <?php echo strtolower($status); ?>">
-                            <i class="fas <?php echo $status == 'approved' ? 'fa-check-circle' : ($status == 'completed' ? 'fa-check-double' : ($status == 'pending' ? 'fa-clock' : 'fa-times-circle')); ?>"></i>
-                            <?php echo ucfirst($status); ?>
+                           <i class="fas <?php echo $status == 'approved' ? 'fa-check-circle' : (($status == 'unclaimed' || $status == 'claimed') ? 'fa-check-double' : ($status == 'pending' ? 'fa-clock' : 'fa-times-circle')); ?>"></i>
                         </span>
+                    </div>
+                </div>
+
+                <!-- Processed By Information -->
+                <div class="info-group">
+                    <label><i class="fas fa-user-check"></i> Processed By</label>
+                    <div class="info-value">
+                        <?php if ($status === 'approved' && isset($documentInfo['approved_by_name'])): ?>
+                            <i class="fas fa-check-circle" style="color: #28a745;"></i>
+                            <?php echo htmlspecialchars($documentInfo['approved_by_name']); ?>
+                            <small style="display: block; color: #666;">on <?php echo date('F d, Y h:i A', strtotime($documentInfo['approved_at'])); ?></small>
+                        <?php elseif ($status === 'claimed' && isset($documentInfo['completed_by_name'])): ?>
+                            <i class="fas fa-check-double" style="color: #17a2b8;"></i>
+                            <?php echo htmlspecialchars($documentInfo['completed_by_name']); ?>
+                            <small style="display: block; color: #666;">on <?php echo date('F d, Y h:i A', strtotime($documentInfo['completed_at'])); ?></small>
+                        <?php elseif ($status === 'rejected' && isset($documentInfo['rejected_by_name'])): ?>
+                            <i class="fas fa-times-circle" style="color: #dc3545;"></i>
+                            <?php echo htmlspecialchars($documentInfo['rejected_by_name']); ?>
+                            <small style="display: block; color: #666;">on <?php echo date('F d, Y h:i A', strtotime($documentInfo['rejected_at'])); ?></small>
+                        <?php else: ?>
+                            <i class="fas fa-clock"></i> Not processed yet
+                        <?php endif; ?>
                     </div>
                 </div>
                 
                 <!-- Custom Fields Section from document_requests_custom_data -->
                 <?php if (!empty($customFieldsList)): ?>
                 <div class="info-group">
-                    <label><i class="fas fa-tasks"></i> Custom Information</label>
+                    <label><i class="fas fa-tasks"></i> Certificate Information</label>
                     <div class="info-value">
                         <div class="custom-fields-grid">
                             <?php foreach ($customFieldsList as $fieldName => $fieldValue): ?>
@@ -855,8 +910,8 @@ function formatCustomFieldValue($fieldName, $value) {
             <i class="fas fa-certificate"></i>
             <h3>No Document Available</h3>
             <p>The requested document could not be found or hasn't been generated yet.</p>
-            <a href="dashboard.php" class="btn">
-                <i class="fas fa-list-alt"></i> Go to Request List
+            <a href="<?php echo $dashboardUrl; ?>" class="btn">
+                <i class="fas fa-list-alt"></i> Go to <?php echo $dashboardLabel; ?>
             </a>
             
             <!-- Recent Approved Documents -->
@@ -865,7 +920,7 @@ function formatCustomFieldValue($fieldName, $value) {
                            r.first_name, r.last_name
                     FROM document_requests dr 
                     JOIN resident r ON dr.resident_id = r.id 
-                    WHERE dr.status IN ('approved', 'completed') 
+                    WHERE dr.status IN ('approved', 'unclaimed', 'claimed') 
                     AND dr.document_path IS NOT NULL
                     ORDER BY dr.processed_date DESC 
                     LIMIT 10";

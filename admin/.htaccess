@@ -1,1 +1,16 @@
 DirectoryIndex index.php
+
+# Enable rewrite engine
+RewriteEngine On
+
+# If the request is to api/emergency, route to emergency.php
+RewriteRule ^emergency$ emergency.php [L,QSA]
+
+# Or route all API requests
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^api/(.*)$ $1.php [L,QSA]
+
+<Files "sw.js">
+    Header set Service-Worker-Allowed "/BRITE/"
+</Files>

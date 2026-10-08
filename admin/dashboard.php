@@ -1,343 +1,88 @@
 <?php
+// admin/dashboard.php
 session_start();
 
-// Include Composer autoloader (if you have it)
-if (file_exists(__DIR__ . '/../vendor/autoload.php')) {
-    require_once __DIR__ . '/../vendor/autoload.php';
-}
+// ============ AJAX HANDLERS - MUST BE FIRST, BEFORE ANY OUTPUT ============
 
-// Include database configuration
-require_once __DIR__ . '/../config/database.php';
-require_once __DIR__ . '/../includes/email_helper.php';
-require_once __DIR__ . '/../includes/DocumentGenerator.php';
+$isAjaxRequest = isset($_GET['dashboard_action']) || isset($_GET['doc_action']) || isset($_GET['action']) || isset($_POST['action']) || isset($_POST['doc_action']);
 
-if (!isset($_SESSION['user_id']) || $_SESSION['user_type'] !== 'admin') {
-    header('Location: ../sign_in.php');
-    exit();
-}
-
-// Add cache control headers to prevent back button after logout
-header("Cache-Control: no-cache, no-store, must-revalidate");
-header("Pragma: no-cache");
-header("Expires: 0");
-
-// Function to get resident details by ID
-function getResidentDetails($conn, $id) {
-    $id = intval($id);
-    $sql = "SELECT id, username, email, first_name, last_name, phone, address, 
-                   date_of_birth, gender, is_verified, scanned_document, 
-                   created_at, updated_at, last_login 
-            FROM resident 
-            WHERE id = ? AND is_active = 1";
-    $stmt = mysqli_prepare($conn, $sql);
-    mysqli_stmt_bind_param($stmt, "i", $id);
-    mysqli_stmt_execute($stmt);
-    $result = mysqli_stmt_get_result($stmt);
+if ($isAjaxRequest) {
+    require_once __DIR__ . '/../config/database.php';
+    require_once __DIR__ . '/../includes/email_helper.php';
+    require_once __DIR__ . '/../includes/DocumentGenerator.php';
     
-    if ($result && mysqli_num_rows($result) > 0) {
-        return mysqli_fetch_assoc($result);
+    header('Content-Type: application/json');
+    
+    // ============ DOCUMENT STATS AJAX ============
+    if (isset($_GET['dashboard_action']) && $_GET['dashboard_action'] === 'get_document_stats') {
+    $docSql = "SELECT 
+                COUNT(*) as total,
+                SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
+                SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) as approved,
+                SUM(CASE WHEN status = 'unclaimed' THEN 1 ELSE 0 END) as unclaimed,
+                SUM(CASE WHEN status = 'claimed' THEN 1 ELSE 0 END) as claimed,
+                SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) as rejected
+            FROM document_requests";
+        $docResult = mysqli_query($conn, $docSql);
+        $docStats = mysqli_fetch_assoc($docResult);
+        echo json_encode(['success' => true, 'document' => $docStats]);
+        exit;
     }
-    return null;
-}
-
-// Function to get verified residents
-function getVerifiedResidents($conn) {
-    $sql = "SELECT id, first_name, last_name, email, address, phone, is_verified, created_at 
-            FROM resident 
-            WHERE is_verified = 1 AND is_active = 1 
-            ORDER BY created_at DESC";
-    $result = mysqli_query($conn, $sql);
     
-    $residents = [];
-    if ($result && mysqli_num_rows($result) > 0) {
-        while ($row = mysqli_fetch_assoc($result)) {
-            $residents[] = [
-                'id' => $row['id'],
-                'name' => $row['first_name'] . ' ' . $row['last_name'],
-                'email' => $row['email'],
-                'phone' => $row['phone'] ?: 'Not provided',
-                'address' => $row['address'] ?: 'Not specified',
-                'status' => 'verified',
-                'created_at' => $row['created_at']
-            ];
-        }
-    }
-    return $residents;
-}
-
-// Function to get unverified residents
-function getUnverifiedResidents($conn) {
-    $sql = "SELECT id, first_name, last_name, email, address, phone, is_verified, created_at, scanned_document 
-            FROM resident 
-            WHERE is_verified = 0 AND is_active = 1 
-            ORDER BY created_at DESC";
-    $result = mysqli_query($conn, $sql);
-    
-    $residents = [];
-    if ($result && mysqli_num_rows($result) > 0) {
-        while ($row = mysqli_fetch_assoc($result)) {
-            $docPath = $row['scanned_document'];
-            if ($docPath && !empty($docPath)) {
-                $docPath = ltrim($docPath, '/');
-                if (strpos($docPath, 'uploads/') !== 0) {
-                    $docPath = 'uploads/' . $docPath;
-                }
+    // ============ RECENT DOCUMENTS AJAX ============
+    if (isset($_GET['dashboard_action']) && $_GET['dashboard_action'] === 'get_recent_documents') {
+        $limit = isset($_GET['limit']) ? intval($_GET['limit']) : 5;
+        $sql = "SELECT dr.*, r.first_name, r.last_name, r.email 
+                FROM document_requests dr 
+                JOIN resident r ON dr.resident_id = r.id 
+                ORDER BY dr.request_date DESC 
+                LIMIT $limit";
+        $result = mysqli_query($conn, $sql);
+        $requests = [];
+        if ($result && mysqli_num_rows($result) > 0) {
+            while ($row = mysqli_fetch_assoc($result)) {
+                $requests[] = $row;
             }
-            
-            $residents[] = [
-                'id' => $row['id'],
-                'name' => $row['first_name'] . ' ' . $row['last_name'],
-                'email' => $row['email'],
-                'phone' => $row['phone'] ?: 'Not provided',
-                'address' => $row['address'] ?: 'Not specified',
-                'status' => 'unverified',
-                'created_at' => $row['created_at'],
-                'scanned_document' => $docPath
-            ];
         }
-    }
-    return $residents;
-}
-
-// Function to get total counts
-function getDashboardCounts($conn) {
-    $verified = 0;
-    $unverified = 0;
-    $total = 0;
-    
-    $result = mysqli_query($conn, "SELECT COUNT(*) as count FROM resident WHERE is_verified = 1 AND is_active = 1");
-    if ($result) {
-        $verified = mysqli_fetch_assoc($result)['count'];
+        echo json_encode(['success' => true, 'requests' => $requests]);
+        exit;
     }
     
-    $result = mysqli_query($conn, "SELECT COUNT(*) as count FROM resident WHERE is_verified = 0 AND is_active = 1");
-    if ($result) {
-        $unverified = mysqli_fetch_assoc($result)['count'];
-    }
-    
-    $result = mysqli_query($conn, "SELECT COUNT(*) as count FROM resident WHERE is_active = 1");
-    if ($result) {
-        $total = mysqli_fetch_assoc($result)['count'];
-    }
-    
-    return ['verified' => $verified, 'unverified' => $unverified, 'total' => $total];
-}
-
-// Function to verify a resident and send email confirmation
-function verifyResident($conn, $id) {
-    $id = intval($id);
-    
-    $resident = getResidentDetails($conn, $id);
-    if (!$resident) {
-        return ['success' => false, 'message' => 'Resident not found'];
-    }
-    
-    if ($resident['is_verified'] == 1) {
-        return ['success' => false, 'message' => 'Account is already verified'];
-    }
-    
-    $sql = "UPDATE resident SET is_verified = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND is_verified = 0";
-    $stmt = mysqli_prepare($conn, $sql);
-    mysqli_stmt_bind_param($stmt, "i", $id);
-    
-    if (mysqli_stmt_execute($stmt) && mysqli_stmt_affected_rows($stmt) > 0) {
-        $emailSent = sendVerificationConfirmationEmail(
-            $resident['email'], 
-            $resident['first_name'] . ' ' . $resident['last_name']
-        );
-        
-        return [
-            'success' => true, 
-            'email_sent' => $emailSent,
-            'message' => $resident['first_name'] . ' ' . $resident['last_name'] . ' has been verified successfully.',
-            'email_status' => $emailSent ? 'Email notification sent to ' . $resident['email'] : 'Account verified but email notification failed'
-        ];
-    }
-    
-    return ['success' => false, 'message' => 'Failed to verify account.'];
-}
-
-// Handle AJAX requests for verification
-if (isset($_POST['action']) && $_POST['action'] === 'verify_account') {
-    header('Content-Type: application/json');
-    $id = isset($_POST['id']) ? intval($_POST['id']) : 0;
-    
-    if ($id > 0) {
-        $result = verifyResident($conn, $id);
-        echo json_encode($result);
-    } else {
-        echo json_encode(['success' => false, 'message' => 'Invalid resident ID']);
-    }
-    exit;
-}
-
-// Handle AJAX requests to get resident details
-if (isset($_GET['action']) && $_GET['action'] === 'get_resident' && isset($_GET['id'])) {
-    header('Content-Type: application/json');
-    $id = intval($_GET['id']);
-    $details = getResidentDetails($conn, $id);
-    if ($details) {
-        if ($details['scanned_document'] && !empty($details['scanned_document'])) {
-            $docPath = ltrim($details['scanned_document'], '/');
-            if (strpos($docPath, 'uploads/') !== 0) {
-                $docPath = 'uploads/' . $docPath;
-            }
-            $details['scanned_document'] = $docPath;
-        }
-        echo json_encode(['success' => true, 'data' => $details]);
-    } else {
-        echo json_encode(['success' => false, 'message' => 'Resident not found']);
-    }
-    exit;
-}
-
-// Handle AJAX requests to get counts
-if (isset($_GET['action']) && $_GET['action'] === 'get_counts') {
-    header('Content-Type: application/json');
-    $counts = getDashboardCounts($conn);
-    echo json_encode($counts);
-    exit;
-}
-
-// ============ DOCUMENT MANAGEMENT FUNCTIONS ============
-
-// Get all document types
-function getDocumentTypes($conn) {
-    $sql = "SELECT * FROM document_types ORDER BY name ASC";
-    $result = mysqli_query($conn, $sql);
-    $documents = [];
-    if ($result && mysqli_num_rows($result) > 0) {
-        while ($row = mysqli_fetch_assoc($result)) {
-            $documents[] = $row;
-        }
-    }
-    return $documents;
-}
-
-// Get document type by ID
-function getDocumentTypeById($conn, $id) {
-    $id = intval($id);
-    $sql = "SELECT * FROM document_types WHERE id = ?";
-    $stmt = mysqli_prepare($conn, $sql);
-    mysqli_stmt_bind_param($stmt, "i", $id);
-    mysqli_stmt_execute($stmt);
-    $result = mysqli_stmt_get_result($stmt);
-    if ($result && mysqli_num_rows($result) > 0) {
-        return mysqli_fetch_assoc($result);
-    }
-    return null;
-}
-
-// Add new document type
-function addDocumentType($conn, $name, $description, $fee) {
-    $name = mysqli_real_escape_string($conn, $name);
-    $description = mysqli_real_escape_string($conn, $description);
-    $fee = floatval($fee);
-    
-    $sql = "INSERT INTO document_types (name, description, fee, is_active) VALUES (?, ?, ?, 1)";
-    $stmt = mysqli_prepare($conn, $sql);
-    mysqli_stmt_bind_param($stmt, "ssd", $name, $description, $fee);
-    
-    if (mysqli_stmt_execute($stmt)) {
-        return ['success' => true, 'id' => mysqli_insert_id($conn)];
-    }
-    return ['success' => false, 'message' => 'Failed to add document type'];
-}
-
-// Update document type
-function updateDocumentType($conn, $id, $name, $description, $fee, $is_active) {
-    $id = intval($id);
-    $name = mysqli_real_escape_string($conn, $name);
-    $description = mysqli_real_escape_string($conn, $description);
-    $fee = floatval($fee);
-    $is_active = intval($is_active);
-    
-    $sql = "UPDATE document_types SET name = ?, description = ?, fee = ?, is_active = ? WHERE id = ?";
-    $stmt = mysqli_prepare($conn, $sql);
-    mysqli_stmt_bind_param($stmt, "ssdii", $name, $description, $fee, $is_active, $id);
-    
-    if (mysqli_stmt_execute($stmt)) {
-        return ['success' => true];
-    }
-    return ['success' => false, 'message' => 'Failed to update document type'];
-}
-
-// Delete document type
-function deleteDocumentType($conn, $id) {
-    $id = intval($id);
-    $sql = "DELETE FROM document_types WHERE id = ?";
-    $stmt = mysqli_prepare($conn, $sql);
-    mysqli_stmt_bind_param($stmt, "i", $id);
-    
-    if (mysqli_stmt_execute($stmt)) {
-        return ['success' => true];
-    }
-    return ['success' => false, 'message' => 'Failed to delete document type'];
-}
-
-// Get document requests with resident info
-function getDocumentRequests($conn, $status = null, $page = 1, $perPage = 10) {
-    $offset = ($page - 1) * $perPage;
-    $status = $status && $status !== 'all' ? mysqli_real_escape_string($conn, $status) : null;
-    
-    $countSql = "SELECT COUNT(*) as total FROM document_requests dr JOIN resident r ON dr.resident_id = r.id";
-    if ($status) {
-        $countSql .= " WHERE dr.status = '$status'";
-    }
-    $countResult = mysqli_query($conn, $countSql);
-    $totalRecords = $countResult ? mysqli_fetch_assoc($countResult)['total'] : 0;
-    $totalPages = ceil($totalRecords / $perPage);
-    
-    $sql = "SELECT dr.*, r.first_name, r.last_name, r.email, r.phone 
-            FROM document_requests dr 
-            JOIN resident r ON dr.resident_id = r.id";
-    
-    if ($status) {
-        $sql .= " WHERE dr.status = '$status'";
-    }
-    
-    $sql .= " ORDER BY dr.request_date DESC LIMIT $offset, $perPage";
-    
-    $result = mysqli_query($conn, $sql);
-    $requests = [];
-    if ($result && mysqli_num_rows($result) > 0) {
-        while ($row = mysqli_fetch_assoc($result)) {
-            $requests[] = $row;
-        }
-    }
-    
-    return ['requests' => $requests, 'totalPages' => $totalPages, 'currentPage' => $page, 'totalRecords' => $totalRecords];
-}
-
-// Get pending count for badge
-function getPendingCount($conn) {
-    $sql = "SELECT COUNT(*) as count FROM document_requests WHERE status = 'pending'";
-    $result = mysqli_query($conn, $sql);
-    if ($result) {
-        return mysqli_fetch_assoc($result)['count'];
-    }
-    return 0;
-}
-
-// Handle AJAX requests for filtering with pagination
+    // ============ FILTER REQUESTS AJAX ============
 if (isset($_GET['doc_action']) && $_GET['doc_action'] === 'filter_requests') {
-    header('Content-Type: application/json');
     $status = isset($_GET['status']) && $_GET['status'] !== '' ? $_GET['status'] : null;
+    $search = isset($_GET['search']) ? trim($_GET['search']) : '';
     $page = isset($_GET['page']) ? intval($_GET['page']) : 1;
     $perPage = 10;
-    
     $offset = ($page - 1) * $perPage;
     
-    $sql = "SELECT dr.*, r.first_name, r.last_name, r.email, r.phone 
+    $sql = "SELECT dr.*, r.first_name, r.last_name, r.email, r.phone_number 
             FROM document_requests dr 
             JOIN resident r ON dr.resident_id = r.id";
     
     $countSql = "SELECT COUNT(*) as total FROM document_requests dr JOIN resident r ON dr.resident_id = r.id";
+    
+    $where = [];
     
     if ($status && $status !== 'all') {
         $status = mysqli_real_escape_string($conn, $status);
-        $sql .= " WHERE dr.status = '$status'";
-        $countSql .= " WHERE dr.status = '$status'";
+        $where[] = "dr.status = '$status'";
+    }
+    
+    if ($search !== '') {
+        $searchEsc = mysqli_real_escape_string($conn, $search);
+        $where[] = "(r.first_name LIKE '%$searchEsc%' 
+                     OR r.last_name LIKE '%$searchEsc%' 
+                     OR CONCAT(r.first_name, ' ', r.last_name) LIKE '%$searchEsc%'
+                     OR r.email LIKE '%$searchEsc%' 
+                     OR dr.document_type LIKE '%$searchEsc%'
+                     OR dr.purpose LIKE '%$searchEsc%')";
+    }
+    
+    if (!empty($where)) {
+        $whereClause = " WHERE " . implode(" AND ", $where);
+        $sql .= $whereClause;
+        $countSql .= $whereClause;
     }
     
     $sql .= " ORDER BY dr.request_date DESC LIMIT $offset, $perPage";
@@ -363,38 +108,273 @@ if (isset($_GET['doc_action']) && $_GET['doc_action'] === 'filter_requests') {
     ]);
     exit;
 }
-
-
-// ============ DASHBOARD STATS AJAX HANDLERS ============
-
-// Get document statistics for dashboard
-if (isset($_GET['dashboard_action']) && $_GET['dashboard_action'] === 'get_document_stats') {
-    header('Content-Type: application/json');
     
-    // Get document request stats
-    $docSql = "SELECT 
-                COUNT(*) as total,
-                SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
-                SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) as approved,
-                SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
-                SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) as rejected
-            FROM document_requests";
-    $docResult = mysqli_query($conn, $docSql);
-    $docStats = mysqli_fetch_assoc($docResult);
+    // ============ GET RESIDENT DETAILS ============
+    if (isset($_GET['action']) && $_GET['action'] === 'get_resident' && isset($_GET['id'])) {
+        $id = intval($_GET['id']);
+        $sql = "SELECT id, username, email, first_name, last_name, phone_number, address, 
+                       date_of_birth, gender, is_verified, scanned_document, 
+                       created_at, updated_at, last_login 
+                FROM resident 
+                WHERE id = ? AND is_active = 1";
+        $stmt = mysqli_prepare($conn, $sql);
+        mysqli_stmt_bind_param($stmt, "i", $id);
+        mysqli_stmt_execute($stmt);
+        $result = mysqli_stmt_get_result($stmt);
+        $details = null;
+        if ($result && mysqli_num_rows($result) > 0) {
+            $details = mysqli_fetch_assoc($result);
+            if ($details['scanned_document'] && !empty($details['scanned_document'])) {
+                $docPath = ltrim($details['scanned_document'], '/');
+                if (strpos($docPath, 'uploads/') !== 0) {
+                    $docPath = 'uploads/' . $docPath;
+                }
+                $details['scanned_document'] = $docPath;
+            }
+            echo json_encode(['success' => true, 'data' => $details]);
+        } else {
+            echo json_encode(['success' => false, 'message' => 'Resident not found']);
+        }
+        exit;
+    }
     
-    echo json_encode(['success' => true, 'document' => $docStats]);
+    // ============ GET COUNTS ============
+    if (isset($_GET['action']) && $_GET['action'] === 'get_counts') {
+        $verified = 0;
+        $unverified = 0;
+        $total = 0;
+        $result = mysqli_query($conn, "SELECT COUNT(*) as count FROM resident WHERE is_verified = 1 AND is_active = 1");
+        if ($result) $verified = mysqli_fetch_assoc($result)['count'];
+        $result = mysqli_query($conn, "SELECT COUNT(*) as count FROM resident WHERE is_verified = 0 AND is_active = 1");
+        if ($result) $unverified = mysqli_fetch_assoc($result)['count'];
+        $result = mysqli_query($conn, "SELECT COUNT(*) as count FROM resident WHERE is_active = 1");
+        if ($result) $total = mysqli_fetch_assoc($result)['count'];
+        echo json_encode(['verified' => $verified, 'unverified' => $unverified, 'total' => $total]);
+        exit;
+    }
+    
+    // ============ VERIFY ACCOUNT ============
+    if (isset($_POST['action']) && $_POST['action'] === 'verify_account') {
+        $id = isset($_POST['id']) ? intval($_POST['id']) : 0;
+        if ($id > 0) {
+            $residentSql = "SELECT id, email, first_name, last_name FROM resident WHERE id = ? AND is_active = 1";
+            $residentStmt = mysqli_prepare($conn, $residentSql);
+            mysqli_stmt_bind_param($residentStmt, "i", $id);
+            mysqli_stmt_execute($residentStmt);
+            $residentResult = mysqli_stmt_get_result($residentStmt);
+            $resident = mysqli_fetch_assoc($residentResult);
+            
+            if (!$resident) {
+                echo json_encode(['success' => false, 'message' => 'Resident not found']);
+                exit;
+            }
+            
+            if ($resident['is_verified'] == 1) {
+                echo json_encode(['success' => false, 'message' => 'Account is already verified']);
+                exit;
+            }
+            
+            $sql = "UPDATE resident SET is_verified = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND is_verified = 0";
+            $stmt = mysqli_prepare($conn, $sql);
+            mysqli_stmt_bind_param($stmt, "i", $id);
+            
+            if (mysqli_stmt_execute($stmt) && mysqli_stmt_affected_rows($stmt) > 0) {
+                $emailSent = sendVerificationConfirmationEmail(
+                    $resident['email'], 
+                    $resident['first_name'] . ' ' . $resident['last_name']
+                );
+                echo json_encode([
+                    'success' => true, 
+                    'email_sent' => $emailSent,
+                    'message' => $resident['first_name'] . ' ' . $resident['last_name'] . ' has been verified successfully.',
+                    'email_status' => $emailSent ? 'Email notification sent to ' . $resident['email'] : 'Account verified but email notification failed'
+                ]);
+            } else {
+                echo json_encode(['success' => false, 'message' => 'Failed to verify account.']);
+            }
+        } else {
+            echo json_encode(['success' => false, 'message' => 'Invalid resident ID']);
+        }
+        exit;
+    }
+    
+    // ============ GET REQUEST DETAILS ============
+    if (isset($_POST['doc_action']) && $_POST['doc_action'] === 'get_request_details') {
+        $request_id = intval($_POST['request_id']);
+        $sql = "SELECT dr.*, r.first_name, r.last_name, r.email, r.phone_number, r.address
+                FROM document_requests dr 
+                JOIN resident r ON dr.resident_id = r.id 
+                WHERE dr.id = ?";
+        $stmt = mysqli_prepare($conn, $sql);
+        mysqli_stmt_bind_param($stmt, "i", $request_id);
+        mysqli_stmt_execute($stmt);
+        $result = mysqli_stmt_get_result($stmt);
+        if ($result && $row = mysqli_fetch_assoc($result)) {
+            echo json_encode(['success' => true, 'request' => $row]);
+        } else {
+            echo json_encode(['success' => false, 'message' => 'Request not found']);
+        }
+        exit;
+    }
+    
+    // ============ UPDATE REQUEST STATUS (COMPLETED / REJECTED ONLY) ============
+    // NOTE: Approval, document generation, and QR generation are handled
+    // automatically on the resident portal. Admin only marks COMPLETED or REJECTED.
+    if (isset($_POST['doc_action']) && $_POST['doc_action'] === 'update_request_status') {
+        $request_id = intval($_POST['request_id']);
+        $status = mysqli_real_escape_string($conn, $_POST['status']);
+        $admin_notes = isset($_POST['admin_notes']) ? mysqli_real_escape_string($conn, $_POST['admin_notes']) : null;
+        
+        $admin_id = isset($_SESSION['user_id']) ? intval($_SESSION['user_id']) : 0;
+        $admin_name = '';
+        if ($admin_id > 0) {
+            $adminSql = "SELECT full_name, username FROM admin WHERE id = $admin_id";
+            $adminResult = mysqli_query($conn, $adminSql);
+            if ($adminResult && $row = mysqli_fetch_assoc($adminResult)) {
+                $admin_name = $row['full_name'] ?: $row['username'];
+            }
+        }
+        
+        $additionalFields = "";
+        if ($status === 'claimed') {
+            $additionalFields = ", completed_by = $admin_id, completed_by_name = '$admin_name', completed_at = CURRENT_TIMESTAMP";
+        } elseif ($status === 'rejected') {
+            $additionalFields = ", rejected_by = $admin_id, rejected_by_name = '$admin_name', rejected_at = CURRENT_TIMESTAMP";
+        }
+        
+        $sql = "UPDATE document_requests SET status = ?, admin_notes = ?, processed_date = CURRENT_TIMESTAMP $additionalFields WHERE id = ?";
+        $stmt = mysqli_prepare($conn, $sql);
+        mysqli_stmt_bind_param($stmt, "ssi", $status, $admin_notes, $request_id);
+        
+        if (mysqli_stmt_execute($stmt)) {
+            echo json_encode([
+                'success' => true, 
+                'message' => 'Request status updated successfully',
+                'processed_by' => $admin_name
+            ]);
+        } else {
+            echo json_encode(['success' => false, 'message' => 'Failed to update request status']);
+        }
+        exit;
+    }
+    
+    echo json_encode(['success' => false, 'message' => 'Invalid AJAX action']);
     exit;
 }
 
-// Get recent document requests
-if (isset($_GET['dashboard_action']) && $_GET['dashboard_action'] === 'get_recent_documents') {
-    header('Content-Type: application/json');
-    $limit = isset($_GET['limit']) ? intval($_GET['limit']) : 5;
-    $sql = "SELECT dr.*, r.first_name, r.last_name, r.email 
+// ============ END OF AJAX HANDLERS - NORMAL PAGE LOAD BELOW ============
+
+if (file_exists(__DIR__ . '/../vendor/autoload.php')) {
+    require_once __DIR__ . '/../vendor/autoload.php';
+}
+
+require_once __DIR__ . '/../config/database.php';
+require_once __DIR__ . '/../includes/email_helper.php';
+require_once __DIR__ . '/../includes/DocumentGenerator.php';
+
+if (!isset($_SESSION['user_id']) || $_SESSION['user_type'] !== 'admin') {
+    header('Location: ../sign_in.php');
+    exit();
+}
+
+header("Cache-Control: no-cache, no-store, must-revalidate");
+header("Pragma: no-cache");
+header("Expires: 0");
+
+// ============ FUNCTION DEFINITIONS ============
+
+function getVerifiedResidents($conn) {
+    $sql = "SELECT id, first_name, last_name, email, address, phone_number, is_verified, created_at 
+            FROM resident 
+            WHERE is_verified = 1 AND is_active = 1 
+            ORDER BY created_at DESC";
+    $result = mysqli_query($conn, $sql);
+    $residents = [];
+    if ($result && mysqli_num_rows($result) > 0) {
+        while ($row = mysqli_fetch_assoc($result)) {
+            $residents[] = [
+                'id' => $row['id'],
+                'name' => $row['first_name'] . ' ' . $row['last_name'],
+                'email' => $row['email'],
+                'phone_number' => $row['phone_number'] ?: 'Not provided',
+                'address' => $row['address'] ?: 'Not specified',
+                'status' => 'verified',
+                'created_at' => $row['created_at']
+            ];
+        }
+    }
+    return $residents;
+}
+
+function getUnverifiedResidents($conn) {
+    $sql = "SELECT id, first_name, last_name, email, address, phone_number, is_verified, created_at, scanned_document 
+            FROM resident 
+            WHERE is_verified = 0 AND is_active = 1 
+            ORDER BY created_at DESC";
+    $result = mysqli_query($conn, $sql);
+    $residents = [];
+    if ($result && mysqli_num_rows($result) > 0) {
+        while ($row = mysqli_fetch_assoc($result)) {
+            $docPath = $row['scanned_document'];
+            if ($docPath && !empty($docPath)) {
+                $docPath = ltrim($docPath, '/');
+                if (strpos($docPath, 'uploads/') !== 0) {
+                    $docPath = 'uploads/' . $docPath;
+                }
+            }
+            $residents[] = [
+                'id' => $row['id'],
+                'name' => $row['first_name'] . ' ' . $row['last_name'],
+                'email' => $row['email'],
+                'phone_number' => $row['phone_number'] ?: 'Not provided',
+                'address' => $row['address'] ?: 'Not specified',
+                'status' => 'unverified',
+                'created_at' => $row['created_at'],
+                'scanned_document' => $docPath
+            ];
+        }
+    }
+    return $residents;
+}
+
+function getDashboardCounts($conn) {
+    $verified = 0;
+    $unverified = 0;
+    $total = 0;
+    $result = mysqli_query($conn, "SELECT COUNT(*) as count FROM resident WHERE is_verified = 1 AND is_active = 1");
+    if ($result) $verified = mysqli_fetch_assoc($result)['count'];
+    $result = mysqli_query($conn, "SELECT COUNT(*) as count FROM resident WHERE is_verified = 0 AND is_active = 1");
+    if ($result) $unverified = mysqli_fetch_assoc($result)['count'];
+    $result = mysqli_query($conn, "SELECT COUNT(*) as count FROM resident WHERE is_active = 1");
+    if ($result) $total = mysqli_fetch_assoc($result)['count'];
+    return ['verified' => $verified, 'unverified' => $unverified, 'total' => $total];
+}
+
+function getDocumentTypes($conn) {
+    $sql = "SELECT * FROM document_types ORDER BY name ASC";
+    $result = mysqli_query($conn, $sql);
+    $documents = [];
+    if ($result && mysqli_num_rows($result) > 0) {
+        while ($row = mysqli_fetch_assoc($result)) {
+            $documents[] = $row;
+        }
+    }
+    return $documents;
+}
+
+function getDocumentRequests($conn, $status = null, $page = 1, $perPage = 10) {
+    $offset = ($page - 1) * $perPage;
+    $status = $status && $status !== 'all' ? mysqli_real_escape_string($conn, $status) : null;
+    $countSql = "SELECT COUNT(*) as total FROM document_requests dr JOIN resident r ON dr.resident_id = r.id";
+    if ($status) $countSql .= " WHERE dr.status = '$status'";
+    $countResult = mysqli_query($conn, $countSql);
+    $totalRecords = $countResult ? mysqli_fetch_assoc($countResult)['total'] : 0;
+    $totalPages = ceil($totalRecords / $perPage);
+    $sql = "SELECT dr.*, r.first_name, r.last_name, r.email, r.phone_number, r.address
             FROM document_requests dr 
-            JOIN resident r ON dr.resident_id = r.id 
-            ORDER BY dr.request_date DESC 
-            LIMIT $limit";
+            JOIN resident r ON dr.resident_id = r.id";
+    if ($status) $sql .= " WHERE dr.status = '$status'";
+    $sql .= " ORDER BY dr.request_date DESC LIMIT $offset, $perPage";
     $result = mysqli_query($conn, $sql);
     $requests = [];
     if ($result && mysqli_num_rows($result) > 0) {
@@ -402,269 +382,16 @@ if (isset($_GET['dashboard_action']) && $_GET['dashboard_action'] === 'get_recen
             $requests[] = $row;
         }
     }
-    echo json_encode(['success' => true, 'requests' => $requests]);
-    exit;
+    return ['requests' => $requests, 'totalPages' => $totalPages, 'currentPage' => $page, 'totalRecords' => $totalRecords];
 }
 
-
-
-
-
-
-// Handle AJAX requests to get pending count
-if (isset($_GET['doc_action']) && $_GET['doc_action'] === 'get_pending_count') {
-    header('Content-Type: application/json');
+function getPendingCount($conn) {
     $sql = "SELECT COUNT(*) as count FROM document_requests WHERE status = 'pending'";
     $result = mysqli_query($conn, $sql);
-    $count = 0;
-    if ($result) {
-        $count = mysqli_fetch_assoc($result)['count'];
-    }
-    echo json_encode(['success' => true, 'pending_count' => $count]);
-    exit;
+    return $result ? mysqli_fetch_assoc($result)['count'] : 0;
 }
 
-// Handle AJAX request to get generated document file
-if (isset($_GET['doc_action']) && $_GET['doc_action'] === 'get_document_file') {
-    header('Content-Type: application/json');
-    $request_id = isset($_GET['request_id']) ? intval($_GET['request_id']) : 0;
-    if ($request_id > 0) {
-        $sql = "SELECT document_path, qr_code_path FROM document_requests WHERE id = ?";
-        $stmt = mysqli_prepare($conn, $sql);
-        mysqli_stmt_bind_param($stmt, "i", $request_id);
-        mysqli_stmt_execute($stmt);
-        $result = mysqli_stmt_get_result($stmt);
-        if ($result && $row = mysqli_fetch_assoc($result)) {
-            $filename = $row['document_path'];
-            if ($filename && file_exists(__DIR__ . '/../generated_documents/' . $filename)) {
-                echo json_encode(['success' => true, 'file_path' => $filename, 'qr_code' => $row['qr_code_path']]);
-            } else {
-                echo json_encode(['success' => false, 'message' => 'Document file not found']);
-            }
-        } else {
-            echo json_encode(['success' => false, 'message' => 'Request not found']);
-        }
-    } else {
-        echo json_encode(['success' => false, 'message' => 'Invalid request ID']);
-    }
-    exit;
-}
-
-// Handle AJAX request to get QR code
-if (isset($_GET['doc_action']) && $_GET['doc_action'] === 'get_qr_code') {
-    header('Content-Type: application/json');
-    $request_id = isset($_GET['request_id']) ? intval($_GET['request_id']) : 0;
-    if ($request_id > 0) {
-        $sql = "SELECT qr_code_path, qr_verification_code FROM document_requests WHERE id = ?";
-        $stmt = mysqli_prepare($conn, $sql);
-        mysqli_stmt_bind_param($stmt, "i", $request_id);
-        mysqli_stmt_execute($stmt);
-        $result = mysqli_stmt_get_result($stmt);
-        if ($result && $row = mysqli_fetch_assoc($result)) {
-            $fullPath = $row['qr_code_path'] ? '../' . $row['qr_code_path'] : null;
-            echo json_encode([
-                'success' => true, 
-                'qr_code_path' => $row['qr_code_path'],
-                'full_url' => $fullPath,
-                'verification_code' => $row['qr_verification_code']
-            ]);
-        } else {
-            echo json_encode(['success' => false, 'message' => 'QR code not found']);
-        }
-    } else {
-        echo json_encode(['success' => false, 'message' => 'Invalid request ID']);
-    }
-    exit;
-}
-
-// Get custom fields for a document type
-function getCustomFields($conn, $document_type_id) {
-    $document_type_id = intval($document_type_id);
-    $sql = "SELECT * FROM document_custom_fields WHERE document_type_id = ? AND is_active = 1 ORDER BY sort_order ASC";
-    $stmt = mysqli_prepare($conn, $sql);
-    mysqli_stmt_bind_param($stmt, "i", $document_type_id);
-    mysqli_stmt_execute($stmt);
-    $result = mysqli_stmt_get_result($stmt);
-    $fields = [];
-    if ($result && mysqli_num_rows($result) > 0) {
-        while ($row = mysqli_fetch_assoc($result)) {
-            if ($row['field_options']) {
-                $row['field_options'] = json_decode($row['field_options'], true);
-            }
-            $fields[] = $row;
-        }
-    }
-    return $fields;
-}
-
-// Get custom data for a request
-function getRequestCustomData($conn, $request_id) {
-    $request_id = intval($request_id);
-    $sql = "SELECT field_name, field_value FROM document_requests_custom_data WHERE request_id = ?";
-    $stmt = mysqli_prepare($conn, $sql);
-    mysqli_stmt_bind_param($stmt, "i", $request_id);
-    mysqli_stmt_execute($stmt);
-    $result = mysqli_stmt_get_result($stmt);
-    $data = [];
-    if ($result && mysqli_num_rows($result) > 0) {
-        while ($row = mysqli_fetch_assoc($result)) {
-            $data[$row['field_name']] = $row['field_value'];
-        }
-    }
-    return $data;
-}
-
-// Update request status with auto document generation
-// Update request status with auto document generation and QR code
-// Update request status with auto document generation and QR code (silent QR generation)
-function updateRequestStatus($conn, $request_id, $status, $admin_notes = null) {
-    $request_id = intval($request_id);
-    $status = mysqli_real_escape_string($conn, $status);
-    $admin_notes = $admin_notes ? mysqli_real_escape_string($conn, $admin_notes) : null;
-    
-    $sql = "UPDATE document_requests SET status = ?, admin_notes = ?, processed_date = CURRENT_TIMESTAMP WHERE id = ?";
-    $stmt = mysqli_prepare($conn, $sql);
-    mysqli_stmt_bind_param($stmt, "ssi", $status, $admin_notes, $request_id);
-    
-    if (mysqli_stmt_execute($stmt)) {
-        if ($status === 'approved') {
-            try {
-                // 1. Generate the main document
-                require_once __DIR__ . '/../includes/document_generators/DocumentGeneratorFactory.php';
-                $factory = new DocumentGeneratorFactory($conn);
-                $result = $factory->generateDocument($request_id);
-                
-                // 2. Generate QR Code Silently (No display, just save to database)
-                require_once __DIR__ . '/qrcode/phpqrcode.php';
-                
-                // Get request details for QR code
-                $detailsSql = "SELECT dr.*, r.first_name, r.last_name, r.email 
-                              FROM document_requests dr 
-                              JOIN resident r ON dr.resident_id = r.id 
-                              WHERE dr.id = ?";
-                $detailsStmt = mysqli_prepare($conn, $detailsSql);
-                mysqli_stmt_bind_param($detailsStmt, "i", $request_id);
-                mysqli_stmt_execute($detailsStmt);
-                $detailsResult = mysqli_stmt_get_result($detailsStmt);
-                $requestDetails = mysqli_fetch_assoc($detailsResult);
-                
-                if ($requestDetails) {
-                    // Create QR code directory if not exists
-                    $qrDir = __DIR__ . '/../generated_qrcodes/';
-                    if (!file_exists($qrDir)) {
-                        mkdir($qrDir, 0777, true);
-                    }
-                    
-                    // Generate unique verification code
-                    $verificationCode = md5($request_id . $requestDetails['email'] . time() . uniqid());
-                    
-                    // Create QR data payload
-                    $qrPayload = json_encode([
-                        'request_id' => $request_id,
-                        'document_type' => $requestDetails['document_type'],
-                        'resident_name' => $requestDetails['first_name'] . ' ' . $requestDetails['last_name'],
-                        'resident_email' => $requestDetails['email'],
-                        'issue_date' => date('Y-m-d H:i:s'),
-                        'verification_code' => $verificationCode,
-                        'verified' => false
-                    ]);
-                    
-                    // Generate QR code using phpqrcode
-                    $qrFilename = 'qr_document_' . $request_id . '_' . time() . '.png';
-                    $qrPath = $qrDir . $qrFilename;
-                    
-                    // Generate the QR code image
-                    QRcode::png($qrPayload, $qrPath, QR_ECLEVEL_H, 10, 2);
-                    
-                    // Update database with QR code path and verification code (silent)
-                    if (file_exists($qrPath) && filesize($qrPath) > 0) {
-                        $relativePath = 'generated_qrcodes/' . $qrFilename;
-                        $updateQrSql = "UPDATE document_requests SET qr_code_path = ?, qr_verification_code = ? WHERE id = ?";
-                        $updateQrStmt = mysqli_prepare($conn, $updateQrSql);
-                        mysqli_stmt_bind_param($updateQrStmt, "ssi", $relativePath, $verificationCode, $request_id);
-                        mysqli_stmt_execute($updateQrStmt);
-                        
-                        // Log success (optional - remove if you don't want logs)
-                        error_log("QR Code generated for request {$request_id}");
-                    }
-                }
-                
-                $message = 'Request approved and document generated successfully';
-                
-                return [
-                    'success' => true, 
-                    'message' => $message,
-                    'document_path' => $result['filename'] ?? ''
-                ];
-            } catch (Exception $e) {
-                error_log("Document generation error: " . $e->getMessage());
-                return ['success' => true, 'message' => 'Request approved but document generation error: ' . $e->getMessage()];
-            }
-        }
-        return ['success' => true, 'message' => 'Request status updated successfully'];
-    }
-    return ['success' => false, 'message' => 'Failed to update request status'];
-}
-// Handle AJAX requests for document management
-if (isset($_POST['doc_action'])) {
-    header('Content-Type: application/json');
-    
-    switch ($_POST['doc_action']) {
-        case 'add_document':
-            $result = addDocumentType($conn, $_POST['name'], $_POST['description'], $_POST['fee']);
-            echo json_encode($result);
-            break;
-            
-        case 'update_document':
-            $result = updateDocumentType($conn, $_POST['id'], $_POST['name'], $_POST['description'], $_POST['fee'], $_POST['is_active']);
-            echo json_encode($result);
-            break;
-            
-        case 'delete_document':
-            $result = deleteDocumentType($conn, $_POST['id']);
-            echo json_encode($result);
-            break;
-            
-        case 'get_document':
-            $doc = getDocumentTypeById($conn, $_POST['id']);
-            if ($doc) {
-                echo json_encode(['success' => true, 'data' => $doc]);
-            } else {
-                echo json_encode(['success' => false, 'message' => 'Document not found']);
-            }
-            break;
-            
-       case 'update_request_status':
-            $result = updateRequestStatus($conn, $_POST['request_id'], $_POST['status'], $_POST['admin_notes'] ?? null);
-            echo json_encode($result);
-            break;
-            
-        case 'get_request_details':
-            $request_id = intval($_POST['request_id']);
-            $sql = "SELECT dr.*, r.first_name, r.last_name, r.email, r.phone, r.address 
-                    FROM document_requests dr 
-                    JOIN resident r ON dr.resident_id = r.id 
-                    WHERE dr.id = ?";
-            $stmt = mysqli_prepare($conn, $sql);
-            mysqli_stmt_bind_param($stmt, "i", $request_id);
-            mysqli_stmt_execute($stmt);
-            $result = mysqli_stmt_get_result($stmt);
-            if ($result && $row = mysqli_fetch_assoc($result)) {
-                $custom_data = getRequestCustomData($conn, $request_id);
-                $custom_fields = getCustomFields($conn, $row['document_type_id']);
-                echo json_encode(['success' => true, 'request' => $row, 'custom_data' => $custom_data, 'custom_fields' => $custom_fields]);
-            } else {
-                echo json_encode(['success' => false, 'message' => 'Request not found']);
-            }
-            break;
-            
-        default:
-            echo json_encode(['success' => false, 'message' => 'Invalid action']);
-    }
-    exit;
-}
-
-// Get initial data for page load
+// ============ GET INITIAL DATA ============
 $verifiedAccounts = getVerifiedResidents($conn);
 $unverifiedAccounts = getUnverifiedResidents($conn);
 $counts = getDashboardCounts($conn);
@@ -684,22 +411,17 @@ $pendingCount = getPendingCount($conn);
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
   <title>Barangay System | Admin Dashboard</title>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
-
   <style>
    <?php include 'admin.css'; ?>
   </style>
-
-  <!-- Cropper.js CSS and JS -->
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.5.13/cropper.min.css">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.5.13/cropper.min.js"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.5.13/cropper.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.5.13/cropper.min.js"></script>
 </head>
 <body>
-<!-- Mobile Menu Toggle Button -->
 <button class="menu-toggle" id="menuToggle">
   <i class="fas fa-bars"></i>
 </button>
 
-<!-- Overlay for mobile -->
 <div class="sidebar-overlay hide" id="sidebarOverlay"></div>
 
 <div class="dashboard-container">
@@ -707,9 +429,7 @@ $pendingCount = getPendingCount($conn);
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-header">
       <div class="brand">
-        <div class="logo-container">
-          <img src="logo.jpg" alt="Barangay Logo" onerror="this.onerror=null; this.parentElement.innerHTML='<i class=\'fas fa-landmark\'></i>';">
-        </div>
+         <div class="logo-container"><img src="../logo.jpg" alt="Logo"></div>
         <h2>BRITE</h2>
       </div>
       <div class="sidebar-sub">San Bartolome, Sto Tomas, Pampanga</div>
@@ -719,6 +439,11 @@ $pendingCount = getPendingCount($conn);
         <i class="fas fa-tachometer-alt"></i>
         <span>Dashboard</span>
       </div>
+
+<div class="nav-item standalone" data-view="household">
+    <i class="fas fa-home"></i>
+    <span>Household</span>
+</div>
       
       <div class="nav-item has-submenu" id="accountsParent">
         <i class="fas fa-id-card"></i>
@@ -747,20 +472,19 @@ $pendingCount = getPendingCount($conn);
   <i class="fas fa-chevron-down toggle-icon"></i>
 </div>
 <ul class="submenu" id="equipmentSubmenu">
-     
   <li><a data-subview="equipment_list" class="sub-option"><i class="fas fa-list"></i> Equipment List</a></li>
   <li><a data-subview="equipment_bookings" class="sub-option"><i class="fas fa-calendar-alt"></i> Bookings</a></li>
- 
 </ul>
+
 <div class="nav-item has-submenu" id="officialsParent">
     <i class="fas fa-users-cog"></i>
     <span>Officials & Staff</span>
     <i class="fas fa-chevron-down toggle-icon"></i>
 </div>
 <ul class="submenu" id="officialsSubmenu">
-    <li><a data-subview="manage_officials" class="sub-option"><i class="fas fa-user-tie"></i> Manage Officials</a></li>
+    <li><a data-subview="manage_officials" class="sub-option"><i class="fas fa-user-tie"></i> Barangay Officials</a></li>
+    <li><a data-subview="manage_lupon" class="sub-option"><i class="fas fa-gavel"></i> Lupon Tagapamayapa</a></li>
 </ul>
-
 
       <div class="nav-item standalone" data-view="reports">
         <i class="fas fa-chart-line"></i>
@@ -833,7 +557,6 @@ $pendingCount = getPendingCount($conn);
           <button class="cert-action-btn download" onclick="downloadCertification()">
             <i class="fas fa-download"></i> Download
           </button>
-          
           <button class="cert-action-btn close" onclick="closeCertification()">
             <i class="fas fa-times"></i> Close
           </button>
@@ -844,11 +567,7 @@ $pendingCount = getPendingCount($conn);
       </div>
     </div>
 
-    <!-- QR Code Section -->
-    
-
     <div class="dashboard-body" id="dashboardBody">
-      <!-- Dynamic content will be loaded here -->
     </div>
   </main>
 </div>
@@ -907,26 +626,7 @@ $pendingCount = getPendingCount($conn);
   </div>
 </div>
 
-<!-- Approval Modal with Notes -->
-<div id="approvalModal" class="modal">
-  <div class="modal-content approval-modal">
-    <div class="modal-header">
-      <h2><i class="fas fa-check-circle"></i> Approve Request</h2>
-      <button class="close-modal" onclick="closeApprovalModal()">&times;</button>
-    </div>
-    <div class="modal-body">
-      <div class="notification-icon warning" style="text-align:center;"><i class="fas fa-pen-alt"></i></div>
-      <div class="notification-title" style="text-align:center;">Add Admin Notes/Response</div>
-      <div class="notification-message" style="text-align:center;">You can add optional notes or response that will be included in the request record.</div>
-      <textarea id="approvalNotes" class="approval-notes" rows="4" placeholder="Enter notes or response for this approval... (Optional)"></textarea>
-      <div class="verify-buttons">
-        <button class="btn-confirm" id="confirmApprovalBtn" onclick="submitApproval()"><i class="fas fa-check-circle"></i> Confirm Approval</button>
-        <button class="btn-cancel" onclick="closeApprovalModal()"><i class="fas fa-times"></i> Cancel</button>
-      </div>
-      <div id="approvalStatus" class="email-status" style="display:none;"></div>
-    </div>
-  </div>
-</div>
+<!-- NOTE: Approval Modal removed - auto-approved on resident portal -->
 
 <!-- Equipment Management Modals -->
 <div id="equipmentModal" class="modal">
@@ -991,8 +691,6 @@ $pendingCount = getPendingCount($conn);
   </div>
 </div>
 
-
-<!-- Schedule Modal -->
 <div id="scheduleModal" class="modal">
     <div class="modal-content" style="max-width: 900px; width: 95%;">
         <div class="modal-header">
@@ -1008,7 +706,6 @@ $pendingCount = getPendingCount($conn);
     </div>
 </div>
 
-<!-- Day Bookings Modal -->
 <div id="dayBookingsModal" class="modal">
     <div class="modal-content" style="max-width: 600px;">
         <div class="modal-header">
@@ -1024,7 +721,6 @@ $pendingCount = getPendingCount($conn);
     </div>
 </div>
 
-<!-- Equipment Items Modal -->
 <div id="equipmentItemsModal" class="modal">
     <div class="modal-content" style="max-width: 600px;">
         <div class="modal-header">
@@ -1038,7 +734,6 @@ $pendingCount = getPendingCount($conn);
     </div>
 </div>
 
-<!-- Manage Individual Item Modal -->
 <div id="manageItemModal" class="modal">
     <div class="modal-content" style="max-width: 500px;">
         <div class="modal-header">
@@ -1054,15 +749,67 @@ $pendingCount = getPendingCount($conn);
     </div>
 </div>
 
+  </main>
+</div>
+
 <!-- External JavaScript -->
 <script src="equipment.js"></script>
 <script src="admin_management.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+<script src="emergency_checker.js"></script>
 
+<script>
+// Initialize emergency checker when page is fully loaded
+document.addEventListener('DOMContentLoaded', function() {
+    console.log('DOM ready - initializing emergency checker');
+    if (typeof initEmergencyChecker === 'function') {
+        initEmergencyChecker();
+    } else {
+        console.error('initEmergencyChecker not found - check if emergency_checker.js loaded');
+    }
+    if (!document.getElementById('emergencyListContainer')) {
+        const emergencySection = document.querySelector('.emergency-section');
+        if (emergencySection) {
+            const container = document.createElement('div');
+            container.id = 'emergencyListContainer';
+            container.className = 'activity-list';
+            container.style.maxHeight = '400px';
+            container.style.overflowY = 'auto';
+            emergencySection.querySelector('.activity-card').appendChild(container);
+        }
+    }
+});
+
+function refreshEmergencyList() {
+    if (typeof loadExistingEmergencies === 'function') {
+        loadExistingEmergencies();
+    } else {
+        location.reload();
+    }
+}
+
+function renderEmergencyView() {
+    return `
+        <div class="content-card">
+            <div class="section-title">
+                <i class="fas fa-bell" style="color: #dc3545;"></i> Emergency Alerts
+            </div>
+            <div class="section-sub">
+                Live emergency reports from the hotline system
+            </div>
+            <div id="emergencyListContainer" class="activity-list" style="max-height: 600px; overflow-y: auto;">
+                <div class="loading-spinner-mini"><i class="fas fa-spinner fa-spin"></i> Loading emergencies...</div>
+            </div>
+        </div>
+    `;
+}
+
+setTimeout(addEmergencyNavItem, 1000);
+</script>
 
 <script>
 // ============ OFFICIALS & STAFF MANAGEMENT ============
 
-// Add event listener for officials menu
 const officialsParent = document.getElementById('officialsParent');
 const officialsSubmenu = document.getElementById('officialsSubmenu');
 let officialsExpanded = false;
@@ -1099,20 +846,20 @@ officialSubOptions.forEach(opt => {
         document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active-parent', 'active'));
         if (officialsParent) officialsParent.classList.add('active-parent');
         
-      // Inside the officials menu click handler, change:
-if (view === 'manage_officials') {
-    document.getElementById('dashboardBody').innerHTML = renderAdminManagement();
-    await loadAdmins(1);  // Changed from loadAdmins('all', 1)
-    closeCertification();
-}
+        if (view === 'manage_officials') {
+            document.getElementById('dashboardBody').innerHTML = renderAdminManagement();
+            await loadAdmins(1);
+            closeCertification();
+        } else if (view === 'manage_lupon') {
+            document.getElementById('dashboardBody').innerHTML = renderLuponManagement();
+            await loadLuponMembers(1);
+            closeCertification();
+        }
         
         if (!officialsExpanded) toggleOfficialsSubmenu(true);
         closeDropdown();
     });
 });
-
-
-
 // PHP data passed to JavaScript
 const verifiedAccountsData = <?php echo json_encode($verifiedAccounts); ?>;
 const unverifiedAccountsData = <?php echo json_encode($unverifiedAccounts); ?>;
@@ -1124,7 +871,6 @@ const initialPendingCount = <?php echo $pendingCount; ?>;
 let pendingVerifyId = null;
 let pendingVerifyName = null;
 let pendingVerifyEmail = null;
-let pendingApprovalRequestId = null;
 let currentCertificationRequestId = null;
 let currentCertificationFilename = null;
 let currentCertificationDocType = null;
@@ -1132,23 +878,18 @@ let currentCertificationResident = null;
 let currentQRCodePath = null;
 
 // Request list variables
-let currentFilterStatus = 'pending';
+let currentFilterStatus = 'all';
 let currentPage = 1;
 let totalPages = 1;
 let currentRequestsData = [];
-
+let currentSearchQuery = '';
 
 function closeEquipmentItemsModal() {
     const modal = document.getElementById('equipmentItemsModal');
     if (modal) modal.style.display = 'none';
 }
 
-
-
 // ============ MODAL NOTIFICATION SYSTEM ============
-
-
-
 
 function showSuccessModal(message, title = 'Success!', autoClose = true) {
     showNotificationModal('success', title, message, autoClose);
@@ -1252,14 +993,6 @@ function openDocument(documentPath) {
     window.open(fullPath, '_blank');
 }
 
-// ============ QR CODE FUNCTIONS ============
-
-
-
-
-
-
-
 // ============ CERTIFICATION SECTION FUNCTIONS ============
 
 function showCertification(filename, requestId, documentType, residentName) {
@@ -1286,14 +1019,9 @@ function closeCertification() {
     const section = document.getElementById('certificationSection');
     const iframe = document.getElementById('certificationIframe');
     section.classList.remove('visible');
-    
-    setTimeout(() => {
-        iframe.src = '';
-    }, 300);
-    
+    setTimeout(() => { iframe.src = ''; }, 300);
     currentCertificationRequestId = null;
     currentCertificationFilename = null;
-
 }
 
 function printCertification() {
@@ -1309,24 +1037,54 @@ function downloadCertification() {
     }
 }
 
-// Load filtered requests
-async function loadFilteredRequests(status, page = 1) {
+async function loadFilteredRequests(status, page = 1, search = null) {
     currentFilterStatus = status;
     currentPage = page;
+    // If search is null, use the stored global search value (so pagination preserves it)
+    if (search === null) {
+        search = currentSearchQuery;
+    } else {
+        currentSearchQuery = search;
+    }
     try {
-        const url = `${window.location.href}?doc_action=filter_requests&status=${status}&page=${page}`;
+        let url = `${window.location.href}?doc_action=filter_requests&status=${status}&page=${page}`;
+        if (search && search.trim() !== '') {
+            url += `&search=${encodeURIComponent(search.trim())}`;
+        }
         const response = await fetch(url);
         const data = await response.json();
-        if (data.success) {
+               if (data.success) {
             currentRequestsData = data.data;
             totalPages = data.totalPages;
-            const dashboardBody = document.getElementById('dashboardBody');
-            if (dashboardBody) dashboardBody.innerHTML = renderRequestList();
+            // Only refresh the results area, keep the search input + filter bar intact
+            if (document.getElementById('requestResultsContainer')) {
+                renderRequestResultsOnly();
+            } else {
+                const dashboardBody = document.getElementById('dashboardBody');
+                if (dashboardBody) dashboardBody.innerHTML = renderRequestList();
+            }
         }
     } catch (error) { showErrorModal('Failed to load document requests.', 'Error'); }
 }
 
-// Generate pagination HTML
+// Search handler (debounced)
+let searchDebounceTimer = null;
+function onSearchInput(value) {
+    clearTimeout(searchDebounceTimer);
+    // Persist input value so re-render doesn't lose it
+    currentSearchQuery = value;
+    searchDebounceTimer = setTimeout(() => {
+        loadFilteredRequests(currentFilterStatus, 1, value);
+    }, 400);
+}
+
+// Clear search
+function clearRequestSearch() {
+    currentSearchQuery = '';
+    const input = document.getElementById('requestSearchInput');
+    if (input) input.value = '';
+    loadFilteredRequests(currentFilterStatus, 1, '');
+}
 function generatePaginationHtml() {
     if (totalPages <= 1) return '';
     let html = '<div class="pagination-wrapper"><div class="pagination">';
@@ -1348,7 +1106,6 @@ function generatePaginationHtml() {
     return html;
 }
 
-// Render Request Cards
 function renderRequestList() {
     const requestData = currentRequestsData;
     
@@ -1359,53 +1116,92 @@ function renderRequestList() {
     };
     
     const getStatusClass = (status) => {
-        switch(status) {
-            case 'pending': return 'pending';
-            case 'approved': return 'approved';
-            case 'completed': return 'completed';
-            case 'rejected': return 'rejected';
-            default: return 'pending';
-        }
-    };
+    switch(status) {
+        case 'pending': return 'pending';
+        case 'approved': return 'approved';
+        case 'unclaimed': return 'approved';
+        case 'claimed': return 'completed';
+        case 'rejected': return 'rejected';
+        default: return 'pending';
+    }
+};
     
-    const getStatusText = (status) => {
+       const getStatusText = (status) => {
         switch(status) {
             case 'pending': return 'Pending';
             case 'approved': return 'Approved';
-            case 'completed': return 'Completed';
+            case 'unclaimed': return 'Unclaimed';
+            case 'claimed': return 'Claimed';
             case 'rejected': return 'Rejected';
             default: return status;
         }
     };
     
+    // Filter bar HTML (reused for empty state and list)
+    const filterBarHtml = `
+        <div class="filter-bar" style="display:flex; flex-wrap:wrap; gap:12px; align-items:center;">
+            <button class="filter-chip ${currentFilterStatus === 'all' ? 'active' : ''}" onclick="loadFilteredRequests('all', 1)">All Requests</button>
+            <button class="filter-chip ${currentFilterStatus === 'approved' ? 'active' : ''}" onclick="loadFilteredRequests('approved', 1)">Approved</button>
+            <button class="filter-chip ${currentFilterStatus === 'unclaimed' ? 'active' : ''}" onclick="loadFilteredRequests('unclaimed', 1)">Unclaimed</button>
+            <button class="filter-chip ${currentFilterStatus === 'claimed' ? 'active' : ''}" onclick="loadFilteredRequests('claimed', 1)">Claimed</button>
+            <button class="filter-chip ${currentFilterStatus === 'rejected' ? 'active' : ''}" onclick="loadFilteredRequests('rejected', 1)">Rejected</button>
+            
+            <div class="request-search-wrapper" style="position:relative; flex:1; min-width:220px; max-width:380px; margin-left:auto;">
+                <i class="fas fa-search" style="position:absolute; left:14px; top:50%; transform:translateY(-50%); color:#8ba88e; pointer-events:none;"></i>
+                <input 
+                    type="text" 
+                    id="requestSearchInput"
+                    class="request-search-input"
+                    placeholder="Search by name, email, document type, or purpose..."
+                    value="${escapeHtml(currentSearchQuery)}"
+                    oninput="onSearchInput(this.value)"
+                    style="width:100%; padding:9px 36px 9px 38px; border:1px solid #e2efe8; border-radius:40px; font-size:13px; outline:none; transition:all 0.2s; background:#f8faf8;"
+                />
+                ${currentSearchQuery ? `
+                    <button 
+                        onclick="clearRequestSearch()" 
+                        title="Clear search"
+                        style="position:absolute; right:10px; top:50%; transform:translateY(-50%); background:none; border:none; color:#8ba88e; cursor:pointer; font-size:14px; padding:4px 8px; border-radius:50%; transition:all 0.2s;"
+                        onmouseover="this.style.background='#e2efe8'; this.style.color='#1a472a';"
+                        onmouseout="this.style.background='none'; this.style.color='#8ba88e';"
+                    >
+                        <i class="fas fa-times"></i>
+                    </button>
+                ` : ''}
+            </div>
+        </div>
+    `;
+    
+    // Empty state
     if (requestData.length === 0) {
-        return `
+        let emptyMessage = `No ${currentFilterStatus === 'all' ? '' : currentFilterStatus + ' '}document requests found.`;
+        if (currentSearchQuery) {
+            emptyMessage = `No requests match "${escapeHtml(currentSearchQuery)}". Try a different search term.`;
+        }
+             return `
             <div class="content-card">
                 <div class="section-title"><i class="fas fa-list-alt"></i> Document Requests</div>
                 <div class="section-sub">Manage and process document requests from residents</div>
-                <div class="filter-bar">
-                    <button class="filter-chip ${currentFilterStatus === 'pending' ? 'active' : ''}" onclick="loadFilteredRequests('pending', 1)">Pending ${initialPendingCount > 0 ? `<span class="pending-count">${initialPendingCount}</span>` : ''}</button>
-                    <button class="filter-chip ${currentFilterStatus === 'approved' ? 'active' : ''}" onclick="loadFilteredRequests('approved', 1)">Approved</button>
-                    <button class="filter-chip ${currentFilterStatus === 'completed' ? 'active' : ''}" onclick="loadFilteredRequests('completed', 1)">Completed</button>
-                    <button class="filter-chip ${currentFilterStatus === 'rejected' ? 'active' : ''}" onclick="loadFilteredRequests('rejected', 1)">Rejected</button>
-                </div>
-                <div class="empty-state">
-                    <i class="fas fa-inbox"></i>
-                    <p>No ${currentFilterStatus} document requests found.</p>
+                ${filterBarHtml}
+                <div id="requestResultsContainer">
+                    <div class="empty-state">
+                        <i class="fas fa-inbox"></i>
+                        <p>${emptyMessage}</p>
+                    </div>
                 </div>
             </div>
         `;
     }
     
     const cardsHtml = requestData.map(req => `
-        <div class="data-card" onclick="viewRequestDetails(${req.id})">
+        <div class="data-card" onclick="viewRequestDetails(${req.id})" data-id="${req.id}">
             <div class="card-header-gradient ${getStatusClass(req.status)}">
                 <div class="card-title-large">
                     <i class="fas fa-file-alt"></i>
                     <span>${escapeHtml(req.document_type)}</span>
                 </div>
                 <div class="status-chip">
-                    <i class="fas ${req.status === 'pending' ? 'fa-clock' : req.status === 'approved' ? 'fa-check-circle' : req.status === 'completed' ? 'fa-check-double' : 'fa-times-circle'}"></i>
+                   <i class="fas ${req.status === 'pending' ? 'fa-clock' : (req.status === 'approved' || req.status === 'unclaimed') ? 'fa-check-circle' : req.status === 'claimed' ? 'fa-check-double' : 'fa-times-circle'}"></i>
                     ${getStatusText(req.status)}
                 </div>
             </div>
@@ -1436,7 +1232,6 @@ function renderRequestList() {
                         <div class="info-label-card">Fee:</div>
                         <div class="info-value-card">₱${parseFloat(req.fee || 0).toFixed(2)}</div>
                     </div>
-                    
                 </div>
             </div>
             <div class="click-hint">
@@ -1445,32 +1240,145 @@ function renderRequestList() {
         </div>
     `).join('');
     
-    return `
+    // Result count summary
+    const resultSummary = currentSearchQuery ? `
+        <div style="margin-bottom:14px; font-size:13px; color:#5f7f6e;">
+            <i class="fas fa-search"></i> Found <strong>${requestData.length}</strong> matching request(s) for "<strong>${escapeHtml(currentSearchQuery)}</strong>"
+        </div>
+    ` : '';
+    
+       return `
         <div class="content-card">
             <div class="section-title"><i class="fas fa-list-alt"></i> Document Requests</div>
             <div class="section-sub">Click on any card to view details and process requests</div>
-            <div class="filter-bar">
-                <button class="filter-chip ${currentFilterStatus === 'pending' ? 'active' : ''}" onclick="loadFilteredRequests('pending', 1)">Pending ${initialPendingCount > 0 ? `<span class="pending-count">${initialPendingCount}</span>` : ''}</button>
-                <button class="filter-chip ${currentFilterStatus === 'approved' ? 'active' : ''}" onclick="loadFilteredRequests('approved', 1)">Approved</button>
-                <button class="filter-chip ${currentFilterStatus === 'completed' ? 'active' : ''}" onclick="loadFilteredRequests('completed', 1)">Completed</button>
-                <button class="filter-chip ${currentFilterStatus === 'rejected' ? 'active' : ''}" onclick="loadFilteredRequests('rejected', 1)">Rejected</button>
+            ${filterBarHtml}
+            <div id="requestResultsContainer">
+                ${resultSummary}
+                <div class="cards-grid" id="requestsCardsGrid">
+                    ${cardsHtml}
+                </div>
+                ${generatePaginationHtml()}
             </div>
-            <div class="cards-grid">
-                ${cardsHtml}
-            </div>
-            ${generatePaginationHtml()}
         </div>
     `;
 }
 
-// Account Card Rendering
+// Renders ONLY the results area (cards + pagination) without touching the search input
+function renderRequestResultsOnly() {
+    const container = document.getElementById('requestResultsContainer');
+    if (!container) return;
+    
+    const requestData = currentRequestsData;
+    
+    const formatDate = (dateString) => {
+        if (!dateString) return '-';
+        const date = new Date(dateString);
+        return date.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+    };
+    
+    const getStatusClass = (status) => {
+        switch(status) {
+            case 'pending': return 'pending';
+            case 'approved': return 'approved';
+            case 'completed': return 'completed';
+            case 'rejected': return 'rejected';
+            default: return 'pending';
+        }
+    };
+    
+    const getStatusText = (status) => {
+        switch(status) {
+            case 'pending': return 'Pending';
+            case 'approved': return 'Approved';
+            case 'completed': return 'Completed';
+            case 'rejected': return 'Rejected';
+            default: return status;
+        }
+    };
+    
+    if (requestData.length === 0) {
+        let emptyMessage = `No ${currentFilterStatus === 'all' ? '' : currentFilterStatus + ' '}document requests found.`;
+        if (currentSearchQuery) {
+            emptyMessage = `No requests match "${escapeHtml(currentSearchQuery)}". Try a different search term.`;
+        }
+        container.innerHTML = `
+            <div class="empty-state">
+                <i class="fas fa-inbox"></i>
+                <p>${emptyMessage}</p>
+            </div>
+        `;
+        return;
+    }
+    
+    const cardsHtml = requestData.map(req => `
+        <div class="data-card" onclick="viewRequestDetails(${req.id})" data-id="${req.id}">
+            <div class="card-header-gradient ${getStatusClass(req.status)}">
+                <div class="card-title-large">
+                    <i class="fas fa-file-alt"></i>
+                    <span>${escapeHtml(req.document_type)}</span>
+                </div>
+                <div class="status-chip">
+                   <i class="fas ${req.status === 'pending' ? 'fa-clock' : (req.status === 'approved' || req.status === 'unclaimed') ? 'fa-check-circle' : req.status === 'claimed' ? 'fa-check-double' : 'fa-times-circle'}"></i>
+                    ${getStatusText(req.status)}
+                </div>
+            </div>
+            <div class="card-content">
+                <div class="info-section">
+                    <div class="info-row-card">
+                        <div class="info-icon"><i class="fas fa-user"></i></div>
+                        <div class="info-label-card">Resident:</div>
+                        <div class="info-value-card"><strong>${escapeHtml(req.first_name)} ${escapeHtml(req.last_name)}</strong></div>
+                    </div>
+                    <div class="info-row-card">
+                        <div class="info-icon"><i class="fas fa-envelope"></i></div>
+                        <div class="info-label-card">Email:</div>
+                        <div class="info-value-card">${escapeHtml(req.email)}</div>
+                    </div>
+                    <div class="info-row-card">
+                        <div class="info-icon"><i class="fas fa-calendar"></i></div>
+                        <div class="info-label-card">Request Date:</div>
+                        <div class="info-value-card">${formatDate(req.request_date)}</div>
+                    </div>
+                    <div class="info-row-card">
+                        <div class="info-icon"><i class="fas fa-copy"></i></div>
+                        <div class="info-label-card">Quantity:</div>
+                        <div class="info-value-card">${req.quantity || 1}</div>
+                    </div>
+                    <div class="info-row-card">
+                        <div class="info-icon"><i class="fas fa-money-bill"></i></div>
+                        <div class="info-label-card">Fee:</div>
+                        <div class="info-value-card">₱${parseFloat(req.fee || 0).toFixed(2)}</div>
+                    </div>
+                </div>
+            </div>
+            <div class="click-hint">
+                <i class="fas fa-mouse-pointer"></i> Click to view details and take action
+            </div>
+        </div>
+    `).join('');
+    
+    const resultSummary = currentSearchQuery ? `
+        <div style="margin-bottom:14px; font-size:13px; color:#5f7f6e;">
+            <i class="fas fa-search"></i> Found <strong>${requestData.length}</strong> matching request(s) for "<strong>${escapeHtml(currentSearchQuery)}</strong>"
+        </div>
+    ` : '';
+    
+    container.innerHTML = `
+        ${resultSummary}
+        <div class="cards-grid" id="requestsCardsGrid">
+            ${cardsHtml}
+        </div>
+        ${generatePaginationHtml()}
+    `;
+}
+
 function renderVerifiedAccounts() {
     if (verifiedAccountsData.length === 0) {
         return `<div class="content-card"><div class="section-title"><i class="fas fa-check-circle"></i> Verified Accounts</div><div class="empty-state"><i class="fas fa-users fa-3x"></i><p>No verified accounts yet.</p></div></div>`;
     }
     
     const cardsHtml = verifiedAccountsData.map(acc => `
-        <div class="data-card" onclick="showResidentDetails(${acc.id}, '${escapeHtml(acc.name)}')">
+        <div class="data-card" onclick="showResidentDetails(${acc.id}, '${escapeHtml(acc.name)}')" data-id="${acc.id}">
             <div class="card-header-gradient verified">
                 <div class="card-title-large">
                     <i class="fas fa-user-check"></i>
@@ -1488,7 +1396,7 @@ function renderVerifiedAccounts() {
                     <div class="info-row-card">
                         <div class="info-icon"><i class="fas fa-phone"></i></div>
                         <div class="info-label-card">Phone:</div>
-                        <div class="info-value-card">${escapeHtml(acc.phone)}</div>
+                        <div class="info-value-card">${escapeHtml(acc.phone_number)}</div>
                     </div>
                     <div class="info-row-card">
                         <div class="info-icon"><i class="fas fa-map-marker-alt"></i></div>
@@ -1503,7 +1411,7 @@ function renderVerifiedAccounts() {
         </div>
     `).join('');
     
-    return `<div class="content-card"><div class="section-title"><i class="fas fa-check-circle"></i> Verified Accounts</div><div class="section-sub">Click on any card to view full resident details</div><div class="cards-grid">${cardsHtml}</div></div>`;
+    return `<div class="content-card"><div class="section-title"><i class="fas fa-check-circle"></i> Verified Accounts</div><div class="section-sub">Click on any card to view full resident details</div><div class="cards-grid" id="verifiedCardsGrid">${cardsHtml}</div></div>`;
 }
 
 function renderUnverifiedAccounts() {
@@ -1512,7 +1420,7 @@ function renderUnverifiedAccounts() {
     }
     
     const cardsHtml = unverifiedAccountsData.map(acc => `
-        <div class="data-card" onclick="showResidentDetails(${acc.id}, '${escapeHtml(acc.name)}')">
+        <div class="data-card" onclick="showResidentDetails(${acc.id}, '${escapeHtml(acc.name)}')" data-id="${acc.id}">
             <div class="card-header-gradient unverified">
                 <div class="card-title-large">
                     <i class="fas fa-user-clock"></i>
@@ -1530,7 +1438,7 @@ function renderUnverifiedAccounts() {
                     <div class="info-row-card">
                         <div class="info-icon"><i class="fas fa-phone"></i></div>
                         <div class="info-label-card">Phone:</div>
-                        <div class="info-value-card">${escapeHtml(acc.phone)}</div>
+                        <div class="info-value-card">${escapeHtml(acc.phone_number)}</div>
                     </div>
                     <div class="info-row-card">
                         <div class="info-icon"><i class="fas fa-map-marker-alt"></i></div>
@@ -1545,7 +1453,7 @@ function renderUnverifiedAccounts() {
         </div>
     `).join('');
     
-    return `<div class="content-card"><div class="section-title"><i class="fas fa-clock"></i> Not Verified Accounts</div><div class="section-sub">Click on any card to verify the account or view full details</div><div class="cards-grid">${cardsHtml}</div></div>`;
+    return `<div class="content-card"><div class="section-title"><i class="fas fa-clock"></i> Not Verified Accounts</div><div class="section-sub">Click on any card to verify the account or view full details</div><div class="cards-grid" id="unverifiedCardsGrid">${cardsHtml}</div></div>`;
 }
 
 function renderManageDocuments() {
@@ -1582,13 +1490,12 @@ function renderManageDocuments() {
         </div>
     `).join('');
     
-    return `<div class="content-card"><div class="section-title"><i class="fas fa-cog"></i> Manage Documents</div><div class="section-sub">Configure document types, fees, and availability</div><div style="margin-bottom:20px;"><button class="btn-verify" onclick="showAddDocumentModal()"><i class="fas fa-plus"></i> Add New Document</button></div><div class="cards-grid">${cardsHtml}</div></div>`;
+    return `<div class="content-card"><div class="section-title"><i class="fas fa-cog"></i> Manage Documents</div><div class="section-sub">Configure document types, fees, and availability</div><div style="margin-bottom:20px;"></div><div class="cards-grid">${cardsHtml}</div></div>`;
 }
 
 function renderDashboardDefault() {
     return `
     <div class="modern-dashboard">
-        <!-- Welcome Section -->
         <div class="welcome-card">
             <div class="welcome-content">
                 <div class="welcome-text">
@@ -1602,12 +1509,9 @@ function renderDashboardDefault() {
             </div>
         </div>
         
-        <!-- Stats Grid - Main Metrics -->
         <div class="stats-grid-modern">
             <div class="stat-card-modern">
-                <div class="stat-icon residents">
-                    <i class="fas fa-users"></i>
-                </div>
+                <div class="stat-icon residents"><i class="fas fa-users"></i></div>
                 <div class="stat-info">
                     <h3>${dashboardCounts.total}</h3>
                     <p>Total Residents</p>
@@ -1616,20 +1520,16 @@ function renderDashboardDefault() {
             </div>
             
             <div class="stat-card-modern">
-                <div class="stat-icon verified">
-                    <i class="fas fa-check-circle"></i>
-                </div>
+                <div class="stat-icon verified"><i class="fas fa-check-circle"></i></div>
                 <div class="stat-info">
                     <h3>${dashboardCounts.verified}</h3>
                     <p>Verified Accounts</p>
-                    <span class="stat-trend positive"><i class="fas fa-chart-line"></i> ${Math.round((dashboardCounts.verified/dashboardCounts.total)*100)}% verified</span>
+                    <span class="stat-trend positive"><i class="fas fa-chart-line"></i> ${dashboardCounts.total > 0 ? Math.round((dashboardCounts.verified/dashboardCounts.total)*100) : 0}% verified</span>
                 </div>
             </div>
             
             <div class="stat-card-modern">
-                <div class="stat-icon documents">
-                    <i class="fas fa-file-alt"></i>
-                </div>
+                <div class="stat-icon documents"><i class="fas fa-file-alt"></i></div>
                 <div class="stat-info">
                     <h3 id="docTotalCount">-</h3>
                     <p>Document Requests</p>
@@ -1638,9 +1538,7 @@ function renderDashboardDefault() {
             </div>
             
             <div class="stat-card-modern">
-                <div class="stat-icon equipment">
-                    <i class="fas fa-tools"></i>
-                </div>
+                <div class="stat-icon equipment"><i class="fas fa-tools"></i></div>
                 <div class="stat-info">
                     <h3 id="equipTotalItems">-</h3>
                     <p>Equipment Items</p>
@@ -1649,67 +1547,34 @@ function renderDashboardDefault() {
             </div>
         </div>
         
-        <!-- Secondary Stats Row -->
         <div class="stats-row-modern">
             <div class="stat-card-secondary">
-                <div class="stat-header">
-                    <i class="fas fa-file-signature"></i>
-                    <span>Document Status</span>
-                </div>
+                <div class="stat-header"><i class="fas fa-file-signature"></i><span>Document Status</span></div>
                 <div class="stat-values">
-                    <div class="value-item">
-                        <span class="value-label">Pending</span>
-                        <span class="value-number" id="docPendingCount">-</span>
-                    </div>
-                    <div class="value-item">
-                        <span class="value-label">Approved</span>
-                        <span class="value-number" id="docApprovedCount">-</span>
-                    </div>
-                    <div class="value-item">
-                        <span class="value-label">Completed</span>
-                        <span class="value-number" id="docCompletedCount">-</span>
-                    </div>
-                    <div class="value-item">
-                        <span class="value-label">Rejected</span>
-                        <span class="value-number" id="docRejectedCount">-</span>
-                    </div>
+                    <div class="value-item"><span class="value-label">Pending</span><span class="value-number" id="docPendingCount">-</span></div>
+<div class="value-item"><span class="value-label">Approved</span><span class="value-number" id="docApprovedCount">-</span></div>
+<div class="value-item"><span class="value-label">Unclaimed</span><span class="value-number" id="docUnclaimedCount">-</span></div>
+<div class="value-item"><span class="value-label">Claimed</span><span class="value-number" id="docClaimedCount">-</span></div>
+<div class="value-item"><span class="value-label">Rejected</span><span class="value-number" id="docRejectedCount">-</span></div>
                 </div>
             </div>
             
             <div class="stat-card-secondary">
-                <div class="stat-header">
-                    <i class="fas fa-tools"></i>
-                    <span>Equipment Status</span>
-                </div>
+                <div class="stat-header"><i class="fas fa-tools"></i><span>Equipment Status</span></div>
                 <div class="stat-values">
-                    <div class="value-item">
-                        <span class="value-label">Available</span>
-                        <span class="value-number success" id="equipAvailableCount">-</span>
-                    </div>
-                    <div class="value-item">
-                        <span class="value-label">Borrowed</span>
-                        <span class="value-number warning" id="equipBorrowedCount">-</span>
-                    </div>
-                    <div class="value-item">
-                        <span class="value-label">Maintenance</span>
-                        <span class="value-number danger" id="equipMaintenanceCount">-</span>
-                    </div>
-                    <div class="value-item">
-                        <span class="value-label">Pending Bookings</span>
-                        <span class="value-number info" id="equipPendingBookings">-</span>
-                    </div>
+                    <div class="value-item"><span class="value-label">Available</span><span class="value-number success" id="equipAvailableCount">-</span></div>
+                    <div class="value-item"><span class="value-label">Borrowed</span><span class="value-number warning" id="equipBorrowedCount">-</span></div>
+                    <div class="value-item"><span class="value-label">Maintenance</span><span class="value-number danger" id="equipMaintenanceCount">-</span></div>
+                    <div class="value-item"><span class="value-label">Pending Bookings</span><span class="value-number info" id="equipPendingBookings">-</span></div>
                 </div>
             </div>
         </div>
         
-        <!-- Recent Activity Section -->
         <div class="recent-activity-grid">
             <div class="activity-card">
                 <div class="activity-header">
                     <h4><i class="fas fa-file-alt"></i> Recent Document Requests</h4>
-                    <button class="view-all-btn" onclick="goToDocumentRequests()">
-                        View All <i class="fas fa-arrow-right"></i>
-                    </button>
+                    <button class="view-all-btn" onclick="goToDocumentRequests()">View All <i class="fas fa-arrow-right"></i></button>
                 </div>
                 <div class="activity-list" id="recentDocumentsList">
                     <div class="loading-spinner-mini"><i class="fas fa-spinner fa-spin"></i> Loading...</div>
@@ -1719,9 +1584,7 @@ function renderDashboardDefault() {
             <div class="activity-card">
                 <div class="activity-header">
                     <h4><i class="fas fa-calendar-alt"></i> Recent Booking Requests</h4>
-                    <button class="view-all-btn" onclick="goToEquipmentBookings()">
-                        View All <i class="fas fa-arrow-right"></i>
-                    </button>
+                    <button class="view-all-btn" onclick="goToEquipmentBookings()">View All <i class="fas fa-arrow-right"></i></button>
                 </div>
                 <div class="activity-list" id="recentBookingsList">
                     <div class="loading-spinner-mini"><i class="fas fa-spinner fa-spin"></i> Loading...</div>
@@ -1729,43 +1592,29 @@ function renderDashboardDefault() {
             </div>
         </div>
         
-        <!-- Quick Actions -->
         <div class="quick-actions">
             <h4><i class="fas fa-bolt"></i> Quick Actions</h4>
             <div class="action-buttons">
-                <button class="quick-action-btn" onclick="goToUnverifiedAccounts()">
-                    <i class="fas fa-user-check"></i> Verify Residents
-                </button>
-                <button class="quick-action-btn" onclick="goToDocumentRequests()">
-                    <i class="fas fa-file-signature"></i> Process Documents
-                </button>
-                <button class="quick-action-btn" onclick="goToEquipmentList()">
-                    <i class="fas fa-plus-circle"></i> Add Equipment
-                </button>
-                <button class="quick-action-btn" onclick="goToEquipmentBookings()">
-                    <i class="fas fa-calendar-check"></i> Manage Bookings
-                </button>
+                <button class="quick-action-btn" onclick="goToUnverifiedAccounts()"><i class="fas fa-user-check"></i> Verify Residents</button>
+                <button class="quick-action-btn" onclick="goToDocumentRequests()"><i class="fas fa-file-signature"></i> Process Documents</button>
+                <button class="quick-action-btn" onclick="goToEquipmentList()"><i class="fas fa-plus-circle"></i> Add Equipment</button>
+                <button class="quick-action-btn" onclick="goToEquipmentBookings()"><i class="fas fa-calendar-check"></i> Manage Bookings</button>
             </div>
         </div>
     </div>`;
 }
 
-// Navigation helper functions
 function goToUnverifiedAccounts() {
     const accountsParent = document.getElementById('accountsParent');
     if (accountsParent) {
-        // Expand accounts submenu if collapsed
         const submenu = document.getElementById('accountsSubmenu');
         if (submenu && !submenu.classList.contains('open')) {
             const toggleIcon = accountsParent.querySelector('.toggle-icon');
             submenu.classList.add('open');
             if (toggleIcon) toggleIcon.style.transform = 'rotate(180deg)';
         }
-        // Click on unverified option
         const unverifiedOption = document.querySelector('#accountsSubmenu .sub-option[data-subview="unverified"]');
-        if (unverifiedOption) {
-            unverifiedOption.click();
-        }
+        if (unverifiedOption) unverifiedOption.click();
     }
 }
 
@@ -1779,9 +1628,7 @@ function goToDocumentRequests() {
             if (toggleIcon) toggleIcon.style.transform = 'rotate(180deg)';
         }
         const requestListOption = document.querySelector('#documentsSubmenu .sub-option[data-subview="request_list"]');
-        if (requestListOption) {
-            requestListOption.click();
-        }
+        if (requestListOption) requestListOption.click();
     }
 }
 
@@ -1795,9 +1642,7 @@ function goToEquipmentList() {
             if (toggleIcon) toggleIcon.style.transform = 'rotate(180deg)';
         }
         const equipmentListOption = document.querySelector('#equipmentSubmenu .sub-option[data-subview="equipment_list"]');
-        if (equipmentListOption) {
-            equipmentListOption.click();
-        }
+        if (equipmentListOption) equipmentListOption.click();
     }
 }
 
@@ -1811,13 +1656,10 @@ function goToEquipmentBookings() {
             if (toggleIcon) toggleIcon.style.transform = 'rotate(180deg)';
         }
         const bookingsOption = document.querySelector('#equipmentSubmenu .sub-option[data-subview="equipment_bookings"]');
-        if (bookingsOption) {
-            bookingsOption.click();
-        }
+        if (bookingsOption) bookingsOption.click();
     }
 }
 
-/// Load document statistics for dashboard
 async function loadDocumentStats() {
     try {
         const response = await fetch(`${window.location.href}?dashboard_action=get_document_stats`);
@@ -1826,7 +1668,8 @@ async function loadDocumentStats() {
             document.getElementById('docTotalCount').innerText = data.document.total || 0;
             document.getElementById('docPendingCount').innerText = data.document.pending || 0;
             document.getElementById('docApprovedCount').innerText = data.document.approved || 0;
-            document.getElementById('docCompletedCount').innerText = data.document.completed || 0;
+            document.getElementById('docUnclaimedCount').innerText = data.document.unclaimed || 0;
+document.getElementById('docClaimedCount').innerText = data.document.claimed || 0;
             document.getElementById('docRejectedCount').innerText = data.document.rejected || 0;
             const pendingBadge = document.getElementById('docPendingBadge');
             if (pendingBadge) {
@@ -1838,7 +1681,6 @@ async function loadDocumentStats() {
     }
 }
 
-// Load equipment stats for dashboard
 async function loadDashboardEquipmentStats() {
     try {
         const response = await fetch('equipment_ajax.php?action=get_counts');
@@ -1859,7 +1701,6 @@ async function loadDashboardEquipmentStats() {
     }
 }
 
-// Load recent document requests
 async function loadRecentDocuments() {
     try {
         const response = await fetch(`${window.location.href}?dashboard_action=get_recent_documents&limit=5`);
@@ -1898,7 +1739,6 @@ async function loadRecentDocuments() {
     }
 }
 
-// Load recent bookings
 async function loadRecentBookings() {
     try {
         const response = await fetch('equipment_ajax.php?action=get_recent_bookings&limit=5');
@@ -1937,7 +1777,6 @@ async function loadRecentBookings() {
     }
 }
 
-// Display current date
 function displayCurrentDate() {
     const dateElement = document.getElementById('currentDate');
     if (dateElement) {
@@ -1954,77 +1793,9 @@ function renderSettings() {
     return `<div class="content-card"><div class="section-title"><i class="fas fa-cog"></i> System Settings</div><div class="section-sub">Preferences and user roles</div><p style="padding:20px 0;">⚙️ Configure barangay system parameters.</p></div>`;
 }
 
-// Show approval modal with notes
-function showApprovalModal(requestId) {
-    pendingApprovalRequestId = requestId;
-    document.getElementById('approvalModal').style.display = 'block';
-    document.getElementById('approvalNotes').value = '';
-    document.getElementById('approvalStatus').style.display = 'none';
-}
-
-function closeApprovalModal() {
-    document.getElementById('approvalModal').style.display = 'none';
-    pendingApprovalRequestId = null;
-}
-
-async function submitApproval() {
-    const notes = document.getElementById('approvalNotes').value;
-    const statusDiv = document.getElementById('approvalStatus');
-    const confirmBtn = document.getElementById('confirmApprovalBtn');
-    const requestId = pendingApprovalRequestId;
-    
-    confirmBtn.disabled = true;
-    confirmBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Processing...';
-    statusDiv.style.display = 'block';
-    statusDiv.className = 'email-status';
-    statusDiv.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Generating document...';
-    
-    const formData = new FormData();
-    formData.append('doc_action', 'update_request_status');
-    formData.append('request_id', requestId);
-    formData.append('status', 'approved');
-    formData.append('admin_notes', notes);
-    
-    try {
-        const response = await fetch(window.location.href, { method: 'POST', body: formData });
-        const data = await response.json();
-        
-        if (data.success) {
-            statusDiv.className = 'email-status success';
-            statusDiv.innerHTML = '<i class="fas fa-check-circle"></i> ' + data.message;
-            
-            setTimeout(() => {
-                closeApprovalModal();
-                showSuccessModal(data.message, 'Approved');
-                loadFilteredRequests(currentFilterStatus, currentPage);
-                
-                if (requestId) {
-                    setTimeout(() => {
-                        window.location.href = `certification.php?request_id=${requestId}`;
-                    }, 1500);
-                }
-            }, 1500);
-        } else {
-            statusDiv.className = 'email-status error';
-            statusDiv.innerHTML = '<i class="fas fa-exclamation-circle"></i> ' + (data.message || 'Failed to approve request');
-            confirmBtn.disabled = false;
-            confirmBtn.innerHTML = '<i class="fas fa-check-circle"></i> Confirm Approval';
-        }
-    } catch (error) {
-        statusDiv.className = 'email-status error';
-        statusDiv.innerHTML = '<i class="fas fa-exclamation-circle"></i> An error occurred';
-        confirmBtn.disabled = false;
-        confirmBtn.innerHTML = '<i class="fas fa-check-circle"></i> Confirm Approval';
-    }
-}
-
-// Request action functions
+// Request action functions (Approve removed - auto-approved on resident portal)
 function showRejectPrompt(requestId) {
     showPromptModal('Reject Request', 'Please enter a reason for rejection...', (reason) => { rejectRequest(requestId, reason); });
-}
-
-async function approveRequest(requestId) {
-    showApprovalModal(requestId);
 }
 
 async function rejectRequest(requestId, reason) {
@@ -2045,11 +1816,11 @@ async function rejectRequest(requestId, reason) {
 }
 
 async function markAsCompleted(requestId) {
-    showConfirmationModal('Mark as completed? The resident can now claim the document.', 'Confirm Completion', async () => {
+    showConfirmationModal('Mark as claimed? The resident has already received the document.', 'Confirm Claimed', async () => {
         const formData = new FormData();
         formData.append('doc_action', 'update_request_status');
         formData.append('request_id', requestId);
-        formData.append('status', 'completed');
+        formData.append('status', 'claimed');
         try {
             const response = await fetch(window.location.href, { method: 'POST', body: formData });
             const data = await response.json();
@@ -2081,40 +1852,40 @@ async function viewRequestDetails(requestId) {
                 return date.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
             };
             const getStatusBadge = (status) => {
-                switch(status) {
-                    case 'pending': return '<span class="badge-unverified"><i class="fas fa-clock"></i> Pending</span>';
-                    case 'approved': return '<span class="badge-verified"><i class="fas fa-check-circle"></i> Approved</span>';
-                    case 'completed': return '<span class="status-verified" style="background:#d4edda;color:#155724;padding:4px 12px;border-radius:40px;"><i class="fas fa-check-double"></i> Completed</span>';
-                    case 'rejected': return '<span class="status-unverified" style="background:#f8d7da;color:#721c24;padding:4px 12px;border-radius:40px;"><i class="fas fa-times-circle"></i> Rejected</span>';
-                    default: return '<span class="badge-unverified">' + status + '</span>';
-                }
-            };
+    switch(status) {
+        case 'pending': return '<span class="badge-unverified"><i class="fas fa-clock"></i> Pending</span>';
+        case 'approved': return '<span class="badge-verified"><i class="fas fa-check-circle"></i> Approved</span>';
+        case 'unclaimed': return '<span class="badge-verified" style="background:#cce5ff;color:#004085;"><i class="fas fa-box"></i> Unclaimed</span>';
+        case 'claimed': return '<span class="status-verified" style="background:#d4edda;color:#155724;padding:4px 12px;border-radius:40px;"><i class="fas fa-check-double"></i> Claimed</span>';
+        case 'rejected': return '<span class="status-unverified" style="background:#f8d7da;color:#721c24;padding:4px 12px;border-radius:40px;"><i class="fas fa-times-circle"></i> Rejected</span>';
+        default: return '<span class="badge-unverified">' + status + '</span>';
+    }
+};
             
+            // NOTE: Approve button REMOVED. Auto-approved on resident portal.
             let actionButtonsHtml = '';
             if (req.status === 'pending') {
                 actionButtonsHtml = `
                     <div class="modal-action-buttons">
-                        <button class="btn-verify" onclick="approveRequest(${req.id}); closeRequestModal();"><i class="fas fa-check-circle"></i> Approve Request</button>
                         <button class="btn-close" onclick="showRejectFromModal(${req.id})" style="background: #dc3545;"><i class="fas fa-times-circle"></i> Reject Request</button>
                     </div>
                 `;
-            } else if (req.status === 'approved' || req.status === 'completed') {
-                actionButtonsHtml = `
-                    <div class="modal-action-buttons">
-                        <button class="btn-verify" onclick="openCertificationPage(${req.id})" style="background: #17a2b8;"><i class="fas fa-certificate"></i> View Certification</button>
-                       
-                        <button class="btn-verify" onclick="printRequestDocument(${req.id})" style="background: #28a745;"><i class="fas fa-print"></i> Print</button>
-                        <button class="btn-verify" onclick="downloadRequestDocument(${req.id})" style="background: #6c757d;"><i class="fas fa-download"></i> Download</button>
-                        ${req.status === 'approved' ? `<button class="btn-verify" onclick="markAsCompleted(${req.id}); closeRequestModal();" style="background: #17a2b8;"><i class="fas fa-check-double"></i> Mark as Completed</button>` : ''}
-                    </div>
-                `;
-            }
+            } else if (req.status === 'approved' || req.status === 'unclaimed' || req.status === 'claimed') {
+    actionButtonsHtml = `
+        <div class="modal-action-buttons">
+            <button class="btn-verify" onclick="openCertificationPage(${req.id})" style="background: #17a2b8;"><i class="fas fa-certificate"></i> View Certification</button>
+            <button class="btn-verify" onclick="printRequestDocument(${req.id})" style="background: #28a745;"><i class="fas fa-print"></i> Print</button>
+            <button class="btn-verify" onclick="downloadRequestDocument(${req.id})" style="background: #6c757d;"><i class="fas fa-download"></i> Download</button>
+            ${(req.status === 'approved' || req.status === 'unclaimed') ? `<button class="btn-verify" onclick="markAsCompleted(${req.id}); closeRequestModal();" style="background: #17a2b8;"><i class="fas fa-check-double"></i> Mark as Claimed</button>` : ''}
+        </div>
+    `;
+}
             
             modalBody.innerHTML = `
                 <div class="detail-section"><h4>Resident Information</h4>
                     <div class="detail-row"><div class="detail-label">Full Name:</div><div class="detail-value"><strong>${escapeHtml(req.first_name)} ${escapeHtml(req.last_name)}</strong></div></div>
                     <div class="detail-row"><div class="detail-label">Email:</div><div class="detail-value">${escapeHtml(req.email)}</div></div>
-                    <div class="detail-row"><div class="detail-label">Phone:</div><div class="detail-value">${escapeHtml(req.phone || '-')}</div></div>
+                    <div class="detail-row"><div class="detail-label">Phone:</div><div class="detail-value">${escapeHtml(req.phone_number || '-')}</div></div>
                     <div class="detail-row"><div class="detail-label">Address:</div><div class="detail-value">${escapeHtml(req.address || '-')}</div></div>
                 </div>
                 <div class="detail-section"><h4>Request Information</h4>
@@ -2126,7 +1897,6 @@ async function viewRequestDetails(requestId) {
                     <div class="detail-row"><div class="detail-label">Request Date:</div><div class="detail-value">${formatDate(req.request_date)}</div></div>
                     ${req.processed_date ? `<div class="detail-row"><div class="detail-label">Processed Date:</div><div class="detail-value">${formatDate(req.processed_date)}</div></div>` : ''}
                     ${req.admin_notes ? `<div class="detail-row"><div class="detail-label">Admin Notes:</div><div class="detail-value"><strong>${escapeHtml(req.admin_notes)}</strong></div></div>` : ''}
-                   
                     ${req.id_document_path ? `<div class="detail-row"><div class="detail-label">ID Document:</div><div class="detail-value"><button class="view-doc-btn" onclick="openDocument('${req.id_document_path}')"><i class="fas fa-id-card"></i> View ID Document</button></div></div>` : ''}
                 </div>
                 ${actionButtonsHtml}
@@ -2134,7 +1904,6 @@ async function viewRequestDetails(requestId) {
         } else modalBody.innerHTML = `<div class="empty-state-mini"><p>${data.message}</p></div>`;
     } catch (error) { modalBody.innerHTML = `<div class="empty-state-mini"><p>An error occurred.</p></div>`; }
 }
-
 
 function openCertificationPage(requestId) {
     window.location.href = `certification.php?request_id=${requestId}`;
@@ -2223,7 +1992,6 @@ function confirmVerification() {
 
 function closeVerifyModal() { document.getElementById('verifyModal').style.display = 'none'; pendingVerifyId = null; }
 
-// Resident details
 async function showResidentDetails(id, name) {
     const modal = document.getElementById('residentModal');
     const modalBody = document.getElementById('modalBody');
@@ -2241,7 +2009,7 @@ async function showResidentDetails(id, name) {
                 <div class="detail-row"><div class="detail-label">Full Name:</div><div class="detail-value"><strong>${escapeHtml(resident.first_name)} ${escapeHtml(resident.last_name)}</strong></div></div>
                 <div class="detail-row"><div class="detail-label">Username:</div><div class="detail-value">${escapeHtml(resident.username || 'Not set')}</div></div>
                 <div class="detail-row"><div class="detail-label">Email:</div><div class="detail-value">${escapeHtml(resident.email)}</div></div>
-                <div class="detail-row"><div class="detail-label">Phone:</div><div class="detail-value">${escapeHtml(resident.phone || 'Not provided')}</div></div>
+                <div class="detail-row"><div class="detail-label">Phone:</div><div class="detail-value">${escapeHtml(resident.phone_number || 'Not provided')}</div></div>
                 <div class="detail-row"><div class="detail-label">Address:</div><div class="detail-value">${escapeHtml(resident.address || 'Not specified')}</div></div>
                 <div class="detail-row"><div class="detail-label">Date of Birth:</div><div class="detail-value">${resident.date_of_birth ? formatDate(resident.date_of_birth) : 'Not provided'}</div></div>
                 <div class="detail-row"><div class="detail-label">Gender:</div><div class="detail-value">${escapeHtml(resident.gender || 'Not specified')}</div></div>
@@ -2266,7 +2034,6 @@ async function showResidentDetails(id, name) {
 
 function closeModal() { document.getElementById('residentModal').style.display = 'none'; }
 
-// Document management functions
 function showAddDocumentModal() {
     const modal = document.getElementById('documentModal');
     document.getElementById('documentModalTitle').innerHTML = '<i class="fas fa-plus"></i> Add New Document';
@@ -2418,13 +2185,14 @@ documentSubOptions.forEach(opt => {
             document.getElementById('dashboardBody').innerHTML = renderManageDocuments();
             const certSection = document.getElementById('certificationSection');
             if (certSection) certSection.classList.remove('visible');
-        } else if (view === 'request_list') { 
-            currentFilterStatus = 'pending'; 
-            currentPage = 1; 
-            await loadFilteredRequests('pending', 1);
-            const certSection = document.getElementById('certificationSection');
-            if (certSection) certSection.classList.remove('visible');
-        } else if (view === 'certification') {
+       } else if (view === 'request_list') { 
+    currentFilterStatus = 'all'; 
+    currentPage = 1;
+    currentSearchQuery = '';
+    await loadFilteredRequests('all', 1);
+    const certSection = document.getElementById('certificationSection');
+    if (certSection) certSection.classList.remove('visible');
+} else if (view === 'certification') {
             window.location.href = 'certification.php';
             return;
         }
@@ -2442,15 +2210,28 @@ standaloneItems.forEach(item => {
         document.querySelectorAll('.nav-item').forEach(nav => nav.classList.remove('active-parent', 'active'));
         item.classList.add('active');
         document.querySelectorAll('.sub-option').forEach(sub => sub.classList.remove('active-sub'));
+        
         if (view === 'dashboard') {
             document.getElementById('dashboardBody').innerHTML = renderDashboardDefault();
             closeCertification();
+            setTimeout(() => {
+                displayCurrentDate();
+                loadDocumentStats();
+                loadDashboardEquipmentStats();
+                loadRecentDocuments();
+                loadRecentBookings();
+            }, 100);
         } else if (view === 'reports') {
             document.getElementById('dashboardBody').innerHTML = renderReports();
             closeCertification();
         } else if (view === 'settings') {
             document.getElementById('dashboardBody').innerHTML = renderSettings();
             closeCertification();
+        } else if (view === 'emergencies') {
+            document.getElementById('dashboardBody').innerHTML = renderEmergencyView();
+            if (typeof loadExistingEmergencies === 'function') {
+                setTimeout(loadExistingEmergencies, 100);
+            }
         }
         closeDropdown();
     });
@@ -2472,16 +2253,744 @@ document.addEventListener('keydown', function(e) {
     if (e.key === 'Backspace') { const target = e.target; if (target.tagName !== 'INPUT' && target.tagName !== 'TEXTAREA' && !target.isContentEditable) e.preventDefault(); }
 });
 
-// Close modals on outside click
+// Close modals on outside click (approvalModal removed)
 window.onclick = function(event) {
     if (event.target === document.getElementById('residentModal')) closeModal();
     if (event.target === document.getElementById('verifyModal')) closeVerifyModal();
     if (event.target === document.getElementById('documentModal')) closeDocumentModal();
     if (event.target === document.getElementById('requestModal')) closeRequestModal();
-    if (event.target === document.getElementById('approvalModal')) closeApprovalModal();
 };
+
+// ============ REAL-TIME ADMIN NOTIFICATION SYSTEM ============
+
+let adminNotifications = [];
+let adminNotificationCheckInterval = null;
+let adminRealtimeCheckInterval = null;
+let adminBellAnimating = false;
+let lastNotificationTimestamp = 0;
+let isNotificationDropdownOpen = false;
+
+function initAdminNotificationBell() {
+    const topHeader = document.querySelector('.top-header');
+    if (!topHeader) return;
+    if (document.querySelector('.admin-notification-bell-container')) return;
+    const profileArea = document.querySelector('.top-header .profile-area');
+    if (!profileArea) return;
+    
+    let flexWrapper = topHeader.querySelector('.header-right-wrapper');
+    if (!flexWrapper) {
+        flexWrapper = document.createElement('div');
+        flexWrapper.className = 'header-right-wrapper';
+        flexWrapper.style.cssText = 'display: flex; align-items: center; gap: 20px;';
+        if (profileArea && profileArea.parentNode === topHeader) {
+            profileArea.parentNode.insertBefore(flexWrapper, profileArea);
+            flexWrapper.appendChild(profileArea);
+        }
+    }
+    
+    const bellHtml = `
+        <div class="admin-notification-bell-container" id="adminNotificationBellContainer">
+            <div class="admin-notification-bell" id="adminNotificationBell">
+                <i class="fas fa-bell"></i>
+                <span class="admin-notification-badge" id="adminNotificationBadge" style="display: none;">0</span>
+            </div>
+            <div class="admin-notifications-dropdown" id="adminNotificationsDropdown">
+                <div class="admin-notifications-header">
+                    <h4><i class="fas fa-bell"></i> Notifications</h4>
+                    <button class="admin-mark-all-read" id="adminMarkAllReadBtn">Mark all as read</button>
+                </div>
+                <div class="admin-notifications-list" id="adminNotificationsList">
+                    <div class="admin-empty-notifications">
+                        <i class="fas fa-bell-slash"></i>
+                        <p>No notifications</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+    
+    flexWrapper.insertAdjacentHTML('afterbegin', bellHtml);
+    
+    const bellContainer = document.getElementById('adminNotificationBellContainer');
+    const dropdown = document.getElementById('adminNotificationsDropdown');
+    const markAllBtn = document.getElementById('adminMarkAllReadBtn');
+    
+    if (bellContainer) {
+        bellContainer.addEventListener('click', (e) => {
+            e.stopPropagation();
+            isNotificationDropdownOpen = !dropdown.classList.contains('show');
+            dropdown.classList.toggle('show');
+            if (dropdown.classList.contains('show')) {
+                renderAdminNotificationsList();
+            }
+        });
+    }
+    
+    document.addEventListener('click', () => {
+        if (dropdown) {
+            dropdown.classList.remove('show');
+            isNotificationDropdownOpen = false;
+        }
+    });
+    
+    if (markAllBtn) {
+        markAllBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            markAllAdminNotificationsRead();
+        });
+    }
+}
+
+function updatePendingCountBadges(counts) {
+    const docFilterBtn = document.querySelector('.filter-chip[onclick*="pending"]');
+    if (docFilterBtn && counts.pending_documents > 0) {
+        let badge = docFilterBtn.querySelector('.pending-count');
+        if (!badge) {
+            badge = document.createElement('span');
+            badge.className = 'pending-count';
+            docFilterBtn.appendChild(badge);
+        }
+        badge.textContent = counts.pending_documents;
+        badge.style.display = 'inline-flex';
+    } else if (docFilterBtn) {
+        const badge = docFilterBtn.querySelector('.pending-count');
+        if (badge) badge.style.display = 'none';
+    }
+    
+    const bookingFilterBtn = document.querySelector('#equipmentSubmenu .sub-option[data-subview="equipment_bookings"]');
+    if (bookingFilterBtn && counts.pending_bookings > 0) {
+        let badge = bookingFilterBtn.querySelector('.pending-count');
+        if (!badge) {
+            badge = document.createElement('span');
+            badge.className = 'pending-count';
+            bookingFilterBtn.appendChild(badge);
+        }
+        badge.textContent = counts.pending_bookings;
+        badge.style.display = 'inline-flex';
+    } else if (bookingFilterBtn) {
+        const badge = bookingFilterBtn.querySelector('.pending-count');
+        if (badge) badge.style.display = 'none';
+    }
+    
+    const unverifiedBtn = document.querySelector('#accountsSubmenu .sub-option[data-subview="unverified"]');
+    if (unverifiedBtn && counts.unverified_residents > 0) {
+        let badge = unverifiedBtn.querySelector('.pending-count');
+        if (!badge) {
+            badge = document.createElement('span');
+            badge.className = 'pending-count';
+            unverifiedBtn.appendChild(badge);
+        }
+        badge.textContent = counts.unverified_residents;
+        badge.style.display = 'inline-flex';
+    } else if (unverifiedBtn) {
+        const badge = unverifiedBtn.querySelector('.pending-count');
+        if (badge) badge.style.display = 'none';
+    }
+}
+
+async function fetchAdminNotifications() {
+    try {
+        const response = await fetch('admin_notifications.php?action=get_notifications');
+        const data = await response.json();
+        
+        if (data.success) {
+            let readNotifications = [];
+            try {
+                const stored = localStorage.getItem('admin_read_notifications');
+                if (stored) {
+                    readNotifications = JSON.parse(stored);
+                }
+            } catch(e) {}
+            
+            let sessionRead = [];
+            try {
+                const sessionStored = sessionStorage.getItem('admin_read_notifications');
+                if (sessionStored) {
+                    sessionRead = JSON.parse(sessionStored);
+                    readNotifications = [...new Set([...readNotifications, ...sessionRead])];
+                }
+            } catch(e) {}
+            
+            data.notifications.forEach(notif => {
+                if (readNotifications.includes(notif.id)) {
+                    notif.is_read = true;
+                } else {
+                    notif.is_read = false;
+                }
+            });
+            
+            const oldUnreadCount = adminNotifications.filter(n => !n.is_read).length;
+            adminNotifications = data.notifications;
+            const newUnreadCount = adminNotifications.filter(n => !n.is_read).length;
+            
+            updateAdminNotificationBell(newUnreadCount);
+            
+            if (newUnreadCount > oldUnreadCount && newUnreadCount > 0) {
+                animateAdminBell();
+            }
+            
+            if (data.counts) {
+                updatePendingCountBadges(data.counts);
+            }
+            
+            renderAdminNotificationsList();
+        }
+    } catch (error) {
+        console.error('Error fetching admin notifications:', error);
+    }
+}
+
+async function checkRealtimeNotifications() {
+    try {
+        const response = await fetch(`admin_notifications.php?action=get_realtime_updates&last_timestamp=${lastNotificationTimestamp}`);
+        const data = await response.json();
+        
+        if (data.success && data.has_updates && data.new_items.length > 0) {
+            const newCount = data.new_items.length;
+            const latestTimestamp = Math.max(...data.new_items.map(i => i.timestamp));
+            if (latestTimestamp > lastNotificationTimestamp) {
+                lastNotificationTimestamp = latestTimestamp;
+            }
+            
+            animateAdminBell();
+            
+            const toShow = data.new_items.slice(0, 3);
+            toShow.forEach(item => {
+                showRealtimeToast(item.title, item.message);
+            });
+            
+            if (newCount > 3) {
+                showRealtimeToast(`${newCount - 3} more notifications`, 'Click bell to view all');
+            }
+            
+            await fetchAdminNotifications();
+            refreshPendingCounts();
+        }
+    } catch (error) {
+        console.error('Error checking realtime updates:', error);
+    }
+}
+
+function clearAllReadStatus() {
+    localStorage.removeItem('admin_read_notifications');
+    sessionStorage.removeItem('admin_read_notifications');
+    adminNotifications.forEach(n => n.is_read = false);
+    updateAdminNotificationBell(adminNotifications.length);
+    renderAdminNotificationsList();
+    showSimpleToast('Read status cleared');
+}
+
+window.clearAllReadStatus = clearAllReadStatus;
+
+async function refreshPendingCounts() {
+    try {
+        const response = await fetch('admin_notifications.php?action=get_unread_count');
+        const data = await response.json();
+        
+        if (data.success) {
+            const docFilterBtn = document.querySelector('.filter-chip[onclick*="pending"]');
+            if (docFilterBtn) {
+                let badge = docFilterBtn.querySelector('.pending-count');
+                if (!badge) {
+                    badge = document.createElement('span');
+                    badge.className = 'pending-count';
+                    docFilterBtn.appendChild(badge);
+                }
+                if (data.details.documents > 0) {
+                    badge.textContent = data.details.documents;
+                    badge.style.display = 'inline-flex';
+                } else {
+                    badge.style.display = 'none';
+                }
+            }
+            
+            const bookingFilterBtn = document.querySelector('#equipmentSubmenu .sub-option[data-subview="equipment_bookings"]');
+            if (bookingFilterBtn) {
+                let badge = bookingFilterBtn.querySelector('.pending-count');
+                if (!badge) {
+                    badge = document.createElement('span');
+                    badge.className = 'pending-count';
+                    bookingFilterBtn.appendChild(badge);
+                }
+                if (data.details.bookings > 0) {
+                    badge.textContent = data.details.bookings;
+                    badge.style.display = 'inline-flex';
+                } else {
+                    badge.style.display = 'none';
+                }
+            }
+            
+            const unverifiedBtn = document.querySelector('#accountsSubmenu .sub-option[data-subview="unverified"]');
+            if (unverifiedBtn) {
+                let badge = unverifiedBtn.querySelector('.pending-count');
+                if (!badge) {
+                    badge = document.createElement('span');
+                    badge.className = 'pending-count';
+                    unverifiedBtn.appendChild(badge);
+                }
+                if (data.details.residents > 0) {
+                    badge.textContent = data.details.residents;
+                    badge.style.display = 'inline-flex';
+                } else {
+                    badge.style.display = 'none';
+                }
+            }
+        }
+    } catch (error) {
+        console.error('Error refreshing counts:', error);
+    }
+}
+
+function showRealtimeToast(title, message) {
+    const toast = document.createElement('div');
+    toast.className = 'admin-toast realtime-toast';
+    toast.style.cssText = `
+        position: fixed;
+        bottom: 20px;
+        right: 20px;
+        background: linear-gradient(135deg, #1a472a, #2eaa5e);
+        color: white;
+        padding: 12px 20px;
+        border-radius: 12px;
+        z-index: 10001;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+        animation: slideInRight 0.3s ease;
+        max-width: 350px;
+        cursor: pointer;
+    `;
+    toast.innerHTML = `
+        <div style="display: flex; align-items: center; gap: 12px;">
+            <div style="background: rgba(255,255,255,0.2); width: 40px; height: 40px; border-radius: 50%; display: flex; align-items: center; justify-content: center;">
+                <i class="fas fa-bell" style="font-size: 20px;"></i>
+            </div>
+            <div style="flex: 1;">
+                <div style="font-weight: bold; font-size: 14px;">🚨 ${escapeHtml(title)}</div>
+                <div style="font-size: 11px; opacity: 0.9;">${escapeHtml(message.substring(0, 100))}</div>
+            </div>
+            <button onclick="this.parentElement.parentElement.remove()" style="background: none; border: none; color: white; font-size: 18px; cursor: pointer;">×</button>
+        </div>
+    `;
+    
+    toast.onclick = (e) => {
+        if (!e.target.closest('button')) {
+            toast.remove();
+            document.getElementById('adminNotificationBellContainer')?.click();
+        }
+    };
+    
+    document.body.appendChild(toast);
+    setTimeout(() => { if (toast.parentNode) toast.remove(); }, 8000);
+}
+
+function updateAdminNotificationBell(count) {
+    const badge = document.getElementById('adminNotificationBadge');
+    if (!badge) return;
+    
+    if (count > 0) {
+        badge.textContent = count > 99 ? '99+' : count;
+        badge.style.display = 'flex';
+        badge.classList.add('pulse');
+    } else {
+        badge.style.display = 'none';
+        badge.classList.remove('pulse');
+    }
+}
+
+function animateAdminBell() {
+    if (adminBellAnimating) return;
+    adminBellAnimating = true;
+    const bell = document.getElementById('adminNotificationBell');
+    if (bell) {
+        bell.classList.add('bell-ring-animation');
+        setTimeout(() => {
+            bell.classList.remove('bell-ring-animation');
+            adminBellAnimating = false;
+        }, 500);
+    }
+}
+
+function renderAdminNotificationsList() {
+    const container = document.getElementById('adminNotificationsList');
+    if (!container) return;
+    
+    if (adminNotifications.length === 0) {
+        container.innerHTML = `
+            <div class="admin-empty-notifications">
+                <i class="fas fa-bell-slash"></i>
+                <p>No notifications</p>
+            </div>
+        `;
+        return;
+    }
+    
+    const getTimeAgo = (date) => {
+        const seconds = Math.floor((new Date() - new Date(date)) / 1000);
+        if (seconds < 60) return 'just now';
+        const minutes = Math.floor(seconds / 60);
+        if (minutes < 60) return `${minutes} min ago`;
+        const hours = Math.floor(minutes / 60);
+        if (hours < 24) return `${hours} hour${hours > 1 ? 's' : ''} ago`;
+        const days = Math.floor(hours / 24);
+        if (days < 7) return `${days} day${days > 1 ? 's' : ''} ago`;
+        return new Date(date).toLocaleDateString();
+    };
+    
+    container.innerHTML = adminNotifications.slice(0, 50).map(notif => `
+        <div class="admin-notification-item ${!notif.is_read ? 'unread' : ''}" 
+             data-notif-id="${notif.id}"
+             data-section="${notif.section}"
+             data-subview="${notif.subview || ''}"
+             data-status-filter="${notif.status_filter || ''}"
+             data-request-id="${notif.request_id || ''}"
+             data-resident-id="${notif.resident_id || ''}">
+            <div class="admin-notification-icon">
+                <i class="fas ${notif.type === 'document_pending' ? 'fa-file-alt' : (notif.type === 'booking_pending' ? 'fa-calendar-check' : 'fa-user-plus')}"></i>
+            </div>
+            <div class="admin-notification-content">
+                <div class="admin-notification-title">${escapeHtml(notif.title)}</div>
+                <div class="admin-notification-message">${escapeHtml(notif.message)}</div>
+                <div class="admin-notification-time">${getTimeAgo(notif.created_at)}</div>
+            </div>
+            ${!notif.is_read ? '<div class="notification-badge-dot"></div>' : ''}
+        </div>
+    `).join('');
+    
+    document.querySelectorAll('.admin-notification-item').forEach(item => {
+        item.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            const notifId = item.dataset.notifId;
+            const section = item.dataset.section;
+            const subview = item.dataset.subview;
+            const statusFilter = item.dataset.statusFilter;
+            const requestId = item.dataset.requestId;
+            const residentId = item.dataset.residentId;
+            
+            await markAdminNotificationRead(notifId);
+            document.getElementById('adminNotificationsDropdown').classList.remove('show');
+            
+            if (section === 'documents') {
+                await navigateToDocumentRequests(statusFilter, requestId);
+            } else if (section === 'bookings') {
+                await navigateToBookings(statusFilter, requestId);
+            } else if (section === 'accounts' && subview === 'unverified') {
+                await navigateToUnverifiedAccounts(residentId);
+            }
+        });
+    });
+}
+
+async function markAdminNotificationRead(notifId) {
+    try {
+        const formData = new FormData();
+        formData.append('action', 'mark_read');
+        formData.append('notification_id', notifId);
+        await fetch('admin_notifications.php', { method: 'POST', body: formData });
+        
+        let readNotifications = [];
+        try {
+            const stored = localStorage.getItem('admin_read_notifications');
+            if (stored) readNotifications = JSON.parse(stored);
+        } catch(e) {}
+        
+        if (!readNotifications.includes(notifId)) {
+            readNotifications.push(notifId);
+            localStorage.setItem('admin_read_notifications', JSON.stringify(readNotifications));
+            sessionStorage.setItem('admin_read_notifications', JSON.stringify(readNotifications));
+        }
+        
+        const notif = adminNotifications.find(n => n.id === notifId);
+        if (notif) notif.is_read = true;
+        
+        updateAdminNotificationBell(adminNotifications.filter(n => !n.is_read).length);
+        renderAdminNotificationsList();
+    } catch (error) {
+        console.error('Error marking notification read:', error);
+    }
+}
+
+async function markAllAdminNotificationsRead() {
+    try {
+        const formData = new FormData();
+        formData.append('action', 'mark_all_read');
+        await fetch('admin_notifications.php', { method: 'POST', body: formData });
+        
+        adminNotifications.forEach(n => n.is_read = true);
+        const allNotifIds = adminNotifications.map(n => n.id);
+        localStorage.setItem('admin_read_notifications', JSON.stringify(allNotifIds));
+        sessionStorage.setItem('admin_read_notifications', JSON.stringify(allNotifIds));
+        
+        updateAdminNotificationBell(0);
+        renderAdminNotificationsList();
+        showSimpleToast('All notifications marked as read');
+    } catch (error) {
+        console.error('Error marking all read:', error);
+    }
+}
+
+function showSimpleToast(message) {
+    const toast = document.createElement('div');
+    toast.className = 'admin-toast';
+    toast.style.cssText = `
+        position: fixed;
+        bottom: 20px;
+        right: 20px;
+        background: linear-gradient(135deg, #28a745, #1e7e34);
+        color: white;
+        padding: 10px 15px;
+        border-radius: 10px;
+        z-index: 10000;
+        font-size: 12px;
+        animation: slideInRight 0.3s ease;
+        cursor: pointer;
+    `;
+    toast.innerHTML = `<i class="fas fa-check-circle"></i> ${escapeHtml(message)}`;
+    toast.onclick = () => toast.remove();
+    document.body.appendChild(toast);
+    setTimeout(() => toast.remove(), 3000);
+}
+
+async function navigateToDocumentRequests(statusFilter, requestId) {
+    const documentsParent = document.getElementById('documentsParent');
+    const documentsSubmenu = document.getElementById('documentsSubmenu');
+    const requestListOption = document.querySelector('#documentsSubmenu .sub-option[data-subview="request_list"]');
+    
+    if (documentsParent && documentsSubmenu && !documentsSubmenu.classList.contains('open')) {
+        documentsParent.click();
+        await new Promise(r => setTimeout(r, 300));
+    }
+    
+    if (requestListOption) {
+        requestListOption.click();
+        await new Promise(r => setTimeout(r, 800));
+    }
+    
+    if (statusFilter) {
+        const filterBtn = document.querySelector(`.filter-chip[onclick*="loadFilteredRequests('${statusFilter}'"]`);
+        if (filterBtn) {
+            filterBtn.click();
+        } else {
+            if (typeof loadFilteredRequests === 'function') {
+                await loadFilteredRequests(statusFilter, 1);
+            }
+        }
+        await new Promise(r => setTimeout(r, 500));
+    }
+    
+    if (requestId) {
+        highlightAndShakeCard(null, requestId);
+    }
+}
+
+async function navigateToBookings(statusFilter, requestId) {
+    const equipmentParent = document.getElementById('equipmentParent');
+    const equipmentSubmenu = document.getElementById('equipmentSubmenu');
+    const bookingsOption = document.querySelector('#equipmentSubmenu .sub-option[data-subview="equipment_bookings"]');
+    
+    if (equipmentParent && equipmentSubmenu && !equipmentSubmenu.classList.contains('open')) {
+        equipmentParent.click();
+        await new Promise(r => setTimeout(r, 300));
+    }
+    
+    if (bookingsOption) {
+        bookingsOption.click();
+        await new Promise(r => setTimeout(r, 500));
+    }
+    
+    if (statusFilter && typeof loadFilteredBookings === 'function') {
+        await loadFilteredBookings(statusFilter, 1);
+        await new Promise(r => setTimeout(r, 300));
+    }
+    
+    if (requestId) {
+        highlightAndShakeCard(`.data-card[onclick*="viewBookingDetails(${requestId})"]`, requestId);
+    }
+}
+
+async function navigateToUnverifiedAccounts(residentId) {
+    const accountsParent = document.getElementById('accountsParent');
+    const accountsSubmenu = document.getElementById('accountsSubmenu');
+    const unverifiedOption = document.querySelector('#accountsSubmenu .sub-option[data-subview="unverified"]');
+    
+    if (accountsParent && accountsSubmenu && !accountsSubmenu.classList.contains('open')) {
+        accountsParent.click();
+        await new Promise(r => setTimeout(r, 300));
+    }
+    
+    if (unverifiedOption) {
+        unverifiedOption.click();
+        await new Promise(r => setTimeout(r, 1000));
+    }
+    
+    if (residentId) {
+        setTimeout(() => {
+            highlightAndShakeCard(null, residentId);
+        }, 1200);
+    }
+}
+
+function highlightAndShakeCard(selector, id) {
+    setTimeout(() => {
+        let card = null;
+        
+        if (selector) card = document.querySelector(selector);
+        if (!card && id) card = document.querySelector(`.data-card[data-id="${id}"]`);
+        if (!card && id) card = document.querySelector(`.data-card[onclick*="${id}"]`);
+        
+        if (card) {
+            const cardRect = card.getBoundingClientRect();
+            const absoluteCardTop = cardRect.top + window.pageYOffset;
+            const offset = absoluteCardTop - (window.innerHeight / 2) + (cardRect.height / 2);
+            
+            window.scrollTo({ top: Math.max(0, offset), behavior: 'smooth' });
+            
+            setTimeout(() => {
+                card.classList.add('card-shake');
+                card.style.transition = 'all 0.3s ease';
+                card.style.boxShadow = '0 0 0 3px #ff9800, 0 4px 20px rgba(0,0,0,0.15)';
+                card.style.zIndex = '100';
+                card.style.position = 'relative';
+                card.style.border = '2px solid #ff9800';
+                
+                let flashCount = 0;
+                const originalBg = card.style.backgroundColor;
+                const flashInterval = setInterval(() => {
+                    if (flashCount >= 8) {
+                        clearInterval(flashInterval);
+                        card.style.backgroundColor = originalBg || '';
+                    } else {
+                        card.style.backgroundColor = flashCount % 2 === 0 ? '#fff8e1' : '#ffe0b2';
+                        flashCount++;
+                    }
+                }, 150);
+                
+                setTimeout(() => {
+                    card.classList.remove('card-shake');
+                    setTimeout(() => {
+                        card.style.boxShadow = '';
+                        card.style.zIndex = '';
+                        card.style.position = '';
+                        card.style.border = '';
+                    }, 1500);
+                }, 800);
+                
+                if (navigator.vibrate) navigator.vibrate(100);
+            }, 300);
+        }
+    }, 100);
+}
+
+function initAdminNotifications() {
+    initAdminNotificationBell();
+    fetchAdminNotifications();
+    refreshPendingCounts();
+    
+    lastNotificationTimestamp = Math.floor(Date.now() / 1000) - 300;
+    
+    if (adminRealtimeCheckInterval) clearInterval(adminRealtimeCheckInterval);
+    adminRealtimeCheckInterval = setInterval(checkRealtimeNotifications, 5000);
+    
+    if (adminNotificationCheckInterval) clearInterval(adminNotificationCheckInterval);
+    adminNotificationCheckInterval = setInterval(fetchAdminNotifications, 30000);
+    
+    console.log('🔔 Real-time notification system started (vibration enabled)');
+}
+
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initAdminNotifications);
+} else {
+    initAdminNotifications();
+}
 </script>
-// Make sure helper functions are available globally
+
+<script>
+    // ============ GLOBAL CONFIRMATION MODAL ============
+function showGlobalConfirmModal(title, message, onConfirm, onCancel = null, type = 'warning') {
+    const existing = document.querySelector('.global-confirm-modal');
+    if (existing) existing.remove();
+
+    let iconHtml = '';
+    switch(type) {
+        case 'danger':  iconHtml = '<i class="fas fa-exclamation-circle" style="color:#dc3545;"></i>'; break;
+        case 'warning': iconHtml = '<i class="fas fa-exclamation-triangle" style="color:#ff9800;"></i>'; break;
+        case 'success': iconHtml = '<i class="fas fa-check-circle" style="color:#28a745;"></i>'; break;
+        case 'info':    iconHtml = '<i class="fas fa-info-circle" style="color:#17a2b8;"></i>'; break;
+        default:        iconHtml = '<i class="fas fa-question-circle" style="color:#ff9800;"></i>';
+    }
+
+    const btnColor = type === 'danger' ? '#dc3545' : (type === 'success' ? '#28a745' : '#ff9800');
+
+    const modal = document.createElement('div');
+    modal.className = 'global-confirm-modal';
+    modal.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);z-index:99999;display:flex;align-items:center;justify-content:center;animation:fadeIn 0.3s ease;';
+
+    modal.innerHTML = `
+        <div style="background:white;border-radius:20px;max-width:420px;width:90%;padding:30px 25px;text-align:center;animation:slideDown 0.3s ease;box-shadow:0 25px 50px rgba(0,0,0,0.3);">
+            <div style="font-size:60px;margin-bottom:15px;">${iconHtml}</div>
+            <div style="font-size:1.4rem;font-weight:700;color:#1a472a;margin-bottom:12px;">${escapeHtml(title)}</div>
+            <div style="color:#5f7f6e;margin-bottom:25px;line-height:1.5;white-space:pre-line;text-align:left;">${escapeHtml(message)}</div>
+            <div style="display:flex;gap:12px;justify-content:center;">
+                <button id="globalConfirmYes" style="background:${btnColor};color:white;border:none;padding:12px 28px;border-radius:10px;font-weight:600;font-size:14px;cursor:pointer;">
+                    <i class="fas fa-check"></i> Yes, Proceed
+                </button>
+                <button id="globalConfirmNo" style="background:#6c757d;color:white;border:none;padding:12px 28px;border-radius:10px;font-weight:600;font-size:14px;cursor:pointer;">
+                    <i class="fas fa-times"></i> Cancel
+                </button>
+            </div>
+        </div>
+    `;
+
+    document.body.appendChild(modal);
+
+    document.getElementById('globalConfirmYes').onclick = () => {
+        modal.remove();
+        if (onConfirm) onConfirm();
+    };
+    document.getElementById('globalConfirmNo').onclick = () => {
+        modal.remove();
+        if (onCancel) onCancel();
+    };
+    modal.addEventListener('click', (e) => {
+        if (e.target === modal) { modal.remove(); if (onCancel) onCancel(); }
+    });
+}
+
+// ============ GLOBAL NOTIFICATION MODAL ============
+function showGlobalNotificationModal(type, title, message, autoClose = true) {
+    const existing = document.querySelector('.global-notification-modal');
+    if (existing) existing.remove();
+
+    let iconHtml = '', iconColor = '';
+    switch(type) {
+        case 'success': iconHtml = '<i class="fas fa-check-circle"></i>';          iconColor = '#28a745'; break;
+        case 'error':   iconHtml = '<i class="fas fa-times-circle"></i>';          iconColor = '#dc3545'; break;
+        case 'warning': iconHtml = '<i class="fas fa-exclamation-triangle"></i>';  iconColor = '#ff9800'; break;
+        case 'info':    iconHtml = '<i class="fas fa-info-circle"></i>';           iconColor = '#17a2b8'; break;
+    }
+
+    const modal = document.createElement('div');
+    modal.className = 'global-notification-modal';
+    modal.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);z-index:99999;display:flex;align-items:center;justify-content:center;animation:fadeIn 0.3s ease;';
+
+    modal.innerHTML = `
+        <div style="background:white;border-radius:20px;max-width:420px;width:90%;padding:30px 25px;text-align:center;animation:slideDown 0.3s ease;box-shadow:0 25px 50px rgba(0,0,0,0.3);">
+            <div style="font-size:60px;margin-bottom:15px;color:${iconColor};">${iconHtml}</div>
+            <div style="font-size:1.4rem;font-weight:700;color:#1a472a;margin-bottom:12px;">${escapeHtml(title)}</div>
+            <div style="color:#5f7f6e;margin-bottom:25px;line-height:1.6;white-space:pre-line;text-align:left;">${escapeHtml(message)}</div>
+            <button onclick="this.closest('.global-notification-modal').remove()" style="background:${iconColor};color:white;border:none;padding:12px 35px;border-radius:10px;font-weight:600;font-size:15px;cursor:pointer;">
+                OK
+            </button>
+        </div>
+    `;
+
+    document.body.appendChild(modal);
+
+    if (autoClose && type === 'success') {
+        setTimeout(() => { if (modal.parentNode) modal.remove(); }, 2500);
+    }
+    modal.addEventListener('click', (e) => {
+        if (e.target === modal) modal.remove();
+    });
+}
 if (typeof escapeHtml === 'undefined') {
     window.escapeHtml = function(text) {
         if (!text) return '';
@@ -2492,34 +3001,25 @@ if (typeof escapeHtml === 'undefined') {
 }
 
 if (typeof showSuccessModal === 'undefined') {
-    window.showSuccessModal = function(message, title) {
-        alert(title + '\n' + message);
-    };
+    window.showSuccessModal = function(message, title) { alert(title + '\n' + message); };
 }
 
 if (typeof showErrorModal === 'undefined') {
-    window.showErrorModal = function(message, title) {
-        alert(title + '\n' + message);
-    };
+    window.showErrorModal = function(message, title) { alert(title + '\n' + message); };
 }
 
 if (typeof showWarningModal === 'undefined') {
-    window.showWarningModal = function(message, title) {
-        alert(title + '\n' + message);
-    };
+    window.showWarningModal = function(message, title) { alert(title + '\n' + message); };
 }
 
 if (typeof showConfirmationModal === 'undefined') {
     window.showConfirmationModal = function(message, title, onConfirm) {
-        if (confirm(title + '\n' + message)) {
-            onConfirm();
-        }
+        if (confirm(title + '\n' + message)) onConfirm();
     };
 }
-
-
-<script>
-   
 </script>
+
+<!-- Household Management JavaScript -->
+<script src="household.js"></script>
 </body>
-</html>
+</html> 
