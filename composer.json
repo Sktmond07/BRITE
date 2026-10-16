@@ -3,6 +3,7 @@
         "phpmailer/phpmailer": "^7.0",
         "tecnickcom/tcpdf": "^6.11",
         "twilio/sdk": "^8.11",
-        "minishlink/web-push": "^8.0"
+        "minishlink/web-push": "^8.0",
+        "xendit/xendit-php": "^7.0"
     }
 }

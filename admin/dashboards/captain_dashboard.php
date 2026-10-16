@@ -6,6 +6,8 @@
 //    • First schedule issues KP Form #8 + KP Form #9
 //    • If any party is No Show → Captain sets appearance date
 //      → KP Form #18 (complainant) / #19 (respondent)
+//    • 5-DAY EXPLAIN WINDOW starts on the appearance date
+//      (deadline is stored on the complaint_hearings row)
 //    • Absent party appears in person; Captain logs reason
 //    • Captain decides Justified / Unjustified:
 //         – Complainant Unjustified → KP Form #23 auto-issued → dismissed
@@ -70,6 +72,220 @@ $result = mysqli_query($conn, "SELECT COUNT(*) as total FROM complaints WHERE st
 $stats['in_mediation'] = mysqli_fetch_assoc($result)['total'] ?? 0;
 $result = mysqli_query($conn, "SELECT COUNT(*) as total FROM complaints WHERE status IN ('pending_captain_review','referred_dispatched')");
 $stats['referrals'] = mysqli_fetch_assoc($result)['total'] ?? 0;
+
+// ═══════════════════════════════════════════════════════════
+// DASHBOARD ANALYTICS  (complaints · equipment · emergencies · announcements)
+// ═══════════════════════════════════════════════════════════
+function dxRowsOrNull($conn, $sql) {
+    try {
+        $r = mysqli_query($conn, $sql);
+        if (!$r) return null;
+        $out = [];
+        while ($row = mysqli_fetch_assoc($r)) $out[] = $row;
+        return $out;
+    } catch (Throwable $e) {
+        return null;
+    }
+}
+function dxRows($conn, $sql) {
+    $r = dxRowsOrNull($conn, $sql);
+    return $r === null ? [] : $r;
+}
+function dxTableExists($conn, $t) {
+    $t = mysqli_real_escape_string($conn, $t);
+    return !empty(dxRows($conn, "SELECT 1 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = '$t' LIMIT 1"));
+}
+function dxCols($conn, $t) {
+    $out = [];
+    foreach (dxRows($conn, "SHOW COLUMNS FROM `$t`") as $r) $out[] = $r['Field'];
+    return $out;
+}
+function dxFirst($cols, $candidates) {
+    foreach ($candidates as $c) if (in_array($c, $cols, true)) return $c;
+    return null;
+}
+
+// ── Announcements: READ-ONLY list for the Captain ──
+if (isset($_GET['ann_action']) && $_GET['ann_action'] === 'list') {
+    header('Content-Type: application/json');
+    $rows = dxRows($conn,
+        "SELECT a.*, ad.full_name AS author_name
+         FROM announcements a
+         LEFT JOIN admin ad ON ad.id = a.created_by
+         WHERE a.is_active = 1
+           AND (a.expires_at IS NULL OR a.expires_at > NOW())
+         ORDER BY a.is_pinned DESC, a.created_at DESC
+         LIMIT 30");
+    $out = [];
+    foreach ($rows as $r) {
+        $out[] = [
+            'id'         => (int)$r['id'],
+            'title'      => $r['title'],
+            'body'       => $r['body'],
+            'category'   => $r['category'],
+            'image_url'  => !empty($r['image_path']) ? 'uploads/announcements/' . $r['image_path'] : null,
+            'is_pinned'  => (int)$r['is_pinned'],
+            'expires_at' => $r['expires_at'],
+            'event_date' => $r['event_date'] ?? null,
+            'event_time' => $r['event_time'] ?? null,
+            'created_at' => $r['created_at'],
+            'author'     => $r['author_name'] ?? null,
+        ];
+    }
+    echo json_encode(['success' => true, 'data' => $out]);
+    exit;
+}
+
+// ── Month buckets (last 6 months) ──
+$dxMonths = [];
+for ($i = 5; $i >= 0; $i--) {
+    $d = new DateTime('first day of this month');
+    $d->modify("-$i month");
+    $dxMonths[$d->format('Y-m')] = $d->format('M');
+}
+$dxZero = array_fill_keys(array_keys($dxMonths), 0);
+$dxMonthStart = "DATE_FORMAT(CURDATE() - INTERVAL 5 MONTH,'%Y-%m-01')";
+
+// ── Complaints (only the ones that reach the Captain; pending_review is the Secretary's stage) ──
+$dxCompMonthly = $dxZero;
+foreach (dxRows($conn, "SELECT DATE_FORMAT(created_at,'%Y-%m') ym, COUNT(*) c FROM complaints
+                        WHERE status <> 'pending_review' AND created_at >= $dxMonthStart GROUP BY ym") as $r) {
+    if (isset($dxCompMonthly[$r['ym']])) $dxCompMonthly[$r['ym']] = (int)$r['c'];
+}
+$dxComplaintStatus = [];
+foreach (dxRows($conn, "SELECT status, COUNT(*) c FROM complaints WHERE status <> 'pending_review' GROUP BY status") as $r) {
+    $dxComplaintStatus[$r['status']] = (int)$r['c'];
+}
+
+// ── Emergencies ──
+$dxEmgMonthly = $dxZero;
+foreach (dxRows($conn, "SELECT DATE_FORMAT(created_at,'%Y-%m') ym, COUNT(*) c FROM emergencies
+                        WHERE created_at >= $dxMonthStart GROUP BY ym") as $r) {
+    if (isset($dxEmgMonthly[$r['ym']])) $dxEmgMonthly[$r['ym']] = (int)$r['c'];
+}
+$dxEmgStatus = [];
+foreach (dxRows($conn, "SELECT UPPER(status) s, COUNT(*) c FROM emergencies GROUP BY s") as $r) {
+    $dxEmgStatus[$r['s']] = (int)$r['c'];
+}
+$dxEmgTypes = [];
+foreach (dxRows($conn, "SELECT emergency_type t, COUNT(*) c FROM emergencies GROUP BY t ORDER BY c DESC") as $r) {
+    $dxEmgTypes[] = ['name' => $r['t'], 'count' => (int)$r['c']];
+}
+$dxEmgRecent = dxRows($conn, "SELECT id, emergency_type, name, barangay, latitude, longitude, caller_number,
+                                     status, accepted_by_name, external_id, created_at
+                              FROM emergencies ORDER BY created_at DESC, id DESC LIMIT 8");
+$dxEmgToday = 0;
+foreach (dxRows($conn, "SELECT COUNT(*) c FROM emergencies WHERE DATE(created_at) = CURDATE()") as $r) $dxEmgToday = (int)$r['c'];
+
+// ── Equipment bookings (table / columns are auto-detected) ──
+$dxEq = ['found' => false, 'table' => null, 'monthly' => array_values($dxZero), 'status' => [], 'pending' => 0, 'borrowed' => 0];
+$dxEqEvents = [];
+$dxEqTable = null;
+foreach (['equipment_bookings','equipment_booking','equipment_borrowings','equipment_borrow_requests',
+          'equipment_requests','equipment_reservations','borrowings','bookings'] as $t) {
+    if (dxTableExists($conn, $t)) { $dxEqTable = $t; break; }
+}
+if ($dxEqTable) {
+    $cols       = dxCols($conn, $dxEqTable);
+    $statusCol  = dxFirst($cols, ['status']);
+    $dateCol    = dxFirst($cols, ['start_date','borrow_date','date_from','booking_date','date_needed','from_date','pickup_date','created_at']);
+    $createdCol = dxFirst($cols, ['created_at']) ?: $dateCol;
+    $idCol      = dxFirst($cols, ['id']);
+    $titleCol   = dxFirst($cols, ['equipment_name','item_name','equipment','purpose']);
+    $dxEq['found'] = true;
+    $dxEq['table'] = $dxEqTable;
+
+    if ($statusCol) {
+        foreach (dxRows($conn, "SELECT LOWER(`$statusCol`) s, COUNT(*) c FROM `$dxEqTable` GROUP BY s") as $r) {
+            $dxEq['status'][$r['s']] = (int)$r['c'];
+        }
+        $dxEq['pending']  = $dxEq['status']['pending']  ?? 0;
+        $dxEq['borrowed'] = $dxEq['status']['borrowed'] ?? 0;
+    }
+    if ($createdCol) {
+        $m = $dxZero;
+        foreach (dxRows($conn, "SELECT DATE_FORMAT(`$createdCol`,'%Y-%m') ym, COUNT(*) c FROM `$dxEqTable`
+                                WHERE `$createdCol` >= $dxMonthStart GROUP BY ym") as $r) {
+            if (isset($m[$r['ym']])) $m[$r['ym']] = (int)$r['c'];
+        }
+        $dxEq['monthly'] = array_values($m);
+    }
+    if ($dateCol) {
+        $sel   = ($idCol ? "b.`$idCol`" : "0") . " AS id, b.`$dateCol` AS d, "
+               . ($titleCol ? "b.`$titleCol`" : "NULL") . " AS t, "
+               . ($statusCol ? "b.`$statusCol`" : "NULL") . " AS s";
+        $where = "b.`$dateCol` IS NOT NULL
+                  AND b.`$dateCol` BETWEEN CURDATE() - INTERVAL 90 DAY AND CURDATE() + INTERVAL 270 DAY"
+               . ($statusCol ? " AND LOWER(b.`$statusCol`) NOT IN ('rejected','cancelled')" : "");
+
+        // Prefer the real equipment name when an `equipment` table can be joined
+        $rows = null;
+        if (in_array('equipment_id', $cols, true) && dxTableExists($conn, 'equipment')
+            && in_array('name', dxCols($conn, 'equipment'), true)) {
+            $rows = dxRowsOrNull($conn, "SELECT " . ($idCol ? "b.`$idCol`" : "0") . " AS id, b.`$dateCol` AS d,
+                                                COALESCE(e.name, " . ($titleCol ? "b.`$titleCol`" : "'Equipment'") . ") AS t,
+                                                " . ($statusCol ? "b.`$statusCol`" : "NULL") . " AS s
+                                         FROM `$dxEqTable` b LEFT JOIN equipment e ON e.id = b.equipment_id
+                                         WHERE $where ORDER BY b.`$dateCol` ASC LIMIT 400");
+        }
+        if ($rows === null) {
+            $rows = dxRows($conn, "SELECT $sel FROM `$dxEqTable` b WHERE $where ORDER BY b.`$dateCol` ASC LIMIT 400");
+        }
+        foreach ($rows as $r) {
+            $dxEqEvents[] = [
+                'kind'   => 'equipment',
+                'id'     => (int)$r['id'],
+                'date'   => substr((string)$r['d'], 0, 10),
+                'time'   => strlen((string)$r['d']) > 10 ? substr((string)$r['d'], 11, 8) : null,
+                'title'  => $r['t'] ?: 'Equipment booking',
+                'sub'    => $r['s'] ? ucfirst(strtolower($r['s'])) : 'Booking',
+                'status' => $r['s'],
+            ];
+        }
+    }
+}
+
+// ── Calendar events: hearings + equipment + emergencies ──
+$dxEvents = [];
+foreach (dxRows($conn, "SELECT id, reference_number, title, status, hearing_date, hearing_time
+                        FROM complaints
+                        WHERE hearing_date IS NOT NULL
+                          AND hearing_date BETWEEN CURDATE() - INTERVAL 90 DAY AND CURDATE() + INTERVAL 270 DAY
+                          AND status NOT IN ('pending_review','dismissed')
+                        ORDER BY hearing_date ASC LIMIT 400") as $r) {
+    $dxEvents[] = [
+        'kind' => 'hearing', 'id' => (int)$r['id'],
+        'date' => substr($r['hearing_date'], 0, 10), 'time' => $r['hearing_time'],
+        'title' => $r['title'], 'sub' => $r['reference_number'], 'status' => $r['status'],
+    ];
+}
+foreach ($dxEqEvents as $e) $dxEvents[] = $e;
+foreach (dxRows($conn, "SELECT id, emergency_type, name, barangay, status, created_at
+                        FROM emergencies
+                        WHERE created_at >= CURDATE() - INTERVAL 90 DAY
+                        ORDER BY created_at ASC LIMIT 300") as $r) {
+    $dxEvents[] = [
+        'kind' => 'emergency', 'id' => (int)$r['id'],
+        'date' => substr($r['created_at'], 0, 10), 'time' => substr($r['created_at'], 11, 8),
+        'title' => $r['emergency_type'] . ' — ' . $r['name'],
+        'sub' => $r['barangay'], 'status' => $r['status'],
+    ];
+}
+
+$dxData = [
+    'months'           => array_values($dxMonths),
+    'complaintMonthly' => array_values($dxCompMonthly),
+    'emergencyMonthly' => array_values($dxEmgMonthly),
+    'equipmentMonthly' => $dxEq['monthly'],
+    'complaintStatus'  => $dxComplaintStatus,
+    'emergencyStatus'  => $dxEmgStatus,
+    'emergencyTypes'   => $dxEmgTypes,
+    'emergencies'      => $dxEmgRecent,
+    'equipment'        => ['found' => $dxEq['found'], 'table' => $dxEq['table'], 'status' => $dxEq['status']],
+    'events'           => $dxEvents,
+];
+$dxEmgPending = (int)($dxEmgStatus['PENDING'] ?? 0);
+$dxJson = json_encode($dxData, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_PARTIAL_OUTPUT_ON_ERROR);
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -79,6 +295,7 @@ $stats['referrals'] = mysqli_fetch_assoc($result)['total'] ?? 0;
     <title>Captain Dashboard | BRITE</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
     <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <style>
         <?php include '../admin.css'; ?>
 
@@ -712,6 +929,1793 @@ $stats['referrals'] = mysqli_fetch_assoc($result)['total'] ?? 0;
             from { opacity: 0; transform: translateY(-6px); }
             to   { opacity: 1; transform: translateY(0); }
         }
+
+        /* ═══════════════════════════════════════════════════════════
+           COMPLAINT FILTER ACCORDION (collapsible filters bar)
+           ═══════════════════════════════════════════════════════════ */
+        .complaint-filter-accordion { margin-bottom: 16px; }
+
+        .complaint-filter-accordion-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px 16px;
+            background: #f8faf8;
+            border: 1px solid #e2efe8;
+            border-radius: 10px;
+            cursor: pointer;
+            user-select: none;
+            transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
+        }
+        .complaint-filter-accordion-header:hover {
+            background: #f1f8e9;
+            border-color: #c8e6c9;
+            box-shadow: 0 2px 8px rgba(46,125,50,0.10);
+        }
+        .complaint-filter-accordion-header .cfa-icon {
+            color: #2E7D32;
+            font-size: 0.95rem;
+            flex-shrink: 0;
+        }
+        .complaint-filter-accordion-header .cfa-title {
+            font-weight: 800;
+            color: #1a472a;
+            font-size: 0.85rem;
+            letter-spacing: 0.3px;
+            text-transform: uppercase;
+            flex-shrink: 0;
+        }
+        .complaint-filter-accordion-header .cfa-summary {
+            flex: 1;
+            min-width: 0;
+            font-size: 0.78rem;
+            color: #5f7f6e;
+            font-weight: 600;
+            overflow: hidden;
+            white-space: nowrap;
+            text-overflow: ellipsis;
+        }
+        .complaint-filter-accordion-header .cfa-summary .cfa-sep {
+            color: #cfd8dc;
+            margin: 0 6px;
+        }
+        .complaint-filter-accordion-header .cfa-chevron {
+            color: #2E7D32;
+            font-size: 0.8rem;
+            transition: transform 0.25s ease;
+            flex-shrink: 0;
+        }
+        .complaint-filter-accordion-body {
+            overflow: hidden;
+            transition: max-height 0.3s ease, opacity 0.25s ease, margin-top 0.25s ease;
+        }
+        .complaint-filter-accordion-body .unified-chips {
+            padding-top: 12px;
+        }
+
+        /* ── CASE TOOLBAR ──────────────────────────────────── */
+.case-toolbar {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    align-items: center;
+    margin-top: 16px;
+    padding: 12px 14px;
+    background: #f8faf8;
+    border: 1px solid #e2efe8;
+    border-radius: 12px;
+}
+.case-search {
+    position: relative;
+    flex: 1 1 240px;
+    min-width: 200px;
+}
+.case-search > i {
+    position: absolute;
+    left: 12px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: #999;
+    font-size: 0.85rem;
+    pointer-events: none;
+}
+.case-search > input {
+    width: 100%;
+    padding: 9px 12px 9px 34px;
+    border: 1.5px solid #cfd8dc;
+    border-radius: 8px;
+    font-size: 0.85rem;
+    box-sizing: border-box;
+}
+.case-search > input:focus {
+    outline: none;
+    border-color: #2E7D32;
+    box-shadow: 0 0 0 3px rgba(46,125,50,0.12);
+}
+.case-date-select,
+.case-date-input {
+    padding: 9px 12px;
+    border: 1.5px solid #cfd8dc;
+    border-radius: 8px;
+    font-size: 0.85rem;
+    background: #fff;
+}
+.case-date-select:focus,
+.case-date-input:focus {
+    outline: none;
+    border-color: #2E7D32;
+    box-shadow: 0 0 0 3px rgba(46,125,50,0.12);
+}
+.case-reset-btn {
+    padding: 9px 14px;
+    border: 1px solid #cfd8dc;
+    background: #fff;
+    border-radius: 8px;
+    color: #555;
+    font-size: 0.82rem;
+    font-weight: 600;
+    cursor: pointer;
+}
+.case-reset-btn:hover { background: #f0f0f0; }
+.case-result-count {
+    font-size: 0.78rem;
+    color: #666;
+    margin-left: auto;
+    font-weight: 600;
+}
+
+/* ── PAGINATION ────────────────────────────────────── */
+.case-pagination {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 6px;
+    margin-top: 22px;
+    padding: 12px 0;
+    flex-wrap: wrap;
+}
+.case-page-btn {
+    min-width: 38px;
+    height: 38px;
+    padding: 0 12px;
+    border: 1.5px solid #e2efe8;
+    background: #fff;
+    border-radius: 8px;
+    color: #555;
+    font-size: 0.85rem;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all .15s;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+.case-page-btn:hover:not(:disabled) {
+    border-color: #2E7D32;
+    color: #2E7D32;
+    background: #f7fbf7;
+}
+.case-page-btn.active {
+    background: #2E7D32;
+    border-color: #2E7D32;
+    color: #fff;
+}
+.case-page-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+.case-page-info {
+    margin-left: 12px;
+    font-size: 0.78rem;
+    color: #888;
+}
+
+/* ============================================================
+   EQUIPMENT MANAGEMENT MODAL — Professional UI
+   ============================================================ */
+.eq-mgmt-wrap { display: flex; flex-direction: column; gap: 16px; padding: 4px 2px; }
+.eq-mgmt-loading { text-align: center; padding: 50px 20px; color: #999; }
+.eq-mgmt-loading i { color: #2E7D32; margin-bottom: 12px; display: block; }
+
+.eq-mgmt-banner {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 12px 16px;
+    background: linear-gradient(135deg, #fff8e1, #ffecb3);
+    border-left: 5px solid #f57c00;
+    border-radius: 10px;
+    color: #8a3e00;
+}
+.eq-mgmt-banner > i { font-size: 1.4rem; color: #e65100; flex-shrink: 0; margin-top: 2px; }
+.eq-mgmt-banner-title {
+    font-weight: 800;
+    font-size: 0.9rem;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    margin-bottom: 3px;
+}
+.eq-mgmt-banner-sub { font-size: 0.82rem; line-height: 1.5; color: #6d4c00; }
+
+.eq-mgmt-hero {
+    display: grid;
+    grid-template-columns: 140px 1fr;
+    gap: 18px;
+    padding: 18px;
+    background: linear-gradient(135deg, #f1f8e9, #e8f5e9);
+    border-radius: 14px;
+    border: 1.5px solid #c8e6c9;
+}
+@media (max-width: 600px) { .eq-mgmt-hero { grid-template-columns: 1fr; } }
+
+.eq-mgmt-hero-image {
+    width: 100%;
+    aspect-ratio: 1 / 1;
+    border-radius: 12px;
+    overflow: hidden;
+    background: #fff;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+}
+.eq-mgmt-hero-image img { width: 100%; height: 100%; object-fit: cover; }
+.eq-mgmt-hero-fallback {
+    width: 100%; height: 100%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 3rem; color: #43a047;
+    background: linear-gradient(135deg, #ffffff, #f1f8e9);
+}
+.eq-mgmt-hero-info { display: flex; flex-direction: column; justify-content: center; gap: 8px; }
+.eq-mgmt-hero-title { font-size: 1.3rem; font-weight: 800; color: #1a472a; margin: 0; line-height: 1.25; }
+.eq-mgmt-hero-total { font-size: 0.85rem; color: #4a5f56; }
+.eq-mgmt-hero-total i { color: #2E7D32; margin-right: 5px; }
+.eq-mgmt-hero-total strong { color: #1a472a; font-size: 1rem; }
+
+.eq-mgmt-section {
+    background: #fff;
+    border: 1.5px solid #e2efe8;
+    border-radius: 14px;
+    padding: 16px 18px;
+}
+.eq-mgmt-section-title {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 0.85rem;
+    font-weight: 800;
+    color: #1a472a;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    margin-bottom: 14px;
+    padding-bottom: 10px;
+    border-bottom: 2px solid #f1f8e9;
+}
+
+.eq-mgmt-status-bar {
+    display: flex;
+    height: 18px;
+    border-radius: 10px;
+    overflow: hidden;
+    background: #eef2f0;
+    margin-bottom: 16px;
+    box-shadow: inset 0 1px 3px rgba(0,0,0,0.06);
+}
+.eq-mgmt-bar-seg { transition: width 0.4s ease; }
+.eq-mgmt-bar-seg.available   { background: linear-gradient(180deg, #66bb6a, #2E7D32); }
+.eq-mgmt-bar-seg.borrowed    { background: linear-gradient(180deg, #42a5f5, #1976d2); }
+.eq-mgmt-bar-seg.maintenance { background: linear-gradient(180deg, #ffa726, #f57c00); }
+.eq-mgmt-bar-seg.lost        { background: linear-gradient(180deg, #ef5350, #c62828); }
+
+        .eq-mgmt-stats-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 10px;
+        }
+        @media (max-width: 600px) { .eq-mgmt-stats-grid { grid-template-columns: repeat(2, 1fr); } }
+
+        /* 3-column variant — used when Borrowed is hidden (Facility / Vehicle) */
+        .eq-mgmt-stats-grid-3 {
+            grid-template-columns: repeat(3, 1fr) !important;
+        }
+        @media (max-width: 600px) {
+            .eq-mgmt-stats-grid-3 {
+                grid-template-columns: repeat(3, 1fr) !important;
+            }
+        }
+
+.eq-mgmt-stat {
+    padding: 14px 10px;
+    border-radius: 12px;
+    text-align: center;
+    border: 1.5px solid;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+}
+.eq-mgmt-stat i { font-size: 1.1rem; }
+.eq-mgmt-stat-num { font-size: 1.6rem; font-weight: 900; line-height: 1; margin-top: 4px; }
+.eq-mgmt-stat-lbl { font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.4px; font-weight: 700; opacity: 0.9; }
+.eq-mgmt-stat-pct { font-size: 0.65rem; font-weight: 700; background: rgba(255,255,255,0.7); padding: 1px 7px; border-radius: 8px; margin-top: 4px; }
+.eq-mgmt-stat.available   { background: #e8f5e9; border-color: #a5d6a7; color: #1b5e20; }
+.eq-mgmt-stat.borrowed    { background: #e3f2fd; border-color: #90caf9; color: #0d47a1; }
+.eq-mgmt-stat.maintenance { background: #fff3e0; border-color: #ffcc80; color: #e65100; }
+.eq-mgmt-stat.lost        { background: #ffebee; border-color: #ef9a9a; color: #b71c1c; }
+
+.eq-mgmt-form-row {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    align-items: flex-end;
+}
+.eq-mgmt-field {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    min-width: 0;
+}
+.eq-mgmt-field label {
+    font-size: 0.72rem;
+    font-weight: 700;
+    color: #1a472a;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+}
+.eq-mgmt-field label .req { color: #c62828; }
+.eq-mgmt-field label .opt { color: #999; font-weight: 500; text-transform: none; letter-spacing: 0; }
+.eq-mgmt-field input,
+.eq-mgmt-field select {
+    padding: 9px 12px;
+    border: 1.5px solid #cfd8dc;
+    border-radius: 8px;
+    font-size: 0.88rem;
+    font-family: inherit;
+    background: #fff;
+    box-sizing: border-box;
+    width: 100%;
+}
+.eq-mgmt-field input:focus,
+.eq-mgmt-field select:focus {
+    outline: none;
+    border-color: #2E7D32;
+    box-shadow: 0 0 0 3px rgba(46,125,50,0.12);
+}
+
+.eq-mgmt-btn {
+    padding: 10px 20px;
+    border: none;
+    border-radius: 9px;
+    font-size: 0.85rem;
+    font-weight: 700;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    transition: all 0.15s;
+    white-space: nowrap;
+}
+.eq-mgmt-btn:hover { transform: translateY(-1px); }
+.eq-mgmt-btn:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
+.eq-mgmt-btn.add    { background: #2E7D32; color: #fff; }
+.eq-mgmt-btn.add:hover { background: #1b5e20; }
+.eq-mgmt-btn.deduct { background: #c62828; color: #fff; }
+.eq-mgmt-btn.deduct:hover { background: #b71c1c; }
+
+.eq-mgmt-history-toggle {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 11px 16px;
+    background: #f1f8e9;
+    border: 1.5px dashed #a5d6a7;
+    border-radius: 10px;
+    color: #1b5e20;
+    font-size: 0.85rem;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+.eq-mgmt-history-toggle:hover { background: #e8f5e9; border-style: solid; }
+.eq-mgmt-history-toggle > span { flex: 1; text-align: left; }
+.eq-mgmt-history-toggle > i:last-child { transition: transform 0.2s; }
+
+.eq-mgmt-history {
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height 0.3s ease;
+}
+.eq-mgmt-history.open {
+    max-height: 420px;
+    overflow-y: auto;
+    margin-top: 12px;
+}
+
+.eq-mgmt-history-empty {
+    text-align: center;
+    padding: 30px;
+    color: #999;
+    font-size: 0.85rem;
+}
+.eq-mgmt-history-empty i {
+    font-size: 2rem;
+    color: #c8e6c9;
+    margin-bottom: 8px;
+    display: block;
+}
+
+.eq-mgmt-history-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.eq-mgmt-history-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 12px 14px;
+    background: #fafbfa;
+    border-left: 4px solid #43a047;
+    border-radius: 10px;
+    transition: all 0.15s;
+}
+.eq-mgmt-history-item.undone {
+    opacity: 0.55;
+    background: #f0f0f0;
+    border-left-color: #bdbdbd;
+}
+
+.eq-mgmt-history-icon {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.9rem;
+    flex-shrink: 0;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+}
+
+.eq-mgmt-history-body { flex: 1; min-width: 0; }
+.eq-mgmt-history-action {
+    font-size: 0.85rem;
+    color: #1a2b22;
+    font-weight: 600;
+    line-height: 1.4;
+}
+.eq-mgmt-history-reason {
+    font-size: 0.75rem;
+    color: #666;
+    margin-top: 4px;
+    font-style: italic;
+}
+.eq-mgmt-history-reason i { color: #999; margin-right: 3px; }
+.eq-mgmt-history-meta {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    font-size: 0.7rem;
+    color: #888;
+    margin-top: 5px;
+}
+.eq-mgmt-undone-tag {
+    background: #c62828;
+    color: #fff;
+    padding: 1px 7px;
+    border-radius: 8px;
+    font-size: 0.6rem;
+    font-weight: 800;
+    letter-spacing: 0.4px;
+}
+
+.eq-mgmt-undo-btn {
+    padding: 6px 12px;
+    background: #f57c00;
+    color: #fff;
+    border: none;
+    border-radius: 7px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    transition: all 0.15s;
+    flex-shrink: 0;
+}
+.eq-mgmt-undo-btn:hover { background: #e65100; }
+
+.eq-mgmt-footer {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    padding-top: 12px;
+    border-top: 1px solid #e2efe8;
+    flex-wrap: wrap;
+}
+.eq-mgmt-footer .eq-btn { flex: 1; min-width: 120px; padding: 11px 18px; }
+
+.eq-empty { text-align: center; padding: 40px 20px; color: #999; }
+.eq-empty i { font-size: 2.5rem; color: #c8e6c9; margin-bottom: 10px; display: block; }
+.eq-empty p { margin: 0; font-size: 0.9rem; }
+/* ============================================================
+   EQUIPMENT UI — Cards, Details Modal, Item Cards
+   ============================================================ */
+
+/* ── Equipment Cards Grid ─────────────────────────────── */
+.shopee-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 18px;
+    margin-top: 20px;
+}
+
+.eq-card {
+    background: #fff;
+    border-radius: 16px;
+    overflow: hidden;
+    border: 1px solid #e2efe8;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+    display: flex;
+    flex-direction: column;
+    transition: all 0.2s ease;
+}
+.eq-card:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 12px 28px rgba(0,0,0,0.10);
+    border-color: #c8e6c9;
+}
+
+.eq-card-image {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 16 / 10;
+    overflow: hidden;
+    cursor: pointer;
+    background: linear-gradient(135deg, #f1f8e9, #e8f5e9);
+}
+.eq-card-image img {
+    width: 100%; height: 100%;
+    object-fit: cover;
+    transition: transform 0.35s ease;
+}
+.eq-card:hover .eq-card-image img { transform: scale(1.05); }
+
+.eq-img-fallback {
+    width: 100%; height: 100%;
+    display: flex; align-items: center; justify-content: center;
+    color: #43a047; font-size: 3rem;
+    background: linear-gradient(135deg, #f1f8e9, #e8f5e9);
+}
+
+.eq-cat-chip {
+    position: absolute; top: 10px; left: 10px;
+    padding: 4px 10px;
+    border-radius: 20px;
+    font-size: 0.65rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    background: rgba(255,255,255,0.92);
+    color: #2E7D32;
+    backdrop-filter: blur(6px);
+    box-shadow: 0 2px 6px rgba(0,0,0,0.12);
+}
+.eq-cat-chip.facility { color: #1565c0; }
+.eq-cat-chip.vehicle  { color: #e65100; }
+
+.eq-status-chip {
+    position: absolute; top: 10px; right: 10px;
+    padding: 4px 10px;
+    border-radius: 20px;
+    font-size: 0.65rem;
+    font-weight: 800;
+    color: #fff;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.18);
+}
+.eq-status-chip.status-available     { background: #2E7D32; }
+.eq-status-chip.status-borrowed      { background: #17a2b8; }
+.eq-status-chip.status-maintenance   { background: #f57c00; }
+.eq-status-chip.status-unavailable   { background: #c62828; }
+
+.eq-card-body {
+    padding: 14px 16px 10px;
+    cursor: pointer;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.eq-card-title {
+    font-weight: 800;
+    font-size: 1rem;
+    color: #1a472a;
+    line-height: 1.3;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+}
+.eq-card-desc {
+    font-size: 0.75rem;
+    color: #7a8a82;
+    line-height: 1.5;
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+}
+
+.eq-avail-bar {
+    height: 6px;
+    background: #eef2f0;
+    border-radius: 6px;
+    overflow: hidden;
+    margin-top: 4px;
+}
+.eq-avail-fill {
+    height: 100%;
+    border-radius: 6px;
+    transition: width 0.4s ease;
+}
+.eq-avail-label {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.68rem;
+    color: #7a8a82;
+    margin-top: -2px;
+}
+
+.eq-stats-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    margin-top: 6px;
+}
+.eq-stat-pill {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 10px;
+    border-radius: 8px;
+    font-size: 0.72rem;
+}
+.eq-stat-pill i { font-size: 0.85rem; }
+.eq-stat-pill b { font-size: 0.9rem; display: block; line-height: 1; }
+.eq-stat-pill small { font-size: 0.6rem; text-transform: uppercase; letter-spacing: 0.4px; opacity: 0.8; }
+.eq-stat-pill.available   { background: #e8f5e9; color: #1b5e20; }
+.eq-stat-pill.borrowed    { background: #e3f2fd; color: #0d47a1; }
+.eq-stat-pill.maintenance { background: #fff3e0; color: #e65100; }
+.eq-stat-pill.lost        { background: #ffebee; color: #b71c1c; }
+
+.eq-card-footer {
+    display: flex;
+    gap: 8px;
+    padding: 10px 14px;
+    background: #f8faf8;
+    border-top: 1px solid #e2efe8;
+}
+
+.eq-btn {
+    padding: 9px 14px;
+    border: none;
+    border-radius: 9px;
+    font-size: 0.78rem;
+    font-weight: 700;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    transition: all 0.15s;
+    flex: 1;
+}
+.eq-btn:hover { transform: translateY(-1px); }
+.eq-btn.primary { background: #2E7D32; color: #fff; }
+.eq-btn.primary:hover { background: #1b5e20; }
+.eq-btn.ghost { background: #fff; color: #2E7D32; border: 1.5px solid #c8e6c9; }
+.eq-btn.ghost:hover { background: #f1f8e9; }
+.eq-btn.danger { background: #c62828; color: #fff; }
+.eq-btn.danger:hover { background: #b71c1c; }
+.eq-btn.small { padding: 7px 11px; font-size: 0.72rem; }
+
+/* ── Equipment Details Modal ───────────────────────────── */
+.eq-details-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    padding: 4px 2px;
+}
+
+.eq-hero {
+    display: grid;
+    grid-template-columns: 200px 1fr;
+    gap: 18px;
+    padding: 18px;
+    background: linear-gradient(135deg, #f1f8e9, #e8f5e9);
+    border-radius: 16px;
+    border: 1px solid #c8e6c9;
+}
+@media (max-width: 600px) { .eq-hero { grid-template-columns: 1fr; } }
+
+.eq-hero-image {
+    width: 100%;
+    aspect-ratio: 1 / 1;
+    border-radius: 12px;
+    overflow: hidden;
+    background: #fff;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.08);
+}
+.eq-hero-image img { width: 100%; height: 100%; object-fit: cover; }
+.eq-hero-fallback {
+    width: 100%; height: 100%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 3.5rem; color: #43a047;
+    background: linear-gradient(135deg, #ffffff, #f1f8e9);
+}
+
+.eq-hero-info { display: flex; flex-direction: column; justify-content: center; gap: 8px; }
+.eq-cat-badge {
+    display: inline-block;
+    align-self: flex-start;
+    padding: 4px 12px;
+    border-radius: 20px;
+    background: #2E7D32;
+    color: #fff;
+    font-size: 0.65rem;
+    font-weight: 800;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+}
+.eq-hero-title {
+    font-size: 1.5rem;
+    font-weight: 800;
+    color: #1a472a;
+    line-height: 1.25;
+    margin: 0;
+}
+.eq-hero-desc {
+    font-size: 0.88rem;
+    color: #4a5f56;
+    line-height: 1.55;
+    margin: 0;
+}
+.eq-hero-desc.muted { color: #999; font-style: italic; }
+.eq-hero-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 14px;
+    margin-top: 6px;
+    font-size: 0.82rem;
+    color: #555;
+}
+.eq-hero-meta i { color: #2E7D32; margin-right: 4px; }
+
+/* Availability panel */
+.eq-avail-panel {
+    padding: 16px 18px;
+    background: #fff;
+    border: 1.5px solid #e2efe8;
+    border-radius: 14px;
+}
+.eq-avail-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 0.8rem;
+    font-weight: 700;
+    color: #1a472a;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    margin-bottom: 10px;
+}
+.eq-avail-pct { font-size: 1.1rem; font-weight: 900; color: #2E7D32; }
+.eq-avail-bar-lg {
+    height: 12px;
+    background: #eef2f0;
+    border-radius: 8px;
+    overflow: hidden;
+}
+.eq-avail-fill-lg {
+    height: 100%;
+    border-radius: 8px;
+    transition: width 0.5s ease;
+}
+.eq-avail-stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+    margin-top: 14px;
+    font-size: 0.82rem;
+    color: #444;
+}
+.eq-avail-stat { display: inline-flex; align-items: center; gap: 6px; }
+.eq-avail-stat b { color: #1a472a; font-size: 0.95rem; }
+.eq-avail-stat.total {
+    margin-left: auto;
+    padding-left: 14px;
+    border-left: 1px solid #e2efe8;
+    color: #666;
+    font-weight: 600;
+}
+.dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    display: inline-block;
+}
+.dot.available   { background: #2E7D32; }
+.dot.borrowed    { background: #17a2b8; }
+.dot.maintenance { background: #f57c00; }
+.dot.lost        { background: #c62828; }
+
+/* Stats cards */
+.eq-stat-cards {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+}
+@media (max-width: 600px) { .eq-stat-cards { grid-template-columns: repeat(2, 1fr); } }
+
+.eq-stat-card {
+    padding: 14px;
+    border-radius: 12px;
+    text-align: center;
+    border: 1.5px solid;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+}
+.eq-stat-card i { font-size: 1.2rem; }
+.eq-stat-card .num { font-size: 1.6rem; font-weight: 900; line-height: 1; }
+.eq-stat-card .lbl {
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-weight: 700;
+    opacity: 0.85;
+}
+.eq-stat-card.available   { background: #e8f5e9; border-color: #a5d6a7; color: #1b5e20; }
+.eq-stat-card.borrowed    { background: #e3f2fd; border-color: #90caf9; color: #0d47a1; }
+.eq-stat-card.maintenance { background: #fff3e0; border-color: #ffcc80; color: #e65100; }
+.eq-stat-card.lost        { background: #ffebee; border-color: #ef9a9a; color: #b71c1c; }
+
+/* Sections */
+.eq-section {
+    background: #fff;
+    border: 1.5px solid #e2efe8;
+    border-radius: 14px;
+    padding: 16px 18px;
+}
+.eq-section-title {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 0.88rem;
+    font-weight: 800;
+    color: #1a472a;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    margin-bottom: 12px;
+    padding-bottom: 10px;
+    border-bottom: 2px solid #f1f8e9;
+}
+.eq-section-title i { color: #2E7D32; }
+.eq-section-badge {
+    margin-left: auto;
+    background: #2E7D32;
+    color: #fff;
+    padding: 2px 10px;
+    border-radius: 12px;
+    font-size: 0.7rem;
+    font-weight: 800;
+}
+.eq-section-badge.warn { background: #f57c00; }
+
+/* Items preview rows */
+.eq-items-list { display: flex; flex-direction: column; gap: 6px; }
+.eq-item-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    background: #f8faf8;
+    border: 1px solid #eef2f0;
+    font-size: 0.82rem;
+}
+.eq-item-num {
+    background: #2E7D32;
+    color: #fff;
+    padding: 2px 8px;
+    border-radius: 6px;
+    font-size: 0.7rem;
+    font-weight: 800;
+    min-width: 42px;
+    text-align: center;
+}
+.eq-item-name { flex: 1; font-weight: 600; color: #1a2b22; }
+.eq-item-badge {
+    padding: 3px 9px;
+    border-radius: 10px;
+    font-size: 0.65rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+}
+.eq-item-badge.available   { background: #c8e6c9; color: #1b5e20; }
+.eq-item-badge.borrowed    { background: #bbdefb; color: #0d47a1; }
+.eq-item-badge.maintenance { background: #ffe0b2; color: #e65100; }
+.eq-item-badge.lost        { background: #ffcdd2; color: #b71c1c; }
+
+.eq-see-all {
+    display: block;
+    width: 100%;
+    margin-top: 10px;
+    padding: 10px;
+    background: #f1f8e9;
+    color: #2E7D32;
+    border: 1.5px dashed #a5d6a7;
+    border-radius: 10px;
+    font-size: 0.8rem;
+    font-weight: 700;
+    cursor: pointer;
+    text-align: center;
+    transition: all 0.15s;
+}
+.eq-see-all:hover { background: #e8f5e9; border-style: solid; }
+
+.eq-empty {
+    text-align: center;
+    padding: 24px;
+    color: #999;
+}
+.eq-empty i { font-size: 2.4rem; color: #c8e6c9; margin-bottom: 8px; display: block; }
+
+/* Bookings preview */
+.eq-bookings-list { display: flex; flex-direction: column; gap: 6px; }
+.eq-booking-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    background: #fafbfa;
+    border: 1px solid #eef2f0;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+.eq-booking-row:hover { background: #f1f8e9; border-color: #c8e6c9; }
+.eq-booking-avatar {
+    width: 32px; height: 32px;
+    border-radius: 50%;
+    background: #e8f5e9;
+    color: #2E7D32;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+}
+.eq-booking-info { flex: 1; min-width: 0; }
+.eq-booking-info b { font-size: 0.85rem; color: #1a2b22; display: block; }
+.eq-booking-info small { font-size: 0.72rem; color: #666; display: block; margin-top: 2px; }
+.eq-booking-status {
+    padding: 3px 10px;
+    border-radius: 10px;
+    font-size: 0.65rem;
+    font-weight: 800;
+    text-transform: uppercase;
+}
+.eq-booking-status.pending   { background: #fff3e0; color: #e65100; }
+.eq-booking-status.approved  { background: #e8f5e9; color: #1b5e20; }
+.eq-booking-status.borrowed  { background: #e3f2fd; color: #0d47a1; }
+
+.eq-meta-row {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+    padding: 10px 14px;
+    background: #f8faf8;
+    border-radius: 10px;
+    font-size: 0.75rem;
+    color: #666;
+}
+
+.eq-details-actions {
+    display: flex;
+    gap: 10px;
+    justify-content: flex-end;
+    padding-top: 8px;
+    border-top: 1px solid #e2efe8;
+    flex-wrap: wrap;
+}
+.eq-details-actions .eq-btn { flex: 0 0 auto; padding: 10px 18px; }
+
+/* ── Individual Item Cards (in View Items modal) ─────── */
+.eq-items-full-list {
+    display: grid;
+    gap: 12px;
+}
+
+.eq-item-card {
+    background: #fff;
+    border: 1.5px solid #e2efe8;
+    border-radius: 12px;
+    padding: 14px 16px;
+    transition: all 0.15s;
+}
+.eq-item-card:hover { border-color: #c8e6c9; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
+
+.eq-item-card-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 10px;
+}
+.eq-item-card-id { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
+.eq-item-card-num {
+    background: #2E7D32;
+    color: #fff;
+    padding: 3px 10px;
+    border-radius: 8px;
+    font-size: 0.72rem;
+    font-weight: 800;
+    flex-shrink: 0;
+}
+.eq-item-card-name {
+    font-weight: 700;
+    font-size: 0.95rem;
+    color: #1a2b22;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.eq-item-status {
+    padding: 4px 11px;
+    border-radius: 20px;
+    font-size: 0.7rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+}
+.eq-item-status.available   { background: #e8f5e9; color: #1b5e20; }
+.eq-item-status.borrowed    { background: #e3f2fd; color: #0d47a1; }
+.eq-item-status.maintenance { background: #fff3e0; color: #e65100; }
+.eq-item-status.lost        { background: #ffebee; color: #b71c1c; }
+.eq-item-status.default     { background: #f0f0f0; color: #666; }
+
+.eq-item-card-notes {
+    display: flex;
+    gap: 8px;
+    padding: 8px 12px;
+    background: #f8faf8;
+    border-left: 3px solid #43a047;
+    border-radius: 6px;
+    font-size: 0.78rem;
+    color: #4a5f56;
+    margin-bottom: 10px;
+    line-height: 1.5;
+}
+.eq-item-card-notes i { color: #2E7D32; margin-top: 2px; flex-shrink: 0; }
+
+.eq-item-card-meta {
+    display: flex;
+    gap: 14px;
+    flex-wrap: wrap;
+    font-size: 0.7rem;
+    color: #888;
+    margin-bottom: 10px;
+}
+.eq-item-card-meta i { color: #a5d6a7; margin-right: 3px; }
+
+.eq-item-card-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    padding-top: 10px;
+    border-top: 1px dashed #e2efe8;
+}
+.eq-item-card-actions .eq-btn { flex: 1; min-width: 110px; }
+
+/* ── Make modals wider for details ────────────────────── */
+#equipmentItemsModal .modal-content { max-width: 820px; width: 95vw; }
+#equipmentModal .modal-content       { max-width: 760px; width: 95vw; }
+
+/* Ensure filter bar wraps instead of scrolling off-screen */
+.filter-bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    overflow-x: visible;      /* override any horizontal-scroll rule */
+}
+
+/* Visible divider between status chips and type chips */
+.filter-sep {
+    display: inline-block;
+    width: 1px;
+    height: 24px;
+    background: #cfd8dc;
+    margin: 0 6px;
+    align-self: center;
+}
+
+/* Make Calendar View / Refresh buttons wrap onto their own row cleanly */
+.filter-bar .btn-verify {
+    flex-shrink: 0;
+}
+
+@media (max-width: 900px) {
+    /* On narrow screens, force the last two buttons to their own row */
+    .filter-bar .btn-verify {
+        margin-left: 0 !important;
+    }
+}
+/* ══════════════════════════════════════════════════════════
+   FILTER BAR — STACKED LAYOUT (Type on top, Status below)
+   Forced with !important so nothing else can override it
+   ══════════════════════════════════════════════════════════ */
+
+/* Container — stacks rows vertically */
+.filter-bar.filter-bar-stacked {
+    display: flex !important;
+    flex-direction: column !important;
+    flex-wrap: nowrap !important;
+    align-items: stretch !important;
+    gap: 10px !important;
+    padding: 12px 14px !important;
+    background: #f8faf8 !important;
+    border: 1px solid #e2efe8 !important;
+    border-radius: 12px !important;
+    overflow: visible !important;
+}
+
+/* Each row inside the stacked bar */
+.filter-bar.filter-bar-stacked .filter-row {
+    display: flex !important;
+    flex-direction: row !important;
+    flex-wrap: wrap !important;
+    align-items: center !important;
+    gap: 8px !important;
+    width: 100% !important;
+}
+
+/* Row 1 (Type) — divider under it */
+.filter-bar.filter-bar-stacked .filter-row-type {
+    padding-bottom: 10px !important;
+    border-bottom: 1px dashed #d7e2dc !important;
+}
+
+/* Small inline label at the start of each row */
+.filter-bar.filter-bar-stacked .filter-row-label {
+    display: inline-flex !important;
+    align-items: center !important;
+    gap: 6px !important;
+    font-size: 0.72rem !important;
+    font-weight: 800 !important;
+    color: #6b7a72 !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.5px !important;
+    padding-right: 6px !important;
+    margin-right: 4px !important;
+    border-right: 1px solid #d7e2dc !important;
+    height: 22px !important;
+    flex-shrink: 0 !important;
+}
+
+/* Action buttons (Calendar View / Refresh) — pushed to the right */
+.filter-bar.filter-bar-stacked .filter-row-actions {
+    margin-left: auto !important;
+    display: inline-flex !important;
+    gap: 8px !important;
+    flex-wrap: wrap !important;
+    align-items: center !important;
+}
+
+/* Keep chips and buttons from being squashed */
+.filter-bar.filter-bar-stacked .filter-row .filter-chip,
+.filter-bar.filter-bar-stacked .filter-row .btn-verify {
+    flex-shrink: 0 !important;
+}
+
+/* Kill the old flat filter-bar flex rule for stacked variant */
+.filter-bar.filter-bar-stacked {
+    overflow-x: visible !important;
+}
+
+/* ── Mobile: stack everything neatly ── */
+@media (max-width: 720px) {
+    .filter-bar.filter-bar-stacked .filter-row-actions {
+        margin-left: 0 !important;
+        width: 100% !important;
+    }
+    .filter-bar.filter-bar-stacked .filter-row-actions .btn-verify {
+        flex: 1 !important;
+        justify-content: center !important;
+    }
+    .filter-bar.filter-bar-stacked .filter-row-label {
+        width: 100% !important;
+        border-right: none !important;
+        margin-bottom: -2px !important;
+    }
+}
+/* ═══════════════════════════════════════════════════════════
+   ANNOUNCEMENTS — image background cards
+   ═══════════════════════════════════════════════════════════ */
+.annc-section { margin-bottom: 6px; }
+
+.annc-section-head {
+    display: flex; justify-content: space-between;
+    align-items: center; margin-bottom: 14px;
+}
+.annc-section-title {
+    font-size: 1rem; font-weight: 800; color: #1a472a;
+    display: flex; align-items: center; gap: 10px;
+}
+.annc-section-title i { color: #e65100; }
+.annc-add-btn {
+    display: inline-flex; align-items: center; gap: 7px;
+    padding: 9px 18px; border: none; border-radius: 22px;
+    background: linear-gradient(135deg, #2E7D32, #43a047);
+    color: #fff; font-size: 0.82rem; font-weight: 700;
+    cursor: pointer;
+    box-shadow: 0 4px 14px rgba(46,125,50,0.3);
+    transition: all 0.15s;
+}
+.annc-add-btn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 18px rgba(46,125,50,0.45);
+}
+
+.annc-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    gap: 18px;
+}
+
+.annc-card {
+    position: relative;
+    min-height: 260px;
+    border-radius: 18px;
+    overflow: hidden;
+    background: #1a1a1a;
+    cursor: pointer;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.12);
+    transition: all 0.28s ease;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+}
+.annc-card:hover {
+    transform: translateY(-5px);
+    box-shadow: 0 16px 40px rgba(0,0,0,0.25);
+}
+.annc-card::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+        180deg,
+        rgba(0,0,0,0.10) 0%,
+        rgba(0,0,0,0.35) 35%,
+        rgba(0,0,0,0.85) 100%
+    );
+    z-index: 1;
+    transition: background 0.25s;
+}
+.annc-card:hover::before {
+    background: linear-gradient(
+        180deg,
+        rgba(0,0,0,0.20) 0%,
+        rgba(0,0,0,0.50) 35%,
+        rgba(0,0,0,0.92) 100%
+    );
+}
+.annc-card-image {
+    position: absolute; inset: 0; z-index: 0;
+    background-size: cover;
+    background-position: center;
+    background-repeat: no-repeat;
+    transition: transform 0.5s ease;
+}
+.annc-card:hover .annc-card-image { transform: scale(1.06); }
+.annc-card-image.fallback {
+    background: linear-gradient(135deg, #1b5e20 0%, #2E7D32 40%, #66bb6a 100%);
+    display: flex; align-items: center; justify-content: center;
+}
+.annc-card-image.fallback::after {
+    content: '\f0a1';
+    font-family: 'Font Awesome 6 Free';
+    font-weight: 900;
+    font-size: 5rem;
+    color: rgba(255,255,255,0.2);
+}
+
+.annc-card-top {
+    position: absolute; top: 14px; left: 14px; right: 14px;
+    display: flex; gap: 8px; align-items: flex-start;
+    z-index: 3; flex-wrap: wrap;
+}
+.annc-badge {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 5px 12px; border-radius: 14px;
+    font-size: 0.68rem; font-weight: 800;
+    text-transform: uppercase; letter-spacing: 0.5px;
+    backdrop-filter: blur(10px);
+    background: rgba(255,255,255,0.25);
+    color: #fff;
+    border: 1px solid rgba(255,255,255,0.3);
+}
+.annc-badge.urgent   { background: #e53935; border-color: #e53935; }
+.annc-badge.event    { background: #7b1fa2; border-color: #7b1fa2; }
+.annc-badge.advisory { background: #f57c00; border-color: #f57c00; }
+.annc-badge.health   { background: #00897b; border-color: #00897b; }
+.annc-badge.safety   { background: #c62828; border-color: #c62828; }
+.annc-badge.pinned   { background: #ffb300; color: #4a2f00; border-color: #ffb300; }
+.annc-badge.draft    { background: #546e7a; border-color: #546e7a; }
+.annc-badge.expiry   {
+    background: rgba(0,0,0,0.55);
+    border-color: rgba(255,255,255,0.35);
+    color: #fff;
+    font-weight: 700;
+}
+.annc-badge.expiry.soon   { background: #f57c00; border-color: #f57c00; }
+.annc-badge.expiry.urgent { background: #e53935; border-color: #e53935; }
+
+.annc-card-actions {
+    position: absolute; top: 14px; right: 14px;
+    display: flex; gap: 6px; z-index: 4;
+    opacity: 0; transform: translateY(-4px);
+    transition: all 0.2s;
+}
+.annc-card:hover .annc-card-actions {
+    opacity: 1; transform: translateY(0);
+}
+.annc-icon-btn {
+    width: 32px; height: 32px; border-radius: 50%;
+    border: 1px solid rgba(255,255,255,0.3);
+    background: rgba(0,0,0,0.45); color: #fff;
+    cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.78rem;
+    backdrop-filter: blur(8px);
+    transition: all 0.15s;
+}
+.annc-icon-btn:hover {
+    background: rgba(255,255,255,0.95);
+    color: #1a1a1a;
+    transform: scale(1.08);
+}
+.annc-icon-btn.danger:hover { background: #c62828; color: #fff; }
+
+.annc-card-body {
+    position: relative; z-index: 2;
+    padding: 22px 20px 20px;
+    color: #fff;
+}
+.annc-card-title {
+    font-size: 1.18rem; font-weight: 800;
+    line-height: 1.3; margin: 0 0 8px;
+    text-shadow: 0 2px 8px rgba(0,0,0,0.5);
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+.annc-card-text {
+    font-size: 0.85rem; line-height: 1.55;
+    color: rgba(255,255,255,0.92);
+    margin: 0;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    text-shadow: 0 1px 4px rgba(0,0,0,0.4);
+}
+.annc-card-meta {
+    display: flex; gap: 14px;
+    font-size: 0.72rem;
+    color: rgba(255,255,255,0.85);
+    flex-wrap: wrap; margin-top: 12px;
+}
+.annc-card-meta span {
+    display: inline-flex; align-items: center; gap: 5px;
+}
+
+.annc-empty {
+    text-align: center;
+    padding: 50px 20px;
+    background: linear-gradient(135deg, #f1f8e9, #e8f5e9);
+    border: 2px dashed #a5d6a7;
+    border-radius: 18px;
+    color: #4a5f56;
+}
+.annc-empty i {
+    font-size: 3rem; color: #a5d6a7;
+    margin-bottom: 14px; display: block;
+}
+.annc-empty h4 { margin: 0 0 6px; color: #1a472a; font-size: 1rem; }
+.annc-empty p  { margin: 0; font-size: 0.85rem; }
+
+@media (max-width: 640px) {
+    .annc-grid { grid-template-columns: 1fr; }
+    .annc-card { min-height: 220px; }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   ANNOUNCEMENT CAROUSEL
+   ═══════════════════════════════════════════════════════════ */
+.annc-carousel {
+    position: relative;
+    width: 100%;
+    overflow: hidden;
+    border-radius: 18px;
+}
+
+.annc-carousel-track {
+    display: flex;
+    width: 100%;
+    transition: transform 0.5s cubic-bezier(0.65, 0, 0.35, 1);
+    will-change: transform;
+}
+
+.annc-carousel-slide {
+    flex: 0 0 100%;
+    min-width: 0;
+    padding: 0;                     /* slide has no padding; card handles it */
+}
+
+.annc-carousel-slide .annc-card {
+    width: 100%;
+    min-height: 420px;              /* tall, matches stats column */
+    border-radius: 18px;
+    margin: 0;
+}
+
+/* Nav arrows */
+.annc-nav-btn {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, 0.55);
+    color: #fff;
+    border: 1px solid rgba(255,255,255,0.25);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1rem;
+    z-index: 10;
+    backdrop-filter: blur(8px);
+    transition: all 0.15s;
+    opacity: 0.85;
+}
+.annc-nav-btn:hover {
+    background: rgba(0, 0, 0, 0.85);
+    opacity: 1;
+    transform: translateY(-50%) scale(1.06);
+}
+.annc-nav-btn.prev { left: 14px; }
+.annc-nav-btn.next { right: 14px; }
+
+/* Dots */
+.annc-dots {
+    position: absolute;
+    bottom: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    gap: 8px;
+    padding: 8px 14px;
+    background: rgba(0, 0, 0, 0.45);
+    border-radius: 20px;
+    backdrop-filter: blur(8px);
+    z-index: 10;
+}
+.annc-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.4);
+    border: none;
+    cursor: pointer;
+    transition: all 0.25s ease;
+    padding: 0;
+}
+.annc-dot:hover {
+    background: rgba(255,255,255,0.75);
+}
+.annc-dot.active {
+    background: #fff;
+    width: 24px;
+    border-radius: 4px;
+}
+
+/* Left column: fill the space with a single, tall card */
+.dash-left .annc-grid {
+    grid-template-columns: 1fr;
+    gap: 18px;
+}
+.dash-left .annc-card {
+    min-height: 420px;
+}
+
+@media (max-width: 900px) {
+    .annc-carousel-slide .annc-card { min-height: 320px; }
+    .annc-nav-btn { width: 38px; height: 38px; font-size: 0.9rem; }
+    .annc-nav-btn.prev { left: 8px; }
+    .annc-nav-btn.next { right: 8px; }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   ANALYTICS DASHBOARD  (dx-*)
+   ═══════════════════════════════════════════════════════════ */
+.dx { display: flex; flex-direction: column; gap: 14px; }
+
+/* top bar */
+.dx-top {
+    display: flex; justify-content: space-between; align-items: center;
+    gap: 14px; flex-wrap: wrap;
+    background: linear-gradient(135deg, #1b5e20, #2E7D32 55%, #43a047);
+    color: #fff; border-radius: 16px; padding: 14px 20px;
+    box-shadow: 0 8px 22px rgba(46,125,50,0.22);
+    position: relative; overflow: hidden;
+}
+.dx-top::after {
+    content: ''; position: absolute; right: -60px; top: -90px;
+    width: 220px; height: 220px; border-radius: 50%;
+    background: rgba(255,255,255,0.08); pointer-events: none;
+}
+.dx-top-text { position: relative; z-index: 1; min-width: 0; }
+.dx-top-text h2 { margin: 0; font-size: 1.15rem; font-weight: 800; }
+.dx-top-text p  { margin: 3px 0 0; font-size: 0.8rem; opacity: 0.9; display: flex; align-items: center; gap: 6px; }
+.dx-top-actions { position: relative; z-index: 1; display: flex; gap: 8px; flex-wrap: wrap; }
+.dx-top-btn {
+    border: 1px solid rgba(255,255,255,0.35); background: rgba(255,255,255,0.15);
+    color: #fff; padding: 8px 14px; border-radius: 10px; cursor: pointer;
+    font-size: 0.78rem; font-weight: 700; display: inline-flex; align-items: center; gap: 7px;
+    transition: all .15s; backdrop-filter: blur(6px);
+}
+.dx-top-btn:hover { background: #fff; color: #1b5e20; transform: translateY(-1px); }
+
+/* KPI strip */
+.dx-kpis { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+.dx-kpi {
+    background: #fff; border: 1px solid #e2efe8; border-radius: 14px;
+    padding: 10px 12px; display: flex; align-items: center; gap: 10px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.04); transition: all .18s; min-width: 0;
+}
+.dx-kpi[data-go] { cursor: pointer; }
+.dx-kpi[data-go]:hover { transform: translateY(-2px); border-color: #a5d6a7; box-shadow: 0 8px 18px rgba(0,0,0,0.08); }
+.dx-kpi-ic {
+    width: 38px; height: 38px; border-radius: 11px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center; font-size: 1rem;
+}
+.dx-kpi-num { font-size: 1.35rem; font-weight: 800; color: #1a2b22; line-height: 1; letter-spacing: -0.4px; }
+.dx-kpi-lbl {
+    font-size: 0.64rem; font-weight: 700; color: #7a8a82; margin-top: 3px;
+    text-transform: uppercase; letter-spacing: 0.3px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.dx-kpi > div:last-child { min-width: 0; }
+
+/* grid + cards */
+.dx-grid { display: grid; grid-template-columns: 1fr; gap: 14px; }
+.dx-card {
+    background: #fff; border: 1px solid #e2efe8; border-radius: 16px;
+    padding: 14px 16px; display: flex; flex-direction: column;
+    min-height: 0; min-width: 0; box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+}
+.dx-card-h { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; flex-shrink: 0; }
+.dx-card-h h4 { margin: 0; font-size: 0.9rem; color: #1a472a; display: flex; align-items: center; gap: 8px; }
+.dx-card-h h4 i { color: #2E7D32; }
+.dx-chart { position: relative; height: 260px; min-height: 0; }
+.dx-chart canvas { max-width: 100%; }
+
+/* segmented toggle */
+.dx-seg { display: inline-flex; background: #f1f6f3; border-radius: 10px; padding: 3px; gap: 2px; }
+.dx-seg button {
+    border: none; background: transparent; padding: 5px 11px; border-radius: 8px;
+    font-size: 0.72rem; font-weight: 700; color: #5f7f6e; cursor: pointer; transition: all .15s;
+}
+.dx-seg button.active { background: #2E7D32; color: #fff; box-shadow: 0 2px 6px rgba(46,125,50,0.3); }
+
+.dx-delta {
+    display: inline-flex; align-items: center; gap: 5px; font-size: 0.7rem; font-weight: 800;
+    padding: 3px 9px; border-radius: 12px; background: #e8f5e9; color: #2e7d32;
+}
+.dx-delta.down { background: #ffebee; color: #c62828; }
+.dx-delta.flat { background: #eceff1; color: #546e7a; }
+
+/* calendar */
+.dx-cal-nav { display: flex; align-items: center; gap: 4px; }
+.dx-cal-nav button {
+    width: 28px; height: 28px; border-radius: 8px; border: 1px solid #e2efe8; background: #fff;
+    color: #2E7D32; cursor: pointer; font-size: 0.72rem; transition: all .15s;
+}
+.dx-cal-nav button:hover { background: #e8f5e9; }
+.dx-cal-nav button.today { width: auto; padding: 0 10px; font-weight: 700; font-size: 0.7rem; }
+.dx-cal-title { font-weight: 800; color: #1a472a; font-size: 0.86rem; min-width: 112px; text-align: center; }
+.dx-cal-wrap { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.dx-cal-dow { display: grid; grid-template-columns: repeat(7, 1fr); text-align: center; font-size: 0.64rem; font-weight: 800; color: #8a9a92; text-transform: uppercase; letter-spacing: .4px; padding-bottom: 4px; flex-shrink: 0; }
+.dx-cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; flex: 1; min-height: 190px; }
+.dx-day {
+    border: 1.5px solid transparent; background: #f8faf8; border-radius: 9px; cursor: pointer;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+    font-size: 0.76rem; font-weight: 700; color: #1a2b22; padding: 2px; min-height: 32px;
+    transition: all .12s; font-family: inherit;
+}
+.dx-day:hover { background: #e8f5e9; }
+.dx-day.blank { background: transparent; cursor: default; pointer-events: none; }
+.dx-day.today { background: #2E7D32; color: #fff; }
+.dx-day.today:hover { background: #1b5e20; }
+.dx-day.sel { border-color: #2E7D32; box-shadow: 0 0 0 2px rgba(46,125,50,0.15); }
+.dx-dots { display: flex; gap: 2px; height: 6px; align-items: center; }
+.dx-dot { width: 5px; height: 5px; border-radius: 50%; }
+.dx-dot.hearing { background: #8e24aa; }
+.dx-dot.pickup  { background: #43a047; }
+.dx-day.today .dx-dot { box-shadow: 0 0 0 1px #fff; }
+.dx-legend { display: flex; gap: 14px; font-size: 0.68rem; color: #6b7a72; margin: 8px 0 6px; flex-shrink: 0; flex-wrap: wrap; }
+.dx-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.dx-agenda { border-top: 1px dashed #d7e2dc; padding-top: 8px; max-height: 150px; overflow-y: auto; flex-shrink: 0; }
+.dx-agenda-h { font-size: 0.72rem; font-weight: 800; color: #1a472a; text-transform: uppercase; letter-spacing: .3px; margin-bottom: 6px; }
+.dx-ev {
+    display: flex; gap: 9px; align-items: center; padding: 6px 8px; border-radius: 9px;
+    cursor: pointer; border-left: 4px solid; margin-bottom: 5px; background: #fafbfa;
+}
+.dx-ev:hover { background: #f1f8e9; }
+.dx-ev.hearing { border-left-color: #8e24aa; }
+.dx-ev.pickup  { border-left-color: #43a047; }
+.dx-ev-time { font-size: 0.68rem; font-weight: 800; color: #5f7f6e; min-width: 54px; }
+.dx-ev-body { min-width: 0; flex: 1; }
+.dx-ev-title { font-size: 0.78rem; font-weight: 700; color: #1a2b22; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dx-ev-sub { font-size: 0.68rem; color: #7a8a82; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dx-empty { font-size: 0.78rem; color: #99a69f; text-align: center; padding: 8px 0; }
+
+/* announcements (compact) */
+.dx-annc-body { flex: 1; min-height: 240px; position: relative; }
+.dx-annc-body #anncGridWrap,
+.dx-annc-body .annc-carousel,
+.dx-annc-body .annc-carousel-track,
+.dx-annc-body .annc-carousel-slide { height: 100%; }
+.dx-annc-body .annc-carousel-slide .annc-card,
+.dx-annc-body > #anncGridWrap > .annc-carousel-slide > .annc-card { height: 100%; min-height: 0; border-radius: 14px; }
+.dx-annc-body .annc-card-body { padding: 14px 16px 34px; }
+.dx-annc-body .annc-card-title { font-size: 1rem; margin-bottom: 5px; }
+.dx-annc-body .annc-card-text { font-size: 0.78rem; -webkit-line-clamp: 2; }
+.dx-annc-body .annc-card-meta { margin-top: 8px; font-size: 0.68rem; }
+.dx-annc-body .annc-dots { bottom: 8px; padding: 5px 10px; }
+.dx-annc-body .annc-nav-btn { width: 32px; height: 32px; font-size: 0.8rem; }
+.dx-annc-body .annc-carousel { border-radius: 14px; }
+.dx-annc-body .annc-empty { padding: 24px 14px; height: 100%; display: flex; flex-direction: column; justify-content: center; box-sizing: border-box; }
+.dx-annc-body .annc-empty i { font-size: 2rem; margin-bottom: 8px; }
+.dx-add-btn {
+    border: none; background: linear-gradient(135deg, #2E7D32, #43a047); color: #fff;
+    padding: 6px 12px; border-radius: 16px; font-size: 0.72rem; font-weight: 700; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 6px; box-shadow: 0 3px 10px rgba(46,125,50,0.25);
+}
+.dx-add-btn:hover { transform: translateY(-1px); }
+@media (hover: none) {
+    .annc-card-actions { opacity: 1; transform: none; }
+}
+
+/* recent requests */
+.dx-recent-list { flex: 1; min-height: 0; overflow-y: auto; margin: 0 -6px; padding: 0 6px; }
+.dx-card .activity-item { padding: 9px 10px; }
+.dx-card .activity-list { max-height: none; padding: 0; }
+
+
+
+/* ── Captain layout: BIG read-only announcements on the left ── */
+.dx-annc .dx-annc-body { min-height: 340px; }
+.dx-annc .annc-card { cursor: pointer; }
+.dx-annc .dx-annc-body .annc-card-body { padding: 22px 26px 46px; }
+.dx-annc .dx-annc-body .annc-card-title { font-size: 1.45rem; line-height: 1.25; -webkit-line-clamp: 3; margin-bottom: 10px; }
+.dx-annc .dx-annc-body .annc-card-text  { font-size: 0.95rem; line-height: 1.6; -webkit-line-clamp: 5; }
+.dx-annc .dx-annc-body .annc-card-meta  { margin-top: 14px; font-size: 0.78rem; }
+.dx-annc .dx-annc-body .annc-card-top   { top: 18px; left: 20px; right: 20px; }
+.dx-annc .dx-annc-body .annc-dots       { bottom: 14px; }
+.dx-annc .dx-annc-body .annc-nav-btn    { width: 42px; height: 42px; font-size: 0.95rem; }
+.dx-annc .dx-annc-body .annc-card-image.fallback::after { font-size: 7rem; }
+.dx-readmore {
+    display: inline-flex; align-items: center; gap: 6px; margin-top: 12px;
+    font-size: 0.74rem; font-weight: 800; letter-spacing: .3px; text-transform: uppercase;
+    color: #fff; background: rgba(255,255,255,0.22); border: 1px solid rgba(255,255,255,0.35);
+    padding: 5px 12px; border-radius: 14px; backdrop-filter: blur(6px);
+}
+.dx-count-chip { font-size: 0.7rem; font-weight: 800; padding: 3px 10px; border-radius: 12px; background: #ffebee; color: #c62828; }
+.dx-count-chip.ok { background: #e8f5e9; color: #2e7d32; }
+
+/* equipment + emergency dots/events */
+.dx-dot.equipment { background: #1976d2; }
+.dx-dot.emergency { background: #e53935; }
+.dx-ev.equipment  { border-left-color: #1976d2; }
+.dx-ev.emergency  { border-left-color: #e53935; }
+
+/* emergency feed */
+.dx-emg-list { flex: 1; min-height: 0; overflow-y: auto; margin: 0 -6px; padding: 0 6px; }
+.dx-emg {
+    display: flex; gap: 10px; align-items: center; padding: 8px 10px; border-radius: 11px;
+    cursor: pointer; transition: background .15s; border-left: 4px solid #e53935; background: #fafbfa; margin-bottom: 6px;
+}
+.dx-emg:hover { background: #fff5f5; }
+.dx-emg.accepted { border-left-color: #43a047; }
+.dx-emg.accepted:hover { background: #f1f8e9; }
+.dx-emg-ic { width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; flex-shrink: 0; font-size: 0.85rem; }
+.dx-emg-body { min-width: 0; flex: 1; }
+.dx-emg-t { font-size: 0.78rem; font-weight: 800; color: #1a2b22; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dx-emg-s { font-size: 0.68rem; color: #7a8a82; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
+.dx-emg-chip { font-size: 0.6rem; font-weight: 800; padding: 3px 8px; border-radius: 10px; text-transform: uppercase; letter-spacing: .3px; flex-shrink: 0; background: #fff3e0; color: #e65100; }
+.dx-emg-chip.accepted { background: #e8f5e9; color: #2e7d32; }
+.dx-emg-chip.pending  { animation: dxPulse 1.6s infinite; }
+@keyframes dxPulse { 0%,100% { box-shadow: 0 0 0 0 rgba(230,81,0,0.35); } 50% { box-shadow: 0 0 0 5px rgba(230,81,0,0); } }
+
+/* ── tablet ── */
+@media (min-width: 700px) {
+    .dx-kpis { grid-template-columns: repeat(4, 1fr); }
+    .dx-grid { grid-template-columns: repeat(2, 1fr); }
+    .dx-annc  { grid-column: span 2; }
+    .dx-annc .dx-annc-body { min-height: 380px; }
+    .dx-chart { height: 280px; }
+    .dx-emerg { min-height: 300px; }
+}
+/* ── desktop: fits one screen (no page scrolling) ── */
+@media (min-width: 1200px) {
+    .dx { height: calc(100dvh - 150px); min-height: 700px; }
+    .dx-kpis { grid-template-columns: repeat(8, 1fr); flex-shrink: 0; }
+    .dx-kpi { flex-direction: column; align-items: flex-start; gap: 8px; padding: 10px 12px; }
+    .dx-kpi-ic { width: 32px; height: 32px; font-size: 0.88rem; }
+    .dx-top { flex-shrink: 0; }
+    .dx-grid { flex: 1; min-height: 0; grid-template-columns: repeat(12, 1fr); grid-template-rows: 1fr 1fr; }
+    .dx-annc   { grid-column: span 5; grid-row: span 2; }
+    .dx-trend  { grid-column: span 4; }
+    .dx-status { grid-column: span 3; }
+    .dx-cal    { grid-column: span 4; }
+    .dx-emerg  { grid-column: span 3; }
+    .dx-chart { flex: 1; height: auto; }
+    .dx-annc .dx-annc-body { min-height: 0; }
+    .dx-annc .dx-annc-body .annc-card-title { font-size: 1.7rem; }
+    .dx-cal .dx-agenda { max-height: 96px; }
+    .dx-cal .dx-cal-grid { min-height: 130px; }
+}
+@media (max-width: 480px) {
+    .dx-top-btn span { display: none; }
+    .dx-top-btn { padding: 9px 12px; }
+    .dx-cal-title { min-width: 96px; }
+    .dx-annc .dx-annc-body .annc-card-title { font-size: 1.2rem; }
+}
+/* Full-bleed announcement modal — image IS the modal */
+.annc-full-popup {
+    padding: 0 !important;
+    background: transparent !important;
+    border-radius: 18px !important;
+    overflow: hidden !important;
+    width: 640px !important;
+    max-width: 95vw !important;
+}
+.annc-full-popup .swal2-html-container {
+    margin: 0 !important;
+    padding: 0 !important;
+    overflow: hidden !important;
+}
+.annc-full-popup .swal2-title,
+.annc-full-popup .swal2-actions {
+    display: none !important;
+}
+.annc-full-popup .swal2-close {
+    color: #fff !important;
+    z-index: 20 !important;
+    text-shadow: 0 1px 4px rgba(0,0,0,0.6);
+}
+
     </style>
 </head>
 <body>
@@ -735,8 +2739,17 @@ $stats['referrals'] = mysqli_fetch_assoc($result)['total'] ?? 0;
                 <i class="fas fa-gavel"></i><span>Complaints</span>
                 <span class="pending-count" id="complaintsBadge" style="display:none;margin-left:auto;background:#e65100;color:#fff;border-radius:10px;padding:2px 8px;font-size:0.65rem;">0</span>
             </div>
-            <div class="nav-item" onclick="window.location.href='residents.php'"><i class="fas fa-users"></i><span>Residents</span></div>
-            <div class="nav-item" onclick="window.location.href='documents.php'"><i class="fas fa-file-alt"></i><span>Documents</span></div>
+            <div class="nav-item" id="equipmentParent">
+    <i class="fas fa-tools"></i><span>Equipments</span>
+    <i class="fas fa-chevron-down toggle-icon" style="margin-left:auto;font-size:0.75rem;transition:transform .2s;"></i>
+</div>
+<div class="submenu" id="equipmentSubmenu">
+
+    <div class="sub-option" data-subview="equipment_list"><i class="fas fa-list"></i> Equipment List</div>
+    <div class="sub-option" data-subview="equipment_bookings"><i class="fas fa-calendar-alt"></i> Bookings</div>
+</div>
+            <div class="nav-item" data-view="household"><i class="fas fa-home"></i><span>Households</span></div>
+
             <div class="nav-item" onclick="window.location.href='reports.php'"><i class="fas fa-chart-line"></i><span>Reports</span></div>
         </div>
         <div class="sidebar-footer">
@@ -816,13 +2829,119 @@ $stats['referrals'] = mysqli_fetch_assoc($result)['total'] ?? 0;
         </div>
 
         <div class="dashboard-body" id="dashboardBody"></div>
+
+        <!-- ============ EQUIPMENT MODALS (Captain) ============ -->
+<div id="equipmentModal" class="modal" style="display:none;">
+    <div class="modal-content" style="max-width: 720px;">
+        <div class="modal-header">
+            <h2 id="equipmentModalTitle"><i class="fas fa-tools"></i> Equipment</h2>
+            <button class="close-modal" onclick="closeEquipmentModal()">&times;</button>
+        </div>
+        <div class="modal-body" id="equipmentModalBody"></div>
+    </div>
+</div>
+
+<div id="equipmentItemsModal" class="modal" style="display:none;">
+    <div class="modal-content" style="max-width: 800px;">
+        <div class="modal-header">
+            <h2 id="equipmentItemsModalTitle"><i class="fas fa-boxes"></i> Items</h2>
+            <button class="close-modal" onclick="closeEquipmentItemsModal()">&times;</button>
+        </div>
+        <div class="modal-body" id="equipmentItemsModalBody"></div>
+    </div>
+</div>
+
+<div id="manageItemModal" class="modal" style="display:none;">
+    <div class="modal-content" style="max-width: 560px;">
+        <div class="modal-header">
+            <h2 id="manageItemModalTitle"><i class="fas fa-tools"></i> Manage Item</h2>
+            <button class="close-modal" onclick="closeManageItemModal()">&times;</button>
+        </div>
+        <div class="modal-body" id="manageItemModalBody"></div>
+    </div>
+</div>
+
+<div id="scheduleModal" class="modal" style="display:none;">
+    <div class="modal-content" style="max-width: 900px;">
+        <div class="modal-header">
+            <h2 id="scheduleModalTitle"><i class="fas fa-calendar-alt"></i> Schedule</h2>
+            <button class="close-modal" onclick="closeScheduleModal()">&times;</button>
+        </div>
+        <div class="modal-body" id="scheduleModalBody"></div>
+    </div>
+</div>
+
+<div id="dayBookingsModal" class="modal" style="display:none;">
+    <div class="modal-content" style="max-width: 700px;">
+        <div class="modal-header">
+            <h2 id="dayBookingsModalTitle"><i class="fas fa-calendar-day"></i> Bookings</h2>
+            <button class="close-modal" onclick="closeDayBookingsModal()">&times;</button>
+        </div>
+        <div class="modal-body" id="dayBookingsModalBody"></div>
+    </div>
+</div>
+
+<div id="bookingModal" class="modal" style="display:none;">
+    <div class="modal-content" style="max-width: 720px;">
+        <div class="modal-header">
+            <h2><i class="fas fa-info-circle"></i> Booking Details</h2>
+            <button class="close-modal" onclick="closeBookingModal()">&times;</button>
+        </div>
+        <div class="modal-body" id="bookingModalBody"></div>
+    </div>
+</div>
+
+<div id="bookingApprovalModal" class="modal" style="display:none;">
+    <div class="modal-content" style="max-width: 560px;">
+        <div class="modal-header">
+            <h2 id="bookingActionTitle"><i class="fas fa-check-circle"></i> Booking Action</h2>
+            <button class="close-modal" onclick="closeBookingApprovalModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div id="bookingApprovalStatus" class="email-status" style="display:none;"></div>
+            <div class="form-group">
+                <label>Admin Notes (Optional)</label>
+                <textarea id="bookingApprovalNotes" class="form-control" rows="3" placeholder="Add remarks..."></textarea>
+            </div>
+            <div class="form-buttons">
+                <button type="button" id="confirmBookingBtn" class="btn-verify" onclick="submitBookingAction()"><i class="fas fa-check-circle"></i> Confirm</button>
+                <button type="button" class="btn-close" onclick="closeBookingApprovalModal()">Cancel</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div id="returnModal" class="modal" style="display:none;">
+    <div class="modal-content" style="max-width: 520px;">
+        <div class="modal-header">
+            <h2><i class="fas fa-undo-alt"></i> Return Item</h2>
+            <button class="close-modal" onclick="closeReturnModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div class="form-group">
+                <label>Return Notes (Optional)</label>
+                <textarea id="returnNotes" class="form-control" rows="3" placeholder="Condition of returned item..."></textarea>
+            </div>
+            <div class="form-buttons">
+                <button type="button" class="btn-verify" onclick="confirmReturn()"><i class="fas fa-check-circle"></i> Confirm Return</button>
+                <button type="button" class="btn-close" onclick="closeReturnModal()">Cancel</button>
+            </div>
+        </div>
+    </div>
+</div>
+<!-- ============ /EQUIPMENT MODALS ============ -->
     </main>
 </div>
 
 <form id="logoutForm" method="POST" action="../../logout.php" style="display: none;"></form>
 
 <?php include __DIR__ . '/admin_settings_modal.php'; ?>
-
+<script>
+    window.CURRENT_ROLE = 'captain';
+    window.CURRENT_ROLE_LABEL = 'Captain';
+</script>
+<script src="captain_equipment.js"></script>
+<script src="captain_household.js"></script>
 <script>
 // ============================================================
 // HELPERS
@@ -834,6 +2953,37 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 function pad2(n) { return String(n).padStart(2, '0'); }
+
+// Inline error used inside the wizard (avoids Swal.fire which would close the modal)
+function alertInlineError(msg) {
+    const host = document.getElementById('swalSessionInlineError');
+    if (!host) { alert(msg); return; }
+    host.textContent = msg;
+    host.style.display = 'block';
+    clearTimeout(window.__inlineErrTimer);
+    window.__inlineErrTimer = setTimeout(() => { host.style.display = 'none'; }, 5000);
+}
+function clearInlineError() {
+    const host = document.getElementById('swalSessionInlineError');
+    if (host) host.style.display = 'none';
+}
+
+// Inline progress bar (used inside the wizard — no external popup)
+function showSessionProgress(label, pct) {
+    const wrap = document.getElementById('swalSessionProgress');
+    const bar  = document.getElementById('swalSessionProgressBar');
+    const lbl  = document.getElementById('swalSessionProgressLabel');
+    if (!wrap) return;
+    wrap.style.display = 'block';
+    if (bar) bar.style.width = (pct || 0) + '%';
+    if (lbl) lbl.textContent = label || 'Working…';
+}
+function hideSessionProgress() {
+    const wrap = document.getElementById('swalSessionProgress');
+    if (wrap) wrap.style.display = 'none';
+    const bar = document.getElementById('swalSessionProgressBar');
+    if (bar) bar.style.width = '0%';
+}
 
 const profileArea = document.getElementById('profileArea');
 const profileDropdown = document.getElementById('profileDropdown');
@@ -907,10 +3057,6 @@ function isSessionRecordValid(prefix) {
 
 // ============================================================
 // PARTY STATEMENTS — Record / Preview / Playback / Deferred upload
-// • Recording stays local until finalize (no server writes per take)
-// • Only ONE take per party is kept — re-record replaces
-// • Playback shows animated waveform + duration
-// • Required: text OR audio, validated before save
 // ============================================================
 window.__recorders        = window.__recorders        || {};
 window.__stmtBlobs        = window.__stmtBlobs        || {};
@@ -1015,7 +3161,7 @@ async function startStatementRecording(prefix, party) {
     if (window.__recorders[key]) return;
 
     if (!navigator.mediaDevices || !window.MediaRecorder) {
-        Swal.fire('Not supported', 'Audio recording is not supported in this browser.', 'warning');
+        alertInlineError('Audio recording is not supported in this browser.');
         return;
     }
 
@@ -1023,7 +3169,7 @@ async function startStatementRecording(prefix, party) {
     try {
         stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch (err) {
-        Swal.fire('Microphone Error', 'Could not access microphone: ' + (err.name || 'unknown'), 'error');
+        alertInlineError('Could not access microphone: ' + (err.name || 'unknown'));
         return;
     }
 
@@ -1032,7 +3178,7 @@ async function startStatementRecording(prefix, party) {
         rec = new MediaRecorder(stream);
     } catch (e) {
         stream.getTracks().forEach(t => t.stop());
-        Swal.fire('Recorder Error', 'Could not create MediaRecorder.', 'error');
+        alertInlineError('Could not create MediaRecorder.');
         return;
     }
 
@@ -1047,7 +3193,7 @@ async function startStatementRecording(prefix, party) {
         const blob = new Blob(chunks, { type: rec.mimeType || 'audio/webm' });
         if (!blob.size) {
             _pstmtHideRecordingUi(prefix, party);
-            Swal.fire('Empty recording', 'No audio was captured. Please try again.', 'warning');
+            alertInlineError('Empty recording. Please try again.');
             return;
         }
 
@@ -1064,7 +3210,7 @@ async function startStatementRecording(prefix, party) {
     try { rec.start(); }
     catch (e) {
         stream.getTracks().forEach(t => t.stop());
-        Swal.fire('Recorder Error', 'Could not start recording: ' + (e.name || ''), 'error');
+        alertInlineError('Could not start recording: ' + (e.name || ''));
         return;
     }
 
@@ -1180,7 +3326,7 @@ function toggleStatementPlayback(prefix, party) {
 
     audio.currentTime = 0;
     audio.play().catch(err => {
-        Swal.fire('Playback error', err.message || 'Could not play audio.', 'error');
+        alertInlineError('Could not play audio: ' + (err.message || ''));
     });
 }
 function _pstmtSetPlayIcon(prefix, party, playing) {
@@ -1555,124 +3701,1064 @@ async function openHearingDetail(hearingId) {
     });
 }
 
+
+// ============================================================
+// DASHBOARD WIDGETS — announcements · charts · calendar · SOS
+// ============================================================
+const DX = <?php echo $dxJson ?: '{}'; ?>;
+
+const DX_ANN_CATS = {
+    general:  { label: 'General',  icon: 'fa-bullhorn' },
+    urgent:   { label: 'Urgent',   icon: 'fa-exclamation-circle' },
+    event:    { label: 'Event',    icon: 'fa-calendar-check' },
+    advisory: { label: 'Advisory', icon: 'fa-info-circle' },
+    health:   { label: 'Health',   icon: 'fa-heartbeat' },
+    safety:   { label: 'Safety',   icon: 'fa-shield-alt' },
+};
+
+// Complaints the Captain handles (pending_review belongs to the Secretary)
+const DX_CASE_GROUPS = [
+    { label: 'Pending Action',  color: '#f57c00', statuses: ['pending_captain_action'] },
+    { label: 'Mediation',       color: '#8e24aa', statuses: ['summoned','for_mediation','mediation_scheduled','in_mediation'] },
+    { label: 'Pangkat',         color: '#00838f', statuses: ['failed_mediation','pangkat_constitution_scheduled','pangkat_constituted','pangkat_scheduled'] },
+    { label: 'Settlement',      color: '#66bb6a', statuses: ['settled_pending'] },
+    { label: 'Resolved',        color: '#2E7D32', statuses: ['settled','certificate_issued'] },
+    { label: 'Unresolved',      color: '#c62828', statuses: ['unresolved','failed_conciliation_final'] },
+    { label: 'Referrals',       color: '#1976d2', statuses: ['escalated','pending_captain_review','referred_dispatched','released','referred'] },
+    { label: 'Dismissed',       color: '#90a4ae', statuses: ['dismissed'] },
+];
+const DX_EQ_COLORS = { pending:'#f57c00', approved:'#43a047', borrowed:'#1976d2', returned:'#78909c', rejected:'#e53935', cancelled:'#b0bec5' };
+const DX_EMG_COLORS = { PENDING:'#f57c00', ACCEPTED:'#43a047', RESOLVED:'#1976d2', COMPLETED:'#1976d2', CANCELLED:'#b0bec5', REJECTED:'#e53935' };
+const DX_EMG_TYPE = {
+    medical: { icon: 'fa-briefcase-medical', bg: '#ffebee', fg: '#c62828' },
+    fire:    { icon: 'fa-fire',              bg: '#fff3e0', fg: '#e65100' },
+    crime:   { icon: 'fa-user-secret',       bg: '#ede7f6', fg: '#4527a0' },
+};
+
+let __dxCharts = {};
+let __dxTrendTab = 'trend';
+let __dxStatusTab = 'complaints';
+const __dxToday = new Date();
+let __dxCal = { y: __dxToday.getFullYear(), m: __dxToday.getMonth(), sel: null };
+
+function dxPad(n) { return String(n).padStart(2, '0'); }
+function dxYmd(y, m, d) { return `${y}-${dxPad(m + 1)}-${dxPad(d)}`; }
+function dxDestroy(key) { if (__dxCharts[key]) { try { __dxCharts[key].destroy(); } catch (e) {} delete __dxCharts[key]; } }
+function dxCap(t) { t = String(t || ''); return t.charAt(0).toUpperCase() + t.slice(1).toLowerCase(); }
+
+function initDashboardWidgets() {
+    Object.keys(__dxCharts).forEach(dxDestroy);
+    __dxTrendTab = 'trend';
+    __dxStatusTab = 'complaints';
+    __dxCal = { y: __dxToday.getFullYear(), m: __dxToday.getMonth(),
+                sel: dxYmd(__dxToday.getFullYear(), __dxToday.getMonth(), __dxToday.getDate()) };
+
+    const g = document.getElementById('dxGreeting');
+    if (g) {
+        const h = new Date().getHours();
+        g.textContent = h < 12 ? 'Good morning' : (h < 18 ? 'Good afternoon' : 'Good evening');
+    }
+    if (typeof Chart === 'undefined') {
+        document.querySelectorAll('.dx-chart').forEach(el => {
+            el.innerHTML = '<div class="dx-empty">Charts could not load (Chart.js unavailable).</div>';
+        });
+    } else {
+        Chart.defaults.font.family = "'Segoe UI', Roboto, sans-serif";
+        Chart.defaults.color = '#5f6f66';
+        dxRenderTrend();
+        dxRenderStatus();
+    }
+    dxRenderCalendar();
+    dxRenderEmergencies();
+}
+
+function dxSetSeg(btn) {
+    if (!btn) return;
+    btn.parentElement.querySelectorAll('button').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+}
+function dxSetTrend(tab, btn)  { dxSetSeg(btn); __dxTrendTab = tab;  dxRenderTrend(); }
+function dxSetStatus(tab, btn) { dxSetSeg(btn); __dxStatusTab = tab; dxRenderStatus(); }
+
+// ── Trend / SOS types ──
+function dxRenderTrend() {
+    const el = document.getElementById('dxTrendCanvas');
+    if (!el || typeof Chart === 'undefined') return;
+    dxDestroy('trend');
+    const title = document.getElementById('dxTrendTitle');
+    const deltaEl = document.getElementById('dxDelta');
+
+    if (__dxTrendTab === 'trend') {
+        if (title) title.textContent = '6-Month Trend';
+        const comps = DX.complaintMonthly || [];
+        if (deltaEl) {
+            const cur = comps[comps.length - 1] || 0, prev = comps[comps.length - 2] || 0;
+            let cls = 'flat', txt = 'no change', ic = 'fa-minus';
+            if (prev > 0) {
+                const pct = Math.round(((cur - prev) / prev) * 100);
+                if (pct > 0)      { cls = '';     ic = 'fa-arrow-up';   txt = `${pct}%`; }
+                else if (pct < 0) { cls = 'down'; ic = 'fa-arrow-down'; txt = `${Math.abs(pct)}%`; }
+            } else if (cur > 0) { cls = ''; ic = 'fa-arrow-up'; txt = `${cur} new`; }
+            deltaEl.innerHTML = `<span class="dx-delta ${cls}"><i class="fas ${ic}"></i> Cases ${txt}</span>`;
+        }
+        const grad = (hex) => (ctx) => {
+            const a = ctx.chart.chartArea;
+            if (!a) return hex + '22';
+            const g = ctx.chart.ctx.createLinearGradient(0, a.top, 0, a.bottom);
+            g.addColorStop(0, hex + '40'); g.addColorStop(1, hex + '05');
+            return g;
+        };
+        const ds = (label, data, hex) => ({
+            label, data, borderColor: hex, backgroundColor: grad(hex), fill: true, tension: 0.4,
+            borderWidth: 3, pointRadius: 4, pointBackgroundColor: '#fff', pointBorderWidth: 2, pointHoverRadius: 6
+        });
+        __dxCharts.trend = new Chart(el, {
+            type: 'line',
+            data: { labels: DX.months || [], datasets: [
+                ds('Complaints', comps, '#8e24aa'),
+                ds('Emergencies', DX.emergencyMonthly || [], '#e53935'),
+                ds('Equipment', DX.equipmentMonthly || [], '#1976d2'),
+            ]},
+            options: {
+                responsive: true, maintainAspectRatio: false,
+                interaction: { mode: 'index', intersect: false },
+                plugins: {
+                    legend: { position: 'bottom', labels: { usePointStyle: true, boxWidth: 8, font: { size: 11 } } },
+                    tooltip: { backgroundColor: '#1a2b22', padding: 10, cornerRadius: 8 }
+                },
+                scales: {
+                    x: { grid: { display: false } },
+                    y: { beginAtZero: true, ticks: { precision: 0, maxTicksLimit: 5 }, grid: { color: '#eef2f0' }, border: { display: false } }
+                }
+            }
+        });
+    } else {
+        if (title) title.textContent = 'Emergencies by Type';
+        if (deltaEl) deltaEl.innerHTML = '';
+        const types = DX.emergencyTypes || [];
+        __dxCharts.trend = new Chart(el, {
+            type: 'bar',
+            data: {
+                labels: types.map(t => t.name),
+                datasets: [{ label: 'Reports', data: types.map(t => t.count),
+                    backgroundColor: types.map(t => (DX_EMG_TYPE[String(t.name).toLowerCase()] || { fg: '#78909c' }).fg),
+                    borderRadius: 8, borderSkipped: false, maxBarThickness: 46 }]
+            },
+            options: {
+                responsive: true, maintainAspectRatio: false,
+                plugins: { legend: { display: false }, tooltip: { backgroundColor: '#1a2b22', padding: 10, cornerRadius: 8 } },
+                scales: {
+                    x: { grid: { display: false } },
+                    y: { beginAtZero: true, ticks: { precision: 0, maxTicksLimit: 5 }, grid: { color: '#eef2f0' }, border: { display: false } }
+                }
+            }
+        });
+    }
+}
+
+// ── Status doughnut ──
+const dxCenterPlugin = {
+    id: 'dxCenter',
+    afterDraw(chart) {
+        const meta = chart.getDatasetMeta(0);
+        if (!meta || !meta.data || !meta.data.length) return;
+        const total = chart.$dxEmpty ? 0 : (chart.data.datasets[0].data || []).reduce((a, b) => a + b, 0);
+        const { x, y } = meta.data[0];
+        const c = chart.ctx;
+        c.save();
+        c.textAlign = 'center'; c.textBaseline = 'middle';
+        c.fillStyle = '#1a2b22'; c.font = "800 26px 'Segoe UI', Roboto, sans-serif";
+        c.fillText(total, x, y - 6);
+        c.fillStyle = '#7a8a82'; c.font = "700 10px 'Segoe UI', Roboto, sans-serif";
+        c.fillText('TOTAL', x, y + 15);
+        c.restore();
+    }
+};
+
+function dxRenderStatus() {
+    const el = document.getElementById('dxStatusCanvas');
+    if (!el || typeof Chart === 'undefined') return;
+    dxDestroy('status');
+
+    let labels = [], data = [], colors = [];
+    if (__dxStatusTab === 'complaints') {
+        const cs = DX.complaintStatus || {};
+        DX_CASE_GROUPS.forEach(g => {
+            const n = g.statuses.reduce((a, st) => a + (cs[st] || 0), 0);
+            if (n > 0) { labels.push(g.label); data.push(n); colors.push(g.color); }
+        });
+    } else if (__dxStatusTab === 'emergencies') {
+        Object.entries(DX.emergencyStatus || {}).forEach(([st, n]) => {
+            labels.push(dxCap(st)); data.push(n); colors.push(DX_EMG_COLORS[st] || '#9e9e9e');
+        });
+    } else {
+        Object.entries((DX.equipment && DX.equipment.status) || {}).forEach(([st, n]) => {
+            labels.push(dxCap(st)); data.push(n); colors.push(DX_EQ_COLORS[st] || '#9e9e9e');
+        });
+    }
+    const empty = data.reduce((a, b) => a + b, 0) === 0;
+    if (empty) { labels = ['No data']; data = [1]; colors = ['#e5ece8']; }
+
+    const chart = new Chart(el, {
+        type: 'doughnut',
+        data: { labels, datasets: [{ data, backgroundColor: colors, borderColor: '#fff', borderWidth: 3, hoverOffset: 6 }] },
+        options: {
+            responsive: true, maintainAspectRatio: false, cutout: '68%',
+            plugins: {
+                legend: { position: 'bottom', labels: { usePointStyle: true, boxWidth: 8, padding: 10, font: { size: 11 } } },
+                tooltip: { enabled: !empty, backgroundColor: '#1a2b22', padding: 10, cornerRadius: 8 }
+            }
+        },
+        plugins: [dxCenterPlugin]
+    });
+    chart.$dxEmpty = empty;
+    __dxCharts.status = chart;
+}
+
+// ── Calendar (hearings · equipment · SOS) ──
+function dxEventsMap() {
+    const map = {};
+    (DX.events || []).forEach((e, i) => { e.__i = i; (map[e.date] = map[e.date] || []).push(e); });
+    return map;
+}
+function dxFmtTime(t) {
+    if (!t) return 'All day';
+    const m = String(t).match(/^(\d{1,2}):(\d{2})/);
+    if (!m) return escapeHtml(String(t));
+    let h = parseInt(m[1], 10); const ap = h >= 12 ? 'PM' : 'AM';
+    h = h % 12 || 12;
+    return `${h}:${m[2]} ${ap}`;
+}
+function dxCalMove(delta) {
+    let m = __dxCal.m + delta, y = __dxCal.y;
+    if (m < 0) { m = 11; y--; } else if (m > 11) { m = 0; y++; }
+    __dxCal.m = m; __dxCal.y = y;
+    dxRenderCalendar();
+}
+function dxCalToday() {
+    __dxCal = { y: __dxToday.getFullYear(), m: __dxToday.getMonth(),
+                sel: dxYmd(__dxToday.getFullYear(), __dxToday.getMonth(), __dxToday.getDate()) };
+    dxRenderCalendar();
+}
+function dxCalSelect(ds) { __dxCal.sel = ds; dxRenderCalendar(); }
+
+function dxRenderCalendar() {
+    const grid = document.getElementById('dxCalGrid');
+    const title = document.getElementById('dxCalTitle');
+    if (!grid) return;
+    const { y, m } = __dxCal;
+    const names = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+    if (title) title.textContent = `${names[m]} ${y}`;
+
+    const first = new Date(y, m, 1).getDay();
+    const days = new Date(y, m + 1, 0).getDate();
+    const rows = Math.ceil((first + days) / 7);
+    const map = dxEventsMap();
+    const todayStr = dxYmd(__dxToday.getFullYear(), __dxToday.getMonth(), __dxToday.getDate());
+
+    let html = '';
+    for (let i = 0; i < first; i++) html += '<div class="dx-day blank"></div>';
+    for (let d = 1; d <= days; d++) {
+        const ds = dxYmd(y, m, d);
+        const evs = map[ds] || [];
+        const kinds = [...new Set(evs.map(e => e.kind))];
+        const dots = kinds.map(k => `<i class="dx-dot ${k}"></i>`).join('');
+        html += `<button type="button" class="dx-day ${ds === todayStr ? 'today' : ''} ${ds === __dxCal.sel ? 'sel' : ''}"
+                    onclick="dxCalSelect('${ds}')" title="${evs.length ? evs.length + ' event(s)' : ''}">
+                    <span>${d}</span><span class="dx-dots">${dots}</span></button>`;
+    }
+    const trailing = rows * 7 - (first + days);
+    for (let i = 0; i < trailing; i++) html += '<div class="dx-day blank"></div>';
+    grid.style.gridTemplateRows = `repeat(${rows}, minmax(28px, 1fr))`;
+    grid.innerHTML = html;
+    dxRenderAgenda(map);
+}
+
+function dxEventHtml(e, showDate) {
+    const when = showDate
+        ? new Date(e.date + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+        : dxFmtTime(e.time);
+    const label = { hearing: 'Hearing', equipment: 'Equipment', emergency: 'SOS' }[e.kind] || 'Event';
+    return `<div class="dx-ev ${e.kind}" onclick="dxOpenEvent(${e.__i})">
+        <div class="dx-ev-time">${when}</div>
+        <div class="dx-ev-body">
+            <div class="dx-ev-title">${escapeHtml(label)}: ${escapeHtml(e.title || '')}</div>
+            <div class="dx-ev-sub">${escapeHtml(e.sub || '')}</div>
+        </div></div>`;
+}
+
+function dxRenderAgenda(map) {
+    const box = document.getElementById('dxAgenda');
+    if (!box) return;
+    const sel = __dxCal.sel;
+    const evs = (map[sel] || []).slice().sort((a, b) => String(a.time || '').localeCompare(String(b.time || '')));
+    const nice = sel ? new Date(sel + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' }) : '';
+    let html = `<div class="dx-agenda-h">${escapeHtml(nice)}</div>`;
+    if (evs.length) {
+        html += evs.map(e => dxEventHtml(e, false)).join('');
+    } else {
+        html += '<div class="dx-empty">Nothing scheduled on this day.</div>';
+        const upcoming = (DX.events || []).filter(e => e.date > sel && e.kind !== 'emergency')
+            .sort((a, b) => a.date.localeCompare(b.date) || String(a.time || '').localeCompare(String(b.time || '')))
+            .slice(0, 2);
+        if (upcoming.length) {
+            html += '<div class="dx-agenda-h" style="margin-top:6px;">Up next</div>' + upcoming.map(e => dxEventHtml(e, true)).join('');
+        }
+    }
+    box.innerHTML = html;
+}
+
+function dxOpenEvent(i) {
+    const e = (DX.events || [])[i];
+    if (!e) return;
+    if (e.kind === 'hearing') {
+        if (typeof viewComplaint === 'function') viewComplaint(e.id);
+        return;
+    }
+    if (e.kind === 'emergency') {
+        const em = (DX.emergencies || []).find(x => Number(x.id) === Number(e.id));
+        if (em) { dxShowEmergency(em); return; }
+    }
+    const nice = new Date(e.date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+    Swal.fire({
+        icon: 'info',
+        title: escapeHtml(e.title || 'Event'),
+        html: `<div style="text-align:left;font-size:0.9rem;line-height:1.8;">
+            <div><b>Type:</b> ${escapeHtml(dxCap(e.kind))}</div>
+            <div><b>Date:</b> ${escapeHtml(nice)}${e.time ? ' · ' + dxFmtTime(e.time) : ''}</div>
+            <div><b>Details:</b> ${escapeHtml(e.sub || '-')}</div>
+            ${e.status ? `<div><b>Status:</b> ${escapeHtml(dxCap(String(e.status).replace(/_/g, ' ')))}</div>` : ''}
+        </div>`,
+        confirmButtonColor: '#2E7D32'
+    });
+}
+
+// ── Emergency feed ──
+function dxRenderEmergencies() {
+    const box = document.getElementById('dxEmgList');
+    if (!box) return;
+    const list = DX.emergencies || [];
+    if (!list.length) { box.innerHTML = '<div class="dx-empty">No emergency reports. 🎉</div>'; return; }
+    box.innerHTML = list.map((e, i) => {
+        const ty = DX_EMG_TYPE[String(e.emergency_type || '').toLowerCase()] || { icon: 'fa-exclamation-circle', bg: '#eceff1', fg: '#546e7a' };
+        const st = String(e.status || '').toUpperCase();
+        const cls = st === 'ACCEPTED' ? 'accepted' : (st === 'PENDING' ? 'pending' : '');
+        return `<div class="dx-emg ${st === 'ACCEPTED' ? 'accepted' : ''}" onclick="dxShowEmergency(DX.emergencies[${i}])">
+            <div class="dx-emg-ic" style="background:${ty.bg};color:${ty.fg};"><i class="fas ${ty.icon}"></i></div>
+            <div class="dx-emg-body">
+                <div class="dx-emg-t">${escapeHtml(e.emergency_type)} — ${escapeHtml(e.name)}</div>
+                <div class="dx-emg-s">${escapeHtml(e.barangay || '')} · ${escapeHtml(timeAgo(e.created_at))}</div>
+            </div>
+            <span class="dx-emg-chip ${cls}">${escapeHtml(dxCap(st))}</span>
+        </div>`;
+    }).join('');
+}
+
+function dxShowEmergency(e) {
+    if (!e) return;
+    const ty = DX_EMG_TYPE[String(e.emergency_type || '').toLowerCase()] || { icon: 'fa-exclamation-circle', bg: '#eceff1', fg: '#546e7a' };
+    const st = String(e.status || '').toUpperCase();
+    const when = e.created_at ? new Date(String(e.created_at).replace(' ', 'T')).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' }) : '-';
+    const hasPos = e.latitude && e.longitude;
+    const map = hasPos ? `https://www.google.com/maps?q=${encodeURIComponent(e.latitude + ',' + e.longitude)}` : '';
+    const row = (k, v) => `<div style="display:flex;gap:10px;padding:7px 0;border-bottom:1px dashed #eef2f0;">
+        <div style="width:110px;color:#7a8a82;font-size:0.78rem;font-weight:700;text-transform:uppercase;">${k}</div>
+        <div style="flex:1;font-weight:600;color:#1a2b22;">${v}</div></div>`;
+    Swal.fire({
+        title: '',
+        html: `<div style="text-align:left;font-family:'Segoe UI',Roboto,sans-serif;">
+            <div style="display:flex;align-items:center;gap:14px;padding:16px 20px;background:${ty.bg};border-radius:14px 14px 0 0;">
+                <div style="width:46px;height:46px;border-radius:50%;background:#fff;color:${ty.fg};display:flex;align-items:center;justify-content:center;font-size:1.2rem;"><i class="fas ${ty.icon}"></i></div>
+                <div><div style="font-weight:800;font-size:1.05rem;color:${ty.fg};">${escapeHtml(e.emergency_type)} Emergency</div>
+                <div style="font-size:0.78rem;color:#555;">${escapeHtml(e.external_id || ('Report #' + e.id))}</div></div>
+            </div>
+            <div style="padding:10px 20px 16px;">
+                ${row('Reported by', escapeHtml(e.name))}
+                ${row('Barangay', escapeHtml(e.barangay || '-'))}
+                ${row('Caller', e.caller_number ? `<a href="tel:${escapeHtml(e.caller_number)}" style="color:#1565c0;">${escapeHtml(e.caller_number)}</a>` : '-')}
+                ${row('Status', escapeHtml(dxCap(st)) + (e.accepted_by_name ? ` · accepted by ${escapeHtml(e.accepted_by_name)}` : ''))}
+                ${row('Reported', escapeHtml(when))}
+                ${hasPos ? `<a href="${map}" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;gap:8px;margin-top:14px;padding:9px 16px;background:#c62828;color:#fff;border-radius:8px;text-decoration:none;font-weight:700;font-size:0.85rem;"><i class="fas fa-map-marker-alt"></i> Open location in Maps</a>` : ''}
+            </div></div>`,
+        width: 460, showConfirmButton: true, confirmButtonText: 'Close', confirmButtonColor: '#6c757d',
+        customClass: { popup: 'sm-popup' }
+    });
+}
+
+// ── Announcements (read-only) ──
+async function loadAnnouncements() {
+    const wrap = document.getElementById('anncGridWrap');
+    if (!wrap) return;
+    try {
+        const r = await fetch('?ann_action=list', { cache: 'no-store' });
+        const d = await r.json();
+        if (!d.success) throw new Error('bad');
+        window.__anncItems = d.data || [];
+        const chip = document.getElementById('dxAnncCount');
+        if (chip) { chip.style.display = ''; chip.textContent = window.__anncItems.length + ' active'; }
+        dxRenderAnnouncements(window.__anncItems);
+    } catch (e) {
+        wrap.innerHTML = `<div class="annc-empty"><i class="fas fa-exclamation-triangle"></i><h4>Could not load announcements</h4><p>Please refresh the page.</p></div>`;
+    }
+}
+
+function dxAnncCard(a, i) {
+    const cat = DX_ANN_CATS[a.category] || DX_ANN_CATS.general;
+    let expiry = '';
+    if (a.expires_at) {
+        const ts = new Date(a.expires_at.replace(' ', 'T')).getTime();
+        const days = Math.floor((ts - Date.now()) / 86400000);
+        const nice = new Date(ts).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        expiry = days <= 0
+            ? `<span class="annc-badge expiry urgent"><i class="fas fa-exclamation-triangle"></i> Expires today</span>`
+            : (days <= 3
+                ? `<span class="annc-badge expiry soon"><i class="fas fa-hourglass-half"></i> ${days}d left</span>`
+                : `<span class="annc-badge expiry"><i class="fas fa-calendar-check"></i> Until ${escapeHtml(nice)}</span>`);
+    }
+    const img = a.image_url ? `background-image:url('../../${escapeHtml(a.image_url)}')` : '';
+    return `
+    <div class="annc-carousel-slide">
+        <div class="annc-card" onclick="dxViewAnnouncement(${i})">
+            <div class="annc-card-image ${a.image_url ? '' : 'fallback'}" style="${img}"></div>
+            <div class="annc-card-top">
+                <span class="annc-badge ${escapeHtml(a.category)}"><i class="fas ${cat.icon}"></i> ${cat.label}</span>
+                ${a.is_pinned ? `<span class="annc-badge pinned"><i class="fas fa-thumbtack"></i> Pinned</span>` : ''}
+                ${a.event_date ? `
+                    <span class="annc-badge" style="background:#2E7D32;border-color:#2E7D32;">
+                        <i class="fas fa-calendar-check"></i>
+                        ${escapeHtml(new Date(a.event_date + 'T00:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric'}))}
+                        ${a.event_time ? ' · ' + escapeHtml((() => {
+                            const [h,m] = a.event_time.split(':');
+                            let hh = parseInt(h,10);
+                            const ap = hh >= 12 ? 'PM' : 'AM';
+                            hh = hh % 12 || 12;
+                            return hh + ':' + m + ' ' + ap;
+                        })()) : ''}
+                    </span>
+                ` : ''}
+                ${expiry}
+            </div>
+            <div class="annc-card-body">
+                <h3 class="annc-card-title">${escapeHtml(a.title)}</h3>
+                <p class="annc-card-text">${escapeHtml(a.body)}</p>
+                <div class="annc-card-meta">
+                    <span><i class="fas fa-user-tie"></i> ${escapeHtml(a.author || 'Barangay')}</span>
+                    ${a.event_date
+                        ? `<span><i class="fas fa-calendar-check"></i> ${escapeHtml(new Date(a.event_date + 'T00:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric'}))}${a.event_time ? ' · ' + escapeHtml((() => {
+                                const [h,m] = a.event_time.split(':');
+                                let hh = parseInt(h,10);
+                                const ap = hh >= 12 ? 'PM' : 'AM';
+                                hh = hh % 12 || 12;
+                                return hh + ':' + m + ' ' + ap;
+                            })()) : ''}</span>`
+                        : `<span><i class="fas fa-clock"></i> ${escapeHtml(timeAgo(a.created_at))}</span>`}
+                </div>
+                <span class="dx-readmore"><i class="fas fa-book-open"></i> Read full announcement</span>
+            </div>
+        </div>
+    </div>`;
+}
+
+function dxRenderAnnouncements(items) {
+    const wrap = document.getElementById('anncGridWrap');
+    if (!wrap) return;
+    clearInterval(window.__anncAutoTimer);
+    if (!items.length) {
+        wrap.innerHTML = `<div class="annc-empty"><i class="fas fa-bullhorn"></i><h4>No active announcements</h4><p>The Secretary has not posted any announcement yet.</p></div>`;
+        return;
+    }
+    window.__anncIndex = 0;
+    if (items.length === 1) { wrap.innerHTML = dxAnncCard(items[0], 0); return; }
+    wrap.innerHTML = `
+        <div class="annc-carousel">
+            <div class="annc-carousel-track" id="anncTrack">${items.map((a, i) => dxAnncCard(a, i)).join('')}</div>
+            <button type="button" class="annc-nav-btn prev" onclick="anncPrev()" aria-label="Previous"><i class="fas fa-chevron-left"></i></button>
+            <button type="button" class="annc-nav-btn next" onclick="anncNext()" aria-label="Next"><i class="fas fa-chevron-right"></i></button>
+            <div class="annc-dots" id="anncDots">
+                ${items.map((_, i) => `<button type="button" class="annc-dot ${i === 0 ? 'active' : ''}" onclick="anncGoTo(${i})" aria-label="Go to slide ${i + 1}"></button>`).join('')}
+            </div>
+        </div>`;
+    window.__anncAutoTimer = setInterval(anncNext, 7000);
+}
+
+function anncGoTo(index) {
+    const items = window.__anncItems || [];
+    const track = document.getElementById('anncTrack');
+    if (!items.length || !track) { clearInterval(window.__anncAutoTimer); return; }
+    index = (index + items.length) % items.length;
+    window.__anncIndex = index;
+    track.style.transform = `translateX(-${index * 100}%)`;
+    document.querySelectorAll('#anncDots .annc-dot').forEach((dot, i) => dot.classList.toggle('active', i === index));
+    clearInterval(window.__anncAutoTimer);
+    window.__anncAutoTimer = setInterval(anncNext, 7000);
+}
+function anncNext() { if ((window.__anncItems || []).length > 1) anncGoTo((window.__anncIndex || 0) + 1); }
+function anncPrev() { if ((window.__anncItems || []).length > 1) anncGoTo((window.__anncIndex || 0) - 1); }
+
+function dxViewAnnouncement(i) {
+    const a = (window.__anncItems || [])[i];
+    if (!a) return;
+    const cat = DX_ANN_CATS[a.category] || DX_ANN_CATS.general;
+
+    const bg = a.image_url
+        ? `background-image:url('../../${escapeHtml(a.image_url)}');`
+        : `background:linear-gradient(135deg,#1b5e20 0%,#2E7D32 45%,#66bb6a 100%);`;
+
+    Swal.fire({
+        title: '',
+        html: `
+        <div style="position:relative;width:100%;min-height:460px;${bg}
+                    background-size:cover;background-position:center;
+                    display:flex;align-items:flex-end;justify-content:center;">
+
+            <!-- dark gradient so the text box is readable -->
+            <div style="position:absolute;inset:0;
+                        background:linear-gradient(180deg,
+                            rgba(0,0,0,0.10) 0%,
+                            rgba(0,0,0,0.35) 45%,
+                            rgba(0,0,0,0.85) 100%);"></div>
+
+            <!-- badge row -->
+            <div style="position:absolute;top:16px;left:16px;right:56px;display:flex;gap:8px;flex-wrap:wrap;z-index:3;">
+                <span style="background:rgba(0,0,0,0.5);color:#fff;padding:5px 12px;border-radius:14px;
+                             font-size:0.7rem;font-weight:800;text-transform:uppercase;
+                             backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,0.25);">
+                    <i class="fas ${cat.icon}"></i> ${cat.label}
+                </span>
+                ${a.is_pinned ? '<span style="background:#ffb300;color:#4a2f00;padding:5px 12px;border-radius:14px;font-size:0.7rem;font-weight:800;"><i class="fas fa-thumbtack"></i> PINNED</span>' : ''}
+            </div>
+
+            <!-- readable text box — auto-sizes to content -->
+            <div style="position:relative;z-index:2;margin:0 18px 18px;
+                        background:rgba(0,0,0,0.6);backdrop-filter:blur(12px);
+                        border:1px solid rgba(255,255,255,0.18);border-radius:14px;
+                        padding:16px 22px;max-width:calc(100% - 36px);
+                        box-sizing:border-box;text-align:center;
+                        box-shadow:0 10px 30px rgba(0,0,0,0.4);">
+
+                <h2 style="margin:0 0 8px;font-size:1.3rem;color:#fff;line-height:1.3;
+                           text-shadow:0 2px 6px rgba(0,0,0,0.6);text-align:center;">
+                    ${escapeHtml(a.title)}
+                </h2>
+
+                <div style="font-size:0.74rem;color:rgba(255,255,255,0.82);margin-bottom:12px;
+                            display:flex;flex-wrap:wrap;gap:14px;justify-content:center;">
+                    <span><i class="fas fa-user-tie"></i> ${escapeHtml(a.author || 'Barangay')}</span>
+                    ${a.event_date
+                        ? `<span><i class="fas fa-calendar-check"></i> ${escapeHtml(new Date(a.event_date + 'T00:00:00').toLocaleDateString('en-US',{dateStyle:'medium'}))}${a.event_time ? ' · ' + escapeHtml((() => {
+                                const [h,m] = a.event_time.split(':');
+                                let hh = parseInt(h,10);
+                                const ap = hh >= 12 ? 'PM' : 'AM';
+                                hh = hh % 12 || 12;
+                                return hh + ':' + m + ' ' + ap;
+                            })()) : ''}</span>`
+                        : `<span><i class="fas fa-clock"></i> ${escapeHtml(new Date(a.created_at.replace(' ','T')).toLocaleString('en-US',{dateStyle:'medium',timeStyle:'short'}))}</span>`}
+                </div>
+
+                <div style="font-size:0.9rem;line-height:1.65;color:rgba(255,255,255,0.95);
+                            white-space:pre-wrap;text-align:center;
+                            max-height:26vh;overflow-y:auto;padding:0 4px;">
+                    ${escapeHtml(a.body)}
+                </div>
+            </div>
+
+            <!-- close button -->
+            <button type="button" onclick="Swal.close()"
+                    style="position:absolute;top:14px;right:14px;z-index:5;
+                           width:36px;height:36px;border-radius:50%;border:none;cursor:pointer;
+                           background:rgba(0,0,0,0.5);color:#fff;font-size:1rem;
+                           backdrop-filter:blur(8px);display:flex;align-items:center;
+                           justify-content:center;transition:all .15s;"
+                    onmouseover="this.style.background='rgba(255,255,255,0.9)';this.style.color='#1a1a1a';"
+                    onmouseout="this.style.background='rgba(0,0,0,0.5)';this.style.color='#fff';">
+                <i class="fas fa-times"></i>
+            </button>
+        </div>`,
+        width: 640,
+        showConfirmButton: false,
+        showCloseButton: false,
+        padding: 0,
+        background: 'transparent',
+        customClass: { popup: 'annc-full-popup' },
+        allowOutsideClick: true
+    });
+}
+
+
 // ============================================================
 // DASHBOARD
 // ============================================================
 function renderDashboard() {
+    const kpi = (icon, bg, fg, num, label, go) => `
+        <div class="dx-kpi" ${go ? `data-go="${go}" onclick="navigateTo('${go}')"` : ''}>
+            <div class="dx-kpi-ic" style="background:${bg};color:${fg};"><i class="fas ${icon}"></i></div>
+            <div><div class="dx-kpi-num">${num}</div><div class="dx-kpi-lbl">${label}</div></div>
+        </div>`;
+    const eqPending  = (DX.equipment && DX.equipment.status && DX.equipment.status.pending)  || 0;
+    const eqBorrowed = (DX.equipment && DX.equipment.status && DX.equipment.status.borrowed) || 0;
+
     return `
-        <div class="modern-dashboard">
-            <div class="welcome-card">
-                <div class="welcome-content">
-                    <div class="welcome-text">
-                        <h2>Welcome, Captain <?php echo htmlspecialchars($admin['full_name']); ?>!</h2>
-                        <p>Here's an overview of your barangay.</p>
-                    </div>
-                    <div class="welcome-date">
-                        <i class="fas fa-calendar-alt"></i>
-                        <span id="currentDate"></span>
-                    </div>
-                </div>
+    <div class="dx">
+
+        <!-- TOP BAR -->
+        <div class="dx-top">
+            <div class="dx-top-text">
+                <h2><span id="dxGreeting">Welcome</span>, Captain <?php echo htmlspecialchars($admin['full_name']); ?>!</h2>
+                <p><i class="fas fa-calendar-alt"></i><span id="currentDate"></span></p>
             </div>
-            <div class="stats-grid-modern">
-                <div class="stat-card-modern"><div class="stat-icon residents"><i class="fas fa-users"></i></div><div class="stat-info"><h3><?php echo number_format($stats['total_residents']); ?></h3><p>Total Residents</p></div></div>
-                <div class="stat-card-modern"><div class="stat-icon verified"><i class="fas fa-check-circle"></i></div><div class="stat-info"><h3><?php echo number_format($stats['verified']); ?></h3><p>Verified</p></div></div>
-                <div class="stat-card-modern"><div class="stat-icon pending"><i class="fas fa-clock"></i></div><div class="stat-info"><h3><?php echo number_format($stats['pending_approvals']); ?></h3><p>Pending Documents</p></div></div>
-                <div class="stat-card-modern"><div class="stat-icon action"><i class="fas fa-inbox"></i></div><div class="stat-info"><h3><?php echo $stats['pending_action']; ?></h3><p>Pending Action</p></div></div>
-                <div class="stat-card-modern"><div class="stat-icon mediation"><i class="fas fa-gavel"></i></div><div class="stat-info"><h3><?php echo $stats['in_mediation']; ?></h3><p>In Mediation</p></div></div>
-                <div class="stat-card-modern"><div class="stat-icon referral"><i class="fas fa-file-signature"></i></div><div class="stat-info"><h3><?php echo $stats['referrals']; ?></h3><p>Referrals</p></div></div>
-            </div>
-            <div class="quick-actions">
-                <h4><i class="fas fa-bolt"></i> Quick Actions</h4>
-                <div class="action-buttons">
-                    <button class="quick-action-btn" onclick="navigateTo('complaints')"><i class="fas fa-gavel"></i> Manage Complaints</button>
-                    <button class="quick-action-btn" onclick="window.location.href='reports.php'"><i class="fas fa-chart-line"></i> View Reports</button>
-                </div>
+            <div class="dx-top-actions">
+                <button class="dx-top-btn" onclick="navigateTo('complaints')"><i class="fas fa-gavel"></i><span>Complaints</span></button>
+                <button class="dx-top-btn" onclick="navigateTo('household')"><i class="fas fa-home"></i><span>Households</span></button>
+                <button class="dx-top-btn" onclick="window.location.href='reports.php'"><i class="fas fa-chart-line"></i><span>Reports</span></button>
             </div>
         </div>
+
+        <!-- KPI STRIP -->
+        <div class="dx-kpis">
+            ${kpi('fa-users',           '#e8f5e9', '#2e7d32', <?php echo (int)$stats['total_residents']; ?>,  'Residents',     'household')}
+            ${kpi('fa-clock',           '#fff3e0', '#e65100', <?php echo (int)$stats['pending_approvals']; ?>, 'Pending Docs',  '')}
+            ${kpi('fa-inbox',           '#e3f2fd', '#1565c0', <?php echo (int)$stats['pending_action']; ?>,    'Pending Action','complaints')}
+            ${kpi('fa-gavel',           '#f3e5f5', '#6a1b9a', <?php echo (int)$stats['in_mediation']; ?>,      'In Mediation', 'complaints')}
+            ${kpi('fa-file-signature',  '#fff8e1', '#f57c00', <?php echo (int)$stats['referrals']; ?>,          'Referrals',    'complaints')}
+
+            ${kpi('fa-tools',           '#e0f2f1', '#00897b', eqPending,                                       'Equip. Requests','')}
+            ${kpi('fa-hand-holding',    '#e1f5fe', '#0277bd', eqBorrowed,                                      'Borrowed',     '')}
+        </div>
+
+        <!-- MAIN GRID -->
+        <div class="dx-grid">
+
+            <!-- Announcements (read-only, big) -->
+            <div class="dx-card dx-annc">
+                <div class="dx-card-h">
+                    <h4><i class="fas fa-bullhorn" style="color:#e65100;"></i> Barangay Announcements</h4>
+                    <span class="dx-count-chip ok" id="dxAnncCount" style="display:none;"></span>
+                </div>
+                <div class="dx-annc-body">
+                    <div id="anncGridWrap">
+                        <div style="text-align:center;padding:40px;color:#999;"><i class="fas fa-spinner fa-spin fa-2x"></i></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Trend -->
+            <div class="dx-card dx-trend">
+                <div class="dx-card-h">
+                    <h4><i class="fas fa-chart-line"></i> <span id="dxTrendTitle">6-Month Trend</span></h4>
+                    <span id="dxDelta"></span>
+                    <div class="dx-seg">
+                        <button class="active" onclick="dxSetTrend('trend', this)">Trend</button>
+                        <button onclick="dxSetTrend('types', this)">SOS Types</button>
+                    </div>
+                </div>
+                <div class="dx-chart"><canvas id="dxTrendCanvas"></canvas></div>
+            </div>
+
+            <!-- Status doughnut -->
+            <div class="dx-card dx-status">
+                <div class="dx-card-h">
+                    <h4><i class="fas fa-chart-pie"></i> Status</h4>
+                    <div class="dx-seg">
+                        <button class="active" onclick="dxSetStatus('complaints', this)">Cases</button>
+                        <button onclick="dxSetStatus('emergencies', this)">SOS</button>
+                        <button onclick="dxSetStatus('equipment', this)">Equip.</button>
+                    </div>
+                </div>
+                <div class="dx-chart"><canvas id="dxStatusCanvas"></canvas></div>
+            </div>
+
+            <!-- Calendar -->
+            <div class="dx-card dx-cal">
+                <div class="dx-card-h">
+                    <h4><i class="fas fa-calendar-alt"></i> Calendar</h4>
+                    <div class="dx-cal-nav">
+                        <button onclick="dxCalMove(-1)" aria-label="Previous month"><i class="fas fa-chevron-left"></i></button>
+                        <div class="dx-cal-title" id="dxCalTitle"></div>
+                        <button onclick="dxCalMove(1)" aria-label="Next month"><i class="fas fa-chevron-right"></i></button>
+                        <button class="today" onclick="dxCalToday()">Today</button>
+                    </div>
+                </div>
+                <div class="dx-cal-wrap">
+                    <div class="dx-cal-dow"><div>Su</div><div>Mo</div><div>Tu</div><div>We</div><div>Th</div><div>Fr</div><div>Sa</div></div>
+                    <div class="dx-cal-grid" id="dxCalGrid"></div>
+                    <div class="dx-legend">
+                        <span><i class="dx-dot hearing"></i> Hearings</span>
+                        <span><i class="dx-dot equipment"></i> Equipment</span>
+                        <span><i class="dx-dot emergency"></i> SOS</span>
+                    </div>
+                    <div class="dx-agenda" id="dxAgenda"></div>
+                </div>
+            </div>
+
+            <!-- Emergencies -->
+            <div class="dx-card dx-emerg">
+                <div class="dx-card-h">
+                    <h4><i class="fas fa-ambulance" style="color:#c62828;"></i> Emergencies</h4>
+                    <span class="dx-count-chip ${<?php echo (int)$dxEmgPending; ?> > 0 ? '' : 'ok'}">${<?php echo (int)$dxEmgPending; ?>} pending</span>
+                </div>
+                <div class="dx-emg-list" id="dxEmgList"></div>
+            </div>
+
+        </div>
+    </div>
     `;
 }
 
-// ============================================================
-// COMPLAINTS
-// ============================================================
 let currentComplaintView = 'pending';
-let cachedData = { pending: [], mediation: [], pangkat: [], referrals: [], handled: [] };
+let cachedData = { pending: [], mediation: [], pangkat: [], repudiated: [], unresolved: [], referrals: [], handled: [] };
 
-async function renderComplaintsView() {
-    document.getElementById('dashboardBody').innerHTML = `
-        <div class="unified-header">
-            <div class="unified-title"><i class="fas fa-gavel"></i> Complaint Management</div>
-            <div class="unified-sub">All complaints requiring your action — review, mediate, sign.</div>
-                        <div class="unified-chips">
-                <button class="u-chip active" onclick="switchComplaintView('pending')" id="chip-pending"><i class="fas fa-inbox"></i> Pending Action <span class="u-count" id="count-pending">0</span></button>
-                <button class="u-chip" onclick="switchComplaintView('mediation')" id="chip-mediation"><i class="fas fa-gavel"></i> Mediation <span class="u-count" id="count-mediation">0</span></button>
-                <button class="u-chip" onclick="switchComplaintView('pangkat')" id="chip-pangkat"><i class="fas fa-balance-scale"></i> For Pangkat <span class="u-count" id="count-pangkat">0</span></button>
-                <button class="u-chip" onclick="switchComplaintView('referrals')" id="chip-referrals"><i class="fas fa-file-signature"></i> Referrals <span class="u-count" id="count-referrals">0</span></button>
-                <button class="u-chip" onclick="switchComplaintView('handled')" id="chip-handled"><i class="fas fa-check-double"></i> Handled <span class="u-count" id="count-handled">0</span></button>
-            </div>
-        </div>
-        <div id="complaintsList"><div style="text-align:center;padding:40px;color:#999;"><i class="fas fa-spinner fa-spin fa-2x"></i><p style="margin-top:10px;">Loading…</p></div></div>
-    `;
-    await loadAllComplaints();
-    switchComplaintView('pending');
+// Pagination + toolbar state
+let caseFilters = {
+    search: '',
+    days: 30,
+    dateFrom: '',
+    dateTo: ''
+};
+let casePage = 1;
+const CASES_PER_PAGE = 6;
+
+// ═══════════════════════════════════════════════════════
+// COMPLAINT FILTER BAR — EXPAND / COLLAPSE
+// ═══════════════════════════════════════════════════════
+let complaintFiltersExpanded = false;
+
+function toggleComplaintFiltersBar() {
+    complaintFiltersExpanded = !complaintFiltersExpanded;
+
+    const wrapper = document.getElementById('complaintFiltersWrapper');
+    const chevron = document.getElementById('complaintFiltersChevron');
+    const summary = document.getElementById('complaintFiltersSummary');
+
+    if (wrapper) {
+        if (complaintFiltersExpanded) {
+            wrapper.style.display = 'block';
+            wrapper.style.maxHeight = '0px';
+            wrapper.style.overflow  = 'hidden';
+            wrapper.style.transition = 'max-height 0.3s ease, opacity 0.25s ease, margin-top 0.25s ease';
+            wrapper.style.opacity   = '0';
+            wrapper.style.marginTop = '0px';
+
+            void wrapper.offsetHeight;
+            wrapper.style.maxHeight = wrapper.scrollHeight + 'px';
+            wrapper.style.opacity   = '1';
+            wrapper.style.marginTop = '10px';
+
+            setTimeout(() => {
+                if (complaintFiltersExpanded) wrapper.style.maxHeight = 'none';
+            }, 320);
+        } else {
+            wrapper.style.maxHeight = wrapper.scrollHeight + 'px';
+            wrapper.style.overflow  = 'hidden';
+            void wrapper.offsetHeight;
+            wrapper.style.maxHeight = '0px';
+            wrapper.style.opacity   = '0';
+            wrapper.style.marginTop = '0px';
+            setTimeout(() => {
+                if (!complaintFiltersExpanded) wrapper.style.display = 'none';
+            }, 320);
+        }
+    }
+
+    if (chevron) chevron.style.transform = complaintFiltersExpanded ? 'rotate(180deg)' : 'rotate(0)';
+    if (summary) summary.style.display = complaintFiltersExpanded ? 'none' : 'inline-block';
+
+    try { sessionStorage.setItem('complaintFiltersExpanded', complaintFiltersExpanded ? '1' : '0'); } catch(e) {}
+}
+
+(function restoreComplaintFilterBarState() {
+    try {
+        const saved = sessionStorage.getItem('complaintFiltersExpanded');
+        if (saved === '1') complaintFiltersExpanded = true;
+    } catch(e) {}
+})();
+
+function complaintFiltersSummaryHtml() {
+    const parts = [];
+    const tabLabels = {
+        pending:    'Pending Action',
+        mediation:  'Mediation',
+        pangkat:    'For Pangkat',
+        repudiated: 'Repudiated',
+        unresolved: 'Unresolved',
+        referrals:  'Referrals',
+        handled:    'Handled'
+    };
+    const tab = tabLabels[currentComplaintView] || 'Pending Action';
+    parts.push(`<i class="fas fa-tasks"></i> ${escapeHtml(tab)}`);
+
+    if (caseFilters.search) parts.push(`<i class="fas fa-search"></i> "${escapeHtml(caseFilters.search)}"`);
+
+    const days = caseFilters.days;
+    if (days === -1 && caseFilters.dateFrom && caseFilters.dateTo) {
+        parts.push(`<i class="fas fa-calendar"></i> ${caseFilters.dateFrom} → ${caseFilters.dateTo}`);
+    } else if (days === 0) {
+        parts.push(`<i class="fas fa-calendar"></i> All time`);
+    } else if (days > 0) {
+        parts.push(`<i class="fas fa-calendar"></i> Last ${days} day${days === 1 ? '' : 's'}`);
+    }
+
+    return parts.join('<span class="cfa-sep">·</span>');
 }
 
 async function loadAllComplaints() {
     try {
-        const r = await fetch('../admin_complaint_ajax.php?action=get_captain_all_complaints');
+        const params = new URLSearchParams();
+        params.set('action', 'get_captain_all_complaints');
+        if (caseFilters.search) params.set('search', caseFilters.search);
+        if (caseFilters.days === -1) {
+            params.set('days', '-1');
+            if (caseFilters.dateFrom) params.set('date_from', caseFilters.dateFrom);
+            if (caseFilters.dateTo)   params.set('date_to',   caseFilters.dateTo);
+        } else {
+            params.set('days', String(caseFilters.days));
+        }
+
+        const r = await fetch('../admin_complaint_ajax.php?' + params.toString());
         const d = await r.json();
-        if (!d.success) throw new Error('Failed');
-        cachedData.pending   = d.pending   || [];
-        cachedData.mediation = d.mediation || [];
-        cachedData.pangkat   = d.pangkat   || [];
-        cachedData.referrals = d.referrals || [];
-        cachedData.handled   = d.handled   || [];
-        document.getElementById('count-pending').textContent   = cachedData.pending.length;
-        document.getElementById('count-mediation').textContent = cachedData.mediation.length;
-        document.getElementById('count-pangkat').textContent   = cachedData.pangkat.length;
-        document.getElementById('count-referrals').textContent = cachedData.referrals.length;
-        document.getElementById('count-handled').textContent   = cachedData.handled.length;
+        if (!d.success) throw new Error(d.message || 'Failed');
+
+        cachedData.pending    = d.pending    || [];
+        cachedData.mediation  = d.mediation  || [];
+        cachedData.pangkat    = d.pangkat    || [];
+        cachedData.repudiated = d.repudiated || [];
+        cachedData.unresolved = d.unresolved || [];
+        cachedData.referrals  = d.referrals  || [];
+        cachedData.handled    = d.handled    || [];
+
+        cachedData.mediation.forEach(row => {
+            if (!row.explain_deadline) row.explain_deadline = row.absence_explain_deadline || null;
+        });
+
+        const set = (id, val) => {
+            const el = document.getElementById(id);
+            if (el) el.textContent = val;
+        };
+        set('count-pending',    cachedData.pending.length);
+        set('count-mediation',  cachedData.mediation.length);
+        set('count-pangkat',    cachedData.pangkat.length);
+        set('count-repudiated', cachedData.repudiated.length);
+        set('count-unresolved', cachedData.unresolved.length);
+        set('count-referrals',  cachedData.referrals.length);
+        set('count-handled',    cachedData.handled.length);
+
         const badge = document.getElementById('complaintsBadge');
         if (badge) {
             const total = cachedData.pending.length;
             if (total > 0) { badge.style.display = 'inline-block'; badge.textContent = total; }
             else badge.style.display = 'none';
         }
-    } catch (e) { console.error(e); }
+    } catch (e) {
+        console.error('Captain load failed:', e);
+    }
 }
 
 function switchComplaintView(view) {
     currentComplaintView = view;
+    casePage = 1;
     document.querySelectorAll('.u-chip').forEach(c => c.classList.remove('active'));
     document.getElementById('chip-' + view)?.classList.add('active');
-    const list = cachedData[view] || [];
+    renderCurrentCasePage();
+    const sum = document.getElementById('complaintFiltersSummary');
+    if (sum) sum.innerHTML = complaintFiltersSummaryHtml();
+}
+
+function renderCurrentCasePage() {
+    const list = cachedData[currentComplaintView] || [];
     const container = document.getElementById('complaintsList');
+    const countEl = document.getElementById('caseResultCount');
+
     if (!list.length) {
+        if (countEl) countEl.textContent = '0 results';
         const msgs = {
-            pending:   { icon: 'fa-check-circle', text: 'No complaints awaiting action.' },
-            mediation: { icon: 'fa-check-circle', text: 'No active mediations.' },
-            pangkat:   { icon: 'fa-check-circle', text: 'No cases waiting for Pangkat.' },
-            referrals: { icon: 'fa-check-circle', text: 'No referrals pending.' },
-            handled:   { icon: 'fa-inbox',         text: 'You have not handled any complaints yet.' }
+            pending:    { icon: 'fa-check-circle', text: 'No complaints awaiting action.' },
+            mediation:  { icon: 'fa-check-circle', text: 'No active mediations.' },
+            pangkat:    { icon: 'fa-check-circle', text: 'No cases waiting for Pangkat.' },
+            repudiated: { icon: 'fa-check-circle', text: 'No repudiated cases.' },
+            unresolved: { icon: 'fa-check-circle', text: 'No unresolved cases.' },
+            referrals:  { icon: 'fa-check-circle', text: 'No referrals pending.' },
+            handled:    { icon: 'fa-inbox',         text: 'You have not handled any complaints yet.' }
         };
-        const m = msgs[view] || { icon: 'fa-inbox', text: 'Nothing to show.' };
+        const m = msgs[currentComplaintView] || { icon: 'fa-inbox', text: 'Nothing to show.' };
         container.innerHTML = `<div style="text-align:center;padding:60px;color:#999;"><i class="fas ${m.icon} fa-3x" style="color:#c8e6c9;"></i><p style="margin-top:12px;">${m.text}</p></div>`;
         return;
     }
+
+    const total = list.length;
+    const totalPages = Math.max(1, Math.ceil(total / CASES_PER_PAGE));
+    if (casePage > totalPages) casePage = totalPages;
+    const start = (casePage - 1) * CASES_PER_PAGE;
+    const pageItems = list.slice(start, start + CASES_PER_PAGE);
+
+    if (countEl) {
+        countEl.textContent = `${total} result${total === 1 ? '' : 's'}`;
+    }
+
     let html = '<div class="documents-grid">';
-    if (view === 'pending')   html += list.map(renderPendingCard).join('');
-    if (view === 'mediation') html += list.map(renderMediationCard).join('');
-    if (view === 'pangkat')   html += list.map(renderPangkatCard).join('');
-    if (view === 'referrals') html += list.map(renderReferralCard).join('');
-    if (view === 'handled')   html += list.map(renderHandledCard).join('');
+    const renderFn = {
+        pending:    renderPendingCard,
+        mediation:  renderMediationCard,
+        pangkat:    renderPangkatCard,
+        repudiated: renderRepudiatedCard,
+        unresolved: renderUnresolvedCard,
+        referrals:  renderReferralCard,
+        handled:    renderHandledCard
+    }[currentComplaintView];
+    if (renderFn) html += pageItems.map(renderFn).join('');
     html += '</div>';
+
+    html += renderPagination(totalPages, total);
     container.innerHTML = html;
     startLiveCountdowns();
 }
 
+function renderPagination(totalPages, totalItems) {
+    if (totalPages <= 1) return '';
+
+    const buttons = [];
+    buttons.push(`<button class="case-page-btn" ${casePage === 1 ? 'disabled' : ''} onclick="gotoCasePage(${casePage - 1})"><i class="fas fa-chevron-left"></i></button>`);
+
+    const maxVisible = 5;
+    let startP = Math.max(1, casePage - Math.floor(maxVisible / 2));
+    let endP   = Math.min(totalPages, startP + maxVisible - 1);
+    if (endP - startP + 1 < maxVisible) startP = Math.max(1, endP - maxVisible + 1);
+
+    if (startP > 1) {
+        buttons.push(`<button class="case-page-btn" onclick="gotoCasePage(1)">1</button>`);
+        if (startP > 2) buttons.push(`<span style="color:#999;padding:0 6px;">…</span>`);
+    }
+
+    for (let p = startP; p <= endP; p++) {
+        buttons.push(`<button class="case-page-btn ${p === casePage ? 'active' : ''}" onclick="gotoCasePage(${p})">${p}</button>`);
+    }
+
+    if (endP < totalPages) {
+        if (endP < totalPages - 1) buttons.push(`<span style="color:#999;padding:0 6px;">…</span>`);
+        buttons.push(`<button class="case-page-btn" onclick="gotoCasePage(${totalPages})">${totalPages}</button>`);
+    }
+
+    buttons.push(`<button class="case-page-btn" ${casePage === totalPages ? 'disabled' : ''} onclick="gotoCasePage(${casePage + 1})"><i class="fas fa-chevron-right"></i></button>`);
+
+    const startItem = (casePage - 1) * CASES_PER_PAGE + 1;
+    const endItem = Math.min(casePage * CASES_PER_PAGE, totalItems);
+
+    return `
+        <div class="case-pagination">
+            ${buttons.join('')}
+            <span class="case-page-info">Showing ${startItem}–${endItem} of ${totalItems}</span>
+        </div>`;
+}
+
+function gotoCasePage(p) {
+    const list = cachedData[currentComplaintView] || [];
+    const totalPages = Math.max(1, Math.ceil(list.length / CASES_PER_PAGE));
+    if (p < 1 || p > totalPages) return;
+    casePage = p;
+    renderCurrentCasePage();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+/* ── Toolbar events ───────────────────────────────────── */
+let __searchDebounce = null;
+function onCaseSearch(val) {
+    clearTimeout(__searchDebounce);
+    __searchDebounce = setTimeout(async () => {
+        caseFilters.search = val.trim();
+        casePage = 1;
+        await loadAllComplaints();
+        renderCurrentCasePage();
+        const sum = document.getElementById('complaintFiltersSummary');
+        if (sum) sum.innerHTML = complaintFiltersSummaryHtml();
+    }, 350);
+}
+
+async function onDateRangeChange(val) {
+    const v = Number(val);
+    caseFilters.days = v;
+    const customWrap = document.getElementById('caseCustomRange');
+    if (v === -1) {
+        if (customWrap) customWrap.style.display = 'flex';
+        if (!caseFilters.dateFrom) {
+            const d = new Date();
+            d.setDate(d.getDate() - 30);
+            caseFilters.dateFrom = d.toISOString().split('T')[0];
+            document.getElementById('caseDateFrom').value = caseFilters.dateFrom;
+        }
+        if (!caseFilters.dateTo) {
+            caseFilters.dateTo = new Date().toISOString().split('T')[0];
+            document.getElementById('caseDateTo').value = caseFilters.dateTo;
+        }
+    } else {
+        if (customWrap) customWrap.style.display = 'none';
+        caseFilters.dateFrom = '';
+        caseFilters.dateTo = '';
+    }
+    casePage = 1;
+    await loadAllComplaints();
+    renderCurrentCasePage();
+    const sum = document.getElementById('complaintFiltersSummary');
+    if (sum) sum.innerHTML = complaintFiltersSummaryHtml();
+}
+
+async function onCustomRangeChange() {
+    caseFilters.dateFrom = document.getElementById('caseDateFrom').value;
+    caseFilters.dateTo   = document.getElementById('caseDateTo').value;
+    if (!caseFilters.dateFrom || !caseFilters.dateTo) return;
+    casePage = 1;
+    await loadAllComplaints();
+    renderCurrentCasePage();
+    const sum = document.getElementById('complaintFiltersSummary');
+    if (sum) sum.innerHTML = complaintFiltersSummaryHtml();
+}
+
+async function resetCaseToolbar() {
+    caseFilters = { search: '', days: 30, dateFrom: '', dateTo: '' };
+    casePage = 1;
+    const s = document.getElementById('caseSearch'); if (s) s.value = '';
+    const sel = document.getElementById('caseDateRange'); if (sel) sel.value = '30';
+    const cw = document.getElementById('caseCustomRange'); if (cw) cw.style.display = 'none';
+    await loadAllComplaints();
+    renderCurrentCasePage();
+    const sum = document.getElementById('complaintFiltersSummary');
+    if (sum) sum.innerHTML = complaintFiltersSummaryHtml();
+}
+
+function renderUnresolvedCard(x) {
+    const certNo = x.certificate_no || x.bar_action_cert_no || x.bar_counterclaim_cert_no || null;
+    const issuedAt = x.certificate_issued_at
+        ? new Date(String(x.certificate_issued_at).replace(' ','T')).toLocaleDateString('en-US', {dateStyle:'medium'})
+        : (x.cfa_issued_at
+            ? new Date(String(x.cfa_issued_at).replace(' ','T')).toLocaleDateString('en-US', {dateStyle:'medium'})
+            : '—');
+
+    return `
+        <div class="document-card" onclick="viewComplaint(${x.id})" style="cursor:pointer;border:2px solid #ce93d8;">
+            <div class="document-card-header" style="background:linear-gradient(135deg,#6a1b9a,#8e24aa);">
+                <div class="document-title"><i class="fas fa-file-certificate"></i><span>${escapeHtml(x.title)}</span></div>
+                <div class="document-status"><i class="fas fa-file-certificate"></i> UNRESOLVED</div>
+            </div>
+            <div class="document-card-body">
+                <div class="document-info-row"><div class="document-info-label">Ref:</div><div class="document-info-value"><strong>${escapeHtml(x.reference_number)}</strong></div></div>
+                <div class="document-info-row"><div class="document-info-label">Complainant:</div><div class="document-info-value">${escapeHtml(x.first_name || '')} ${escapeHtml(x.last_name || '')}</div></div>
+                ${certNo ? `<div class="document-info-row"><div class="document-info-label">Cert No:</div><div class="document-info-value"><strong>${escapeHtml(certNo)}</strong></div></div>` : ''}
+                <div class="document-info-row"><div class="document-info-label">Issued:</div><div class="document-info-value">${escapeHtml(issuedAt)}</div></div>
+                <div style="margin-top:10px;padding:10px 12px;background:#f3e5f5;border-left:4px solid #8e24aa;border-radius:8px;font-size:0.78rem;color:#4a148c;line-height:1.6;">
+                    <b><i class="fas fa-file-signature"></i> Certificate to File Action has been issued.</b><br>
+                    Print and hand-deliver to the complainant so they can file the case in court.
+                </div>
+            </div>
+            <div class="document-card-actions" onclick="event.stopPropagation()">
+                <button class="doc-action-btn pdf" onclick="event.stopPropagation(); openCfaPdf(${x.id}, 'complainant')">
+                    <i class="fas fa-file-pdf"></i> View CFA PDF
+                </button>
+                <button class="doc-action-btn view" onclick="event.stopPropagation(); viewComplaint(${x.id})">
+                    <i class="fas fa-eye"></i> View
+                </button>
+            </div>
+        </div>`;
+}
 
 // ============================================================
-// HANDLED CARD — complaints the captain has already finished
+// HANDLED CARD
 // ============================================================
 function renderHandledCard(x) {
     const statusConfig = {
@@ -1705,13 +4791,17 @@ function renderHandledCard(x) {
                     </div></div>` : ''}
             </div>
             <div class="document-card-actions" onclick="event.stopPropagation()">
+                ${x.status === 'certificate_issued' ? `
+                    <button class="doc-action-btn pdf" onclick="event.stopPropagation(); openCfaPdf(${x.id}, 'complainant')"><i class="fas fa-file-pdf"></i> View CFA (KP #20)</button>
+                ` : ''}
                 <button class="doc-action-btn view" onclick="event.stopPropagation(); viewComplaint(${x.id})"><i class="fas fa-eye"></i> View</button>
             </div>
         </div>`;
 }
 
-
-
+// ============================================================
+// PENDING CARD
+// ============================================================
 function renderPendingCard(x) {
     return `
         <div class="document-card" onclick="viewComplaint(${x.id})" style="cursor:pointer;">
@@ -1731,22 +4821,68 @@ function renderPendingCard(x) {
         </div>`;
 }
 
+// ============================================================
+// MEDIATION CARD
+// ============================================================
 function renderMediationCard(x) {
     const sessionCount = x.mediation_session_count || 1;
     const hearingDate = x.hearing_date ? x.hearing_date.split(' ')[0] : null;
     const today = new Date().toISOString().split('T')[0];
     const isHearingToday = (hearingDate === today);
     const canStart = hearingDate && hearingDate <= today;
-    const isWaiting = !!x.absence_appearance_at;
-    const headerCls = isWaiting ? 'waiting' : 'mediation';
-    const statusLabel = isWaiting ? 'Awaiting Appearance' : `Mediation Hearing #${sessionCount}`;
+    const lastOutcome = x.last_hearing_outcome || null;
+    const wasArbitrationRepudiated = Number(x.arbitration_repudiated || 0) === 1;
+    const wasSettlementRepudiated  = Number(x.amicable_repudiated || 0) === 1;
+const isNoShow = (lastOutcome === 'complainant_no_show'
+              || lastOutcome === 'respondent_no_show'
+              || lastOutcome === 'both_no_show'
+              || lastOutcome === 'parties_no_show');
+const isWaiting = !!x.absence_appearance_at || isNoShow;
+const hasExplainDeadline = !!x.explain_deadline;
+const headerCls = isWaiting ? 'waiting' : 'mediation';
+
+let statusLabel;
+if (isWaiting && !!x.absence_appearance_at) {
+    statusLabel = hasExplainDeadline ? 'Awaiting 5-Day Explain Window' : 'Awaiting Appearance';
+} else if (isNoShow) {
+    statusLabel = (lastOutcome === 'complainant_no_show') ? 'Complainant No-Show'
+                : (lastOutcome === 'respondent_no_show')  ? 'Respondent No-Show'
+                : (lastOutcome === 'both_no_show')        ? 'Both Parties No-Show'
+                : 'Party No-Show';
+} else {
+    statusLabel = `Mediation Hearing #${sessionCount}`;
+}
+
     let actionButtons;
-    if (isWaiting) actionButtons = `<button class="doc-action-btn resume" onclick="event.stopPropagation(); openMediationSessionModal(${x.id})"><i class="fas fa-play"></i> Continue Mediation</button>`;
-    else if (canStart) actionButtons = `<button class="doc-action-btn mediate" onclick="event.stopPropagation(); openMediationSessionModal(${x.id})"><i class="fas fa-play-circle"></i> Start Mediation</button>`;
-    else actionButtons = `<button class="doc-action-btn locked"><i class="fas fa-lock"></i> Available ${hearingDate ? new Date(hearingDate).toLocaleDateString('en-US',{month:'short',day:'numeric'}) : 'on hearing day'}</button>`;
+   if (x.status === 'arbitration_pending') {
+    actionButtons = `<button class="doc-action-btn locked"><i class="fas fa-hourglass-half"></i> Awaiting 5-Day Repudiation Window</button>`;
+} else if (x.status === 'arbitration_agreement_active') {
+    actionButtons = `<button class="doc-action-btn mediate" onclick="event.stopPropagation(); openIssueArbitrationAwardModal(${x.id})"><i class="fas fa-gavel"></i> Render KP Form #15</button>`;
+} else if (x.status === 'arbitration_award_issued') {
+    actionButtons = `<button class="doc-action-btn view" onclick="event.stopPropagation(); viewComplaint(${x.id})"><i class="fas fa-eye"></i> View Award</button>`;
+} else if (x.status === 'arbitration_repudiated') {
+    // Arbitration was repudiated → only legal action is to issue the CFA
+    // (Repudiated cases now appear in the dedicated "Repudiated" filter.)
+    actionButtons = `
+        <button class="doc-action-btn" style="background:#c62828;color:#fff;" onclick="event.stopPropagation(); openIssueCfaModal(${x.id}, 'complainant')"><i class="fas fa-print"></i> Issue CFA (KP #20)</button>`;
+}else if (x.status === 'certificate_issued') {
+    actionButtons = `
+        <button class="doc-action-btn pdf" onclick="event.stopPropagation(); openCfaPdf(${x.id}, 'complainant')"><i class="fas fa-file-pdf"></i> View CFA (KP #20)</button>
+        <button class="doc-action-btn view" onclick="event.stopPropagation(); viewComplaint(${x.id})"><i class="fas fa-eye"></i> View</button>`;
+} else if (isWaiting) {
+
+        actionButtons = `<button class="doc-action-btn resume" onclick="event.stopPropagation(); openMediationSessionModal(${x.id})"><i class="fas fa-play"></i> Continue Mediation</button>`;
+    } else if (canStart) {
+        actionButtons = `<button class="doc-action-btn mediate" onclick="event.stopPropagation(); openMediationSessionModal(${x.id})"><i class="fas fa-play-circle"></i> Start Mediation</button>`;
+    } else {
+        actionButtons = `<button class="doc-action-btn locked"><i class="fas fa-lock"></i> Available ${hearingDate ? new Date(hearingDate).toLocaleDateString('en-US',{month:'short',day:'numeric'}) : 'on hearing day'}</button>`;
+    }
+
     const inMediation = ['for_mediation', 'mediation_scheduled'].includes(x.status);
     const deadlineIso = inMediation ? (x.mediation_deadline || null) : null;
     const appearanceIso = x.absence_appearance_at || null;
+    const explainIso = x.explain_deadline || null;
+
     return `
         <div class="document-card" onclick="viewComplaint(${x.id})" style="cursor:pointer;">
             <div class="document-card-header ${headerCls}">
@@ -1756,6 +4892,20 @@ function renderMediationCard(x) {
             <div class="document-card-body">
                 <div class="document-info-row"><div class="document-info-label">Ref:</div><div class="document-info-value"><strong>${escapeHtml(x.reference_number)}</strong></div></div>
                 <div class="document-info-row"><div class="document-info-label">Complainant:</div><div class="document-info-value">${escapeHtml(x.first_name)} ${escapeHtml(x.last_name)}</div></div>
+                ${wasArbitrationRepudiated ? `
+                    <div style="margin-top:10px;padding:10px 12px;background:#ffebee;border-left:4px solid #c62828;border-radius:8px;font-size:0.75rem;color:#b71c1c;line-height:1.5;">
+                        <i class="fas fa-gavel"></i>
+                        <strong>KP #14 (Agreement for Arbitration) was REPUDIATED</strong>
+                        by the <strong>${escapeHtml((x.arbitration_repudiated_by_party || 'party').toUpperCase())}</strong>.
+                        The case fell back to mediation.
+                    </div>` : ''}
+                ${wasSettlementRepudiated ? `
+                    <div style="margin-top:10px;padding:10px 12px;background:#ffebee;border-left:4px solid #c62828;border-radius:8px;font-size:0.75rem;color:#b71c1c;line-height:1.5;">
+                        <i class="fas fa-file-signature"></i>
+                        <strong>KP #16 (Amicable Settlement) was REPUDIATED</strong>
+                        by the <strong>${escapeHtml((x.amicable_repudiated_by_party || 'party').toUpperCase())}</strong>.
+                        The case proceeds to Certification to File Action.
+                    </div>` : ''}
                 ${x.hearing_date ? `<div class="document-info-row" style="background:${isHearingToday ? '#e8f5e9' : '#f3e5f5'};padding:6px 8px;border-radius:6px;margin-top:4px;">
                     <div class="document-info-label" style="color:${isHearingToday ? '#1b5e20' : '#6a1b9a'};font-weight:700;width:auto;margin-right:6px;">📅 Hearing:</div>
                     <div class="document-info-value" style="color:${isHearingToday ? '#1b5e20' : '#6a1b9a'};font-weight:600;">
@@ -1766,6 +4916,10 @@ function renderMediationCard(x) {
                     <div class="document-info-value" style="color:#e65100;font-weight:600;font-size:0.78rem;">
                         <i class="fas fa-user-clock"></i> Appearance set: ${new Date(appearanceIso.replace(' ','T')).toLocaleString('en-US',{dateStyle:'medium',timeStyle:'short'})}
                     </div></div>` : ''}
+                ${explainIso ? `<div class="document-info-row" style="background:#ffebee;padding:6px 8px;border-radius:6px;margin-top:4px;">
+                    <div class="document-info-label" style="color:#b71c1c;font-weight:700;width:auto;margin-right:6px;">⏳ Explain by:</div>
+                    <div class="document-info-value live-countdown" data-deadline="${escapeHtml(explainIso)}"><span class="status-pill critical"><i class="fas fa-hourglass-half"></i> Calculating…</span></div>
+                </div>` : ''}
                 ${deadlineIso ? `<div class="document-info-row" style="background:#f8faf8;padding:6px 8px;border-radius:6px;margin-top:4px;">
                     <div class="document-info-label" style="color:#555;font-weight:700;width:auto;margin-right:6px;">⏳ 15-Day:</div>
                     <div class="document-info-value live-countdown" data-deadline="${escapeHtml(deadlineIso)}"><span class="status-pill safe"><i class="fas fa-hourglass-half"></i> Calculating…</span></div>
@@ -1773,12 +4927,14 @@ function renderMediationCard(x) {
             </div>
             <div class="document-card-actions" onclick="event.stopPropagation()">
                 ${actionButtons}
-               
                 <button class="doc-action-btn view" onclick="event.stopPropagation(); viewComplaint(${x.id})"><i class="fas fa-eye"></i> View</button>
             </div>
         </div>`;
 }
 
+// ============================================================
+// PANGKAT CARD
+// ============================================================
 function renderPangkatCard(x) {
     const panelCount = x.pangkat_count || 0;
     const isConstituted = panelCount === 3;
@@ -1824,6 +4980,13 @@ function renderPangkatCard(x) {
                 <div class="document-info-row"><div class="document-info-label">Complainant:</div><div class="document-info-value">${escapeHtml(x.first_name)} ${escapeHtml(x.last_name)}</div></div>
                 <div class="document-info-row"><div class="document-info-label">Hearings:</div><div class="document-info-value">${x.mediation_session_count || 1}</div></div>
                 ${memberChips ? `<div style="margin-top:6px;">${memberChips}</div>` : ''}
+                ${Number(x.amicable_repudiated || 0) === 1 ? `
+                    <div style="margin-top:10px;padding:10px 12px;background:#ffebee;border-left:4px solid #c62828;border-radius:8px;font-size:0.75rem;color:#b71c1c;line-height:1.5;">
+                        <i class="fas fa-file-signature"></i>
+                        <strong>KP #16 (Amicable Settlement) was REPUDIATED</strong>
+                        by the <strong>${escapeHtml((x.amicable_repudiated_by_party || 'party').toUpperCase())}</strong>.
+                        Issue the Certificate to File Action.
+                    </div>` : ''}
                 ${isConstitutionScheduled && constitutionIso ? `<div class="document-info-row" style="background:#f3e5f5;padding:6px 8px;border-radius:6px;margin-top:4px;">
                     <div class="document-info-value" style="color:#4a148c;font-weight:600;font-size:0.78rem;">
                         <i class="fas fa-users-cog"></i> Constitution meeting: ${new Date(constitutionIso.replace(' ','T')).toLocaleString('en-US',{dateStyle:'medium',timeStyle:'short'})}
@@ -1840,11 +5003,94 @@ function renderPangkatCard(x) {
                     </div></div>` : ''))}
             </div>
             <div class="document-card-actions" onclick="event.stopPropagation()">
-                ${isConstitutionScheduled ? `<button class="doc-action-btn constitute" onclick="event.stopPropagation(); openMediationSessionModal(${x.id})"><i class="fas fa-users-cog"></i> Continue Constitution</button>` : (x.status === 'failed_mediation' ? `<button class="doc-action-btn schedule" onclick="event.stopPropagation(); openMediationSessionModal(${x.id})"><i class="fas fa-calendar-plus"></i> Set Constitution Meeting</button>` : `<button class="doc-action-btn view" onclick="event.stopPropagation(); viewComplaint(${x.id})"><i class="fas fa-eye"></i> View</button>`)}
+                ${x.status === 'amicable_repudiated'
+                    ? `<button class="doc-action-btn" style="background:#c62828;color:#fff;" onclick="event.stopPropagation(); openIssueCfaModal(${x.id}, 'complainant')"><i class="fas fa-print"></i> Issue CFA to Complainant</button>`
+                    : (isConstitutionScheduled
+                        ? `<button class="doc-action-btn constitute" onclick="event.stopPropagation(); openMediationSessionModal(${x.id})"><i class="fas fa-users-cog"></i> Continue Constitution</button>`
+                        : (x.status === 'failed_mediation'
+                            ? `<button class="doc-action-btn schedule" onclick="event.stopPropagation(); openMediationSessionModal(${x.id})"><i class="fas fa-calendar-plus"></i> Set Constitution Meeting</button>`
+                            : `<button class="doc-action-btn view" onclick="event.stopPropagation(); viewComplaint(${x.id})"><i class="fas fa-eye"></i> View</button>`))}
+            </div>
+        </div>`;
+}
+function renderRepudiatedCard(x) {
+    const wasAmicable    = Number(x.amicable_repudiated || 0) === 1;
+    const wasArbitration = Number(x.arbitration_repudiated || 0) === 1;
+
+    const repBy   = wasAmicable
+        ? (x.amicable_repudiated_by_party || 'party')
+        : (x.arbitration_repudiated_by_party || 'party');
+    const repAt   = wasAmicable
+        ? (x.amicable_repudiated_at || null)
+        : (x.arbitration_repudiated_at || null);
+    const repLabel = wasAmicable
+        ? 'Amicable Settlement (KP #16)'
+        : 'Agreement for Arbitration (KP #14)';
+
+    const repDateNice = repAt
+        ? new Date(String(repAt).replace(' ','T')).toLocaleDateString('en-US', {dateStyle:'medium'})
+        : '—';
+
+    const headerCls = wasAmicable ? 'pending' : 'waiting';
+    const headerIcon = wasAmicable ? 'fa-file-signature' : 'fa-gavel';
+
+    const repudiationDeadline = wasAmicable
+        ? (x.repudiation_deadline || null)
+        : null;
+
+    // KP #17 — only shown if it already exists on disk
+    const kp17Path = x.kp17_pdf_path || null;
+
+    return `
+        <div class="document-card" onclick="viewComplaint(${x.id})" style="cursor:pointer;border:2px solid #ef9a9a;">
+            <div class="document-card-header ${headerCls}" style="background:linear-gradient(135deg,#b71c1c,#c62828);">
+                <div class="document-title"><i class="fas ${headerIcon}"></i><span>${escapeHtml(x.title)}</span></div>
+                <div class="document-status"><i class="fas fa-times-circle"></i> Repudiated</div>
+            </div>
+            <div class="document-card-body">
+                <div class="document-info-row"><div class="document-info-label">Ref:</div><div class="document-info-value"><strong>${escapeHtml(x.reference_number)}</strong></div></div>
+                <div class="document-info-row"><div class="document-info-label">Complainant:</div><div class="document-info-value">${escapeHtml(x.first_name || '')} ${escapeHtml(x.last_name || '')}</div></div>
+
+                <div style="margin-top:10px;padding:12px 14px;background:#ffebee;border-left:4px solid #c62828;border-radius:8px;font-size:0.78rem;color:#b71c1c;line-height:1.6;">
+                    <div style="font-weight:800;text-transform:uppercase;font-size:0.7rem;letter-spacing:0.4px;margin-bottom:6px;">
+                        <i class="fas fa-exclamation-triangle"></i> ${escapeHtml(repLabel)} was REPUDIATED
+                    </div>
+                    <div><b>Repudiated by:</b> ${escapeHtml(String(repBy).toUpperCase())}</div>
+                    <div><b>Filed on:</b> ${escapeHtml(repDateNice)}</div>
+                    ${repudiationDeadline ? `<div style="margin-top:6px;padding-top:6px;border-top:1px dashed #ef9a9a;"><b>Repudiation window ended:</b> ${new Date(String(repudiationDeadline).replace(' ','T')).toLocaleDateString('en-US',{dateStyle:'medium'})}</div>` : ''}
+                </div>
+
+                ${kp17Path ? `
+                <div style="margin-top:10px;padding:12px 14px;background:#f3e5f5;border-left:4px solid #6a1b9a;border-radius:8px;font-size:0.78rem;line-height:1.6;">
+                    <div style="font-weight:800;text-transform:uppercase;font-size:0.7rem;letter-spacing:0.4px;margin-bottom:6px;color:#4a148c;">
+                        <i class="fas fa-file-signature"></i> KP Form #17 — Repudiation
+                    </div>
+                    <div style="color:#4a148c;">
+                        <b>✔ Repudiation document is on file.</b>
+                        ${x.kp17_generated_at ? `<div style="margin-top:4px;font-size:0.72rem;color:#666;">Generated: ${new Date(String(x.kp17_generated_at).replace(' ','T')).toLocaleString('en-US',{dateStyle:'medium',timeStyle:'short'})}</div>` : ''}
+                    </div>
+                    <button type="button"
+                            class="doc-action-btn pdf"
+                            style="margin-top:8px;padding:6px 14px;font-size:0.75rem;"
+                            onclick="event.stopPropagation(); window.open('../../${escapeHtml(kp17Path)}','_blank');">
+                        <i class="fas fa-file-pdf"></i> Open KP #17 PDF
+                    </button>
+                </div>` : ''}
+
+                <div style="margin-top:10px;padding:8px 12px;background:#fff8e1;border-left:4px solid #f57c00;border-radius:8px;font-size:0.72rem;color:#8a3e00;line-height:1.5;">
+                    <b><i class="fas fa-gavel"></i> Next legal step:</b> Issue a <b>Certificate to File Action (KP #20)</b> in printed copy to the complainant.
+                </div>
+            </div>
+            <div class="document-card-actions" onclick="event.stopPropagation()">
+                <button class="doc-action-btn" style="background:#c62828;color:#fff;flex:1;" onclick="event.stopPropagation(); openIssueCfaModal(${x.id}, 'complainant')"><i class="fas fa-print"></i> Issue CFA (KP #20)</button>
+                <button class="doc-action-btn view" onclick="event.stopPropagation(); viewComplaint(${x.id})"><i class="fas fa-eye"></i> View</button>
             </div>
         </div>`;
 }
 
+// ============================================================
+// REFERRAL CARD
+// ============================================================
 function renderReferralCard(x) {
     const statusConfig = {
         pending_captain_review: { icon: 'fa-hourglass-half', label: 'Pending Signature', cls: 'referral' },
@@ -1930,15 +5176,44 @@ async function openKp11Pdf(complaintId, memberId) {
     } catch (e) { Swal.close(); Swal.fire('Error', 'Network error.', 'error'); }
 }
 
-async function openBarCertPdf(complaintId, type) {
-    Swal.fire({ title: 'Loading PDF…', allowOutsideClick: false, didOpen: () => Swal.showLoading() });
+async function openBarCertPdf(complaintId, type, forWhom) {
+    if (!complaintId) {
+        Swal.fire('Error', 'Missing complaint ID.', 'error');
+        return;
+    }
+    if (type !== 'action' && type !== 'counterclaim') {
+        Swal.fire('Error', 'Invalid certification type.', 'error');
+        return;
+    }
+
+    Swal.fire({
+        title: 'Loading PDF…',
+        allowOutsideClick: false,
+        didOpen: () => Swal.showLoading()
+    });
+
     try {
-        const r = await fetch(`../admin_complaint_ajax.php?action=get_bar_cert_pdf&complaint_id=${complaintId}&type=${type}`);
+        let url = `../admin_complaint_ajax.php?action=get_bar_cert_pdf`
+                + `&complaint_id=${encodeURIComponent(complaintId)}`
+                + `&type=${encodeURIComponent(type)}`;
+
+        if (forWhom === 'complainant' || forWhom === 'respondent') {
+            url += `&for=${encodeURIComponent(forWhom)}`;
+        }
+
+        const r = await fetch(url);
         const d = await r.json();
         Swal.close();
-        if (d.success && d.pdf_url) window.open('../../' + d.pdf_url, '_blank');
-        else Swal.fire('Error', d.message || 'Could not open PDF.', 'error');
-    } catch (e) { Swal.close(); Swal.fire('Error', 'Network error.', 'error'); }
+
+        if (d.success && d.pdf_url) {
+            window.open('../../' + d.pdf_url, '_blank');
+        } else {
+            Swal.fire('Error', d.message || 'Could not open PDF.', 'error');
+        }
+    } catch (e) {
+        Swal.close();
+        Swal.fire('Error', 'Network error while loading the certification.', 'error');
+    }
 }
 
 async function openHearingKpNoticePdf(hearingId, formTag, partyId) {
@@ -1961,7 +5236,7 @@ async function openHearingKpNoticePdf(hearingId, formTag, partyId) {
 }
 
 // ============================================================
-// KP FORMS GROUPED BY RECIPIENT (Complainant / Respondent / Pangkat / Both)
+// KP FORMS GROUPED BY RECIPIENT
 // ============================================================
 function groupKpFormsByRecipient(kpForms) {
     const groups = {
@@ -2193,7 +5468,7 @@ async function generateKpFormFromList(formNo, formTag, mode) {
 }
 
 // ============================================================
-// NOTICES DIALOG — phased KP list
+// NOTICES DIALOG
 // ============================================================
 async function openAllNoticesDialog(complaintId) {
     window.__kpComplaintId = complaintId;
@@ -2232,8 +5507,7 @@ async function openAllNoticesDialog(complaintId) {
 }
 
 // ============================================================
-// CASE KP FORMS — shows only forms RELEVANT to the current status,
-// lets the user Generate/Open each one.
+// CASE KP FORMS
 // ============================================================
 async function openCaseKpFormsModal(complaintId) {
     if (!complaintId) return;
@@ -2248,9 +5522,6 @@ async function openCaseKpFormsModal(complaintId) {
     if (!d || !d.success) { Swal.fire('Error', d.message || 'Error', 'error'); return; }
 
     const c = d.complaint;
-    // NOTE: the backend already filtered build_kp_forms_list to generated-only.
-    // For this modal we want to show relevant phases even if not generated yet,
-    // so we RELOAD the raw form list from a wider query here.
     const kpForms = await fetchAllRelevantKpForms(complaintId);
     if (!Array.isArray(kpForms) || !kpForms.length) {
         Swal.fire({
@@ -2339,8 +5610,6 @@ async function openCaseKpFormsModal(complaintId) {
     });
 }
 
-// Fetches all KP forms for the case WITHOUT the generated-only filter,
-// then limits to the phases that matter for the current status.
 async function fetchAllRelevantKpForms(complaintId) {
     try {
         const r = await fetch(`../admin_complaint_ajax.php?action=get_case_kp_forms&id=${complaintId}`);
@@ -2394,6 +5663,19 @@ async function openAppearanceModal(meta) {
                     <div>
                         <div class="dm-info-title" style="color:#c62828;">Per KP Handbook</div>
                         <div style="font-size:0.82rem;line-height:1.6;">You must <b>set a date</b> for the absent party to appear before you and explain the reasons for their failure to appear. A <b>Notice of Hearing (Re: Failure to Appear)</b> — KP Form #18 (complainant) or #19 (respondent) — will be issued automatically.</div>
+                    </div>
+                </div>
+                <div class="dm-info" style="background:#ffebee;border-left-color:#c62828;color:#b71c1c;margin-top:10px;">
+                    <i class="fas fa-hourglass-half"></i>
+                    <div>
+                        <div class="dm-info-title" style="color:#b71c1c;">5-Day Explain Window</div>
+                        <div style="font-size:0.82rem;line-height:1.6;">
+                            The absent party has <b>5 days</b> after the appearance date to explain. If they do not appear or fail to give a justified reason within those 5 days, their absence is <b>automatically declared UNJUSTIFIED</b>:
+                            <ul style="margin-top:6px;padding-left:16px;">
+                                <li><b>Complainant unjustified</b> → Complaint DISMISSED + barred from court (KP #23)</li>
+                                <li><b>Respondent unjustified</b> → Counterclaim BARRED + case forwarded to Certification (KP #24)</li>
+                            </ul>
+                        </div>
                     </div>
                 </div>
                 <div class="dm-grid-2">
@@ -2462,7 +5744,7 @@ async function openAppearanceModal(meta) {
 }
 
 // ============================================================
-// MEDIATION SESSION MODAL
+// MEDIATION SESSION MODAL (WIZARD)
 // ============================================================
 function sessionFooter() {
     const actions = Swal.getActions();
@@ -2500,10 +5782,14 @@ function sesBtnPrimaryClick() {
     const step = window.__step || 'attendance';
     if (step === 'attendance')           return onAttContinue();
     if (step === 'absence_decision')     return onDecisionConfirm();
+    if (step === 'unjustified_outcome')  return onUnjustOutcomeContinue();
     if (step === 'result')               return onResultContinue();
+    if (step === 'settle_branch')        return onSettleBranchContinue();
     if (step === 'settlement_terms')     return onSaveSettlement();
+    if (step === 'arbitration_terms')    return onSaveArbitrationTerms();
     if (step === 'no_settlement')        return onNotSettledContinue();
     if (step === 'schedule_next')        return onSaveScheduleNext();
+    if (step === 'schedule_justified')   return onSaveScheduleJustified();
     if (step === 'constitute_pangkat')   return onSaveConstitutionMeeting();
     if (step === 'pangkat_members' || step === 'pangkat_constitution_waiting') {
         return onSaveConstitutePangkat();
@@ -2584,6 +5870,13 @@ async function openMediationSessionModal(id, opts = {}) {
 
     const bodyHtml = `
         ${headerHtml}
+        <div id="swalSessionInlineError" style="display:none;margin:0 22px 12px;padding:10px 14px;background:#ffebee;border-left:4px solid #c62828;border-radius:8px;font-size:0.85rem;color:#b71c1c;"></div>
+        <div id="swalSessionProgress" style="display:none;margin:0 22px 12px;">
+            <div style="height:6px;background:#e0e0e0;border-radius:6px;overflow:hidden;">
+                <div id="swalSessionProgressBar" style="height:100%;width:0%;background:linear-gradient(90deg,#2E7D32,#66bb6a);transition:width .4s ease;"></div>
+            </div>
+            <div id="swalSessionProgressLabel" style="font-size:0.78rem;color:#555;margin-top:6px;text-align:center;">Working…</div>
+        </div>
         <div class="dm-body">
             ${deadlinePill}
             ${previousHearingsHtml}
@@ -2600,7 +5893,37 @@ async function openMediationSessionModal(id, opts = {}) {
                 <div id="appearanceInfoBox" style="margin-bottom:14px;"></div>
                 <div class="handbook-quote"><div class="handbook-quote-title"><i class="fas fa-gavel"></i> RA 7160 — Consequences of Non-Appearance</div><p><b>IF THE COMPLAINANT CANNOT APPEAR BEFORE YOU WITHOUT JUSTIFIABLE CAUSE, HIS/HER COMPLAINT WILL BE DISMISSED AND EVENTUALLY HE/SHE CANNOT FILE A CASE IN COURT. HE CAN ALSO BE PUNISHED/REPRIMANDED FOR INDIRECT CONTEMPT.</b></p><p><b>HOWEVER, IF THE RESPONDENT CANNOT ALSO APPEAR WITHOUT JUSTIFIABLE CAUSE, HIS/HER COUNTERCLAIM IF THERE IS ANY, WILL BE DISMISSED AND HE WILL BE BARRED FROM FILING IN COURT AND BE PUNISHED FOR INDIRECT CONTEMPT OF COURT.</b></p></div>
                 <div id="decisionCardsHost"></div>
-                ${sessionRecordBlockHtml('dec')}
+            </div>
+
+            <div id="step-unjustified-outcome" style="display:none;">
+                <div class="dm-section-title warn"><span class="dm-step">2B</span> Proceed to Pangkat</div>
+
+                <div class="dm-info" style="background:#fff8e1;border-left-color:#f57c00;color:#e65100;">
+                    <i class="fas fa-gavel"></i>
+                    <div>
+                        <div class="dm-info-title" style="color:#c62828;">Unjustified Absence Recorded</div>
+                        <div style="font-size:0.82rem;line-height:1.6;">
+                            The respondent's absence has been declared <b>UNJUSTIFIED</b>.
+                            Per RA 7160, their counterclaim is barred. The case will now proceed to the Pangkat.
+                        </div>
+                    </div>
+                </div>
+
+                <div class="dm-option-group" id="unjustOutcomeGroup">
+                    <div class="dm-option selected" data-value="end_mediation" onclick="selectUnjustOutcome('end_mediation')">
+                        <div class="dm-option-icon warn"><i class="fas fa-balance-scale"></i></div>
+                        <div class="dm-option-text">
+                            <div class="dm-option-title">End Mediation → Constitute a Pangkat</div>
+                            <div class="dm-option-desc">
+                                Issue KP Form #24 (counterclaim barred). Forward the case to the Pangkat and
+                                set the <b>constitution meeting date</b> next.
+                            </div>
+                        </div>
+                        <div class="dm-option-check"><i class="fas fa-check"></i></div>
+                    </div>
+                </div>
+
+                <input type="hidden" id="unjustOutcomeChoice" value="end_mediation">
             </div>
 
             <div id="step-result" style="display:none;">
@@ -2612,6 +5935,75 @@ async function openMediationSessionModal(id, opts = {}) {
                 </div>
                 <input type="hidden" id="medSettled" value="">
             </div>
+           <div id="step-settle-branch" style="display:none;">
+    <div class="dm-section-title"><span class="dm-step">3</span> How will you resolve this?</div>
+
+    <div class="dm-info" style="background:#e8f5e9;border-left-color:#2E7D32;color:#1b5e20;">
+        <i class="fas fa-handshake"></i>
+        <div>
+            <div style="font-weight:700;">Both parties agreed to resolve the case.</div>
+            <div style="margin-top:4px;font-size:0.82rem;line-height:1.6;">
+                Pick the legal form of the resolution:
+            </div>
+        </div>
+    </div>
+
+    <div class="dm-option-group cols-2" id="settleBranchGroup">
+
+        <div class="dm-option" data-value="settlement" onclick="selectSettleBranch('settlement')">
+            <div class="dm-option-icon success"><i class="fas fa-file-signature"></i></div>
+            <div class="dm-option-text">
+                <div class="dm-option-title">Amicable Settlement — KP Form #16</div>
+                <div class="dm-option-desc">
+                    The parties <b>agree on their own terms</b>. You write KP Form #16; both parties sign.<br><br>
+                    <b>Repudiation window:</b> 10 days from signing (fraud / violence / intimidation).
+                </div>
+            </div>
+            <div class="dm-option-check"><i class="fas fa-check"></i></div>
+        </div>
+
+        <div class="dm-option" data-value="arbitration" onclick="selectSettleBranch('arbitration')">
+            <div class="dm-option-icon info"><i class="fas fa-gavel"></i></div>
+            <div class="dm-option-text">
+                <div class="dm-option-title">Arbitration — KP Form #14 → KP Form #15</div>
+                <div class="dm-option-desc">
+                    The parties <b>hand decision power to you</b>. They sign <b>KP Form #14</b> now; you render <b>KP Form #15</b> within 15 days.<br><br>
+                    <b>Repudiation window:</b> 5 days from signing KP Form #14.
+                </div>
+            </div>
+            <div class="dm-option-check"><i class="fas fa-check"></i></div>
+        </div>
+    </div>
+    <input type="hidden" id="settleBranch" value="">
+</div>
+
+<div id="step-arbitration-terms" style="display:none;">
+    <div class="dm-section-title"><span class="dm-step">3A</span> Agreement for Arbitration — Hearing Summary</div>
+
+    <div class="dm-info" style="background:#e3f2fd;border-left-color:#1565c0;color:#0d47a1;">
+        <i class="fas fa-gavel"></i>
+        <div>
+            <div style="font-weight:700;">KP Form #14 will be issued to both parties.</div>
+            <div style="margin-top:6px;font-size:0.82rem;line-height:1.6;">
+                <b>Repudiation window:</b> 5 days from signing (fraud / violence / intimidation).<br>
+                <b>Award deadline:</b> you must render KP Form #15 within 15 days from signing.
+            </div>
+        </div>
+    </div>
+
+    <div class="dm-field" style="margin-bottom:12px;">
+        <label>Date Parties Signed KP Form #14 <span class="req">*</span></label>
+        <input type="date" id="arbSignedDate"
+               max="${new Date().toISOString().split('T')[0]}"
+               value="${new Date().toISOString().split('T')[0]}">
+        <div class="dm-helper" style="margin-top:6px;">
+            <i class="fas fa-info-circle"></i>
+            <span>The <b>5-day repudiation window</b> and <b>15-day award deadline</b> are counted from this date.</span>
+        </div>
+    </div>
+
+    ${sessionRecordBlockHtml('arb')}
+</div>
 
             <div id="step-settlement" style="display:none;">
                 <div class="dm-section-title"><span class="dm-step">3A</span> Settlement Terms</div>
@@ -2627,7 +6019,34 @@ async function openMediationSessionModal(id, opts = {}) {
                 <input type="hidden" id="medReason" value="No amicable settlement reached">
                 <div class="dm-field" style="margin-top:18px;"><label>Hearing Notes <span class="req">*</span></label><textarea id="medNoSummary" rows="3" placeholder="Describe what happened..."></textarea></div>
                 ${sessionRecordBlockHtml('noset')}
-                ${!isExpired ? `<div class="dm-section-title" style="margin-top:22px;"><span class="dm-step">4</span> What's next?</div><div class="dm-option-group cols-2" id="medNextGroup"><div class="dm-option" data-value="schedule" onclick="selectMedNext('schedule')"><div class="dm-option-icon info"><i class="fas fa-calendar-plus"></i></div><div class="dm-option-text"><div class="dm-option-title">Schedule Another Hearing</div></div><div class="dm-option-check"><i class="fas fa-check"></i></div></div><div class="dm-option" data-value="end" onclick="selectMedNext('end')"><div class="dm-option-icon danger"><i class="fas fa-balance-scale"></i></div><div class="dm-option-text"><div class="dm-option-title">End Mediation → Pangkat</div></div><div class="dm-option-check"><i class="fas fa-check"></i></div></div></div><input type="hidden" id="medNextAction" value="schedule">` : `<input type="hidden" id="medNextAction" value="end">`}
+              <div class="dm-section-title" style="margin-top:22px;"><span class="dm-step">4</span> What's next?</div>
+${!isExpired ? `
+  <div class="dm-option-group cols-2" id="medNextGroup">
+    <div class="dm-option" data-value="schedule" onclick="selectMedNext('schedule')">
+      <div class="dm-option-icon info"><i class="fas fa-calendar-plus"></i></div>
+      <div class="dm-option-text">
+        <div class="dm-option-title">Schedule Another Hearing</div>
+        <div class="dm-option-desc">Continue mediation on a new date.</div>
+      </div>
+      <div class="dm-option-check"><i class="fas fa-check"></i></div>
+    </div>
+    <div class="dm-option" data-value="end" onclick="selectMedNext('end')">
+      <div class="dm-option-icon danger"><i class="fas fa-balance-scale"></i></div>
+      <div class="dm-option-text">
+        <div class="dm-option-title">End Mediation → Pangkat</div>
+        <div class="dm-option-desc">Forward immediately to the Pangkat, even if the 15-day window has not yet expired.</div>
+      </div>
+      <div class="dm-option-check"><i class="fas fa-check"></i></div>
+    </div>
+  </div>
+  <input type="hidden" id="medNextAction" value="">
+` : `
+  <div class="dm-info" style="background:#ffebee;border-left-color:#c62828;color:#b71c1c;">
+    <i class="fas fa-hourglass-end"></i>
+    <div>The 15-day mediation period has expired. The case must now proceed to the Pangkat.</div>
+  </div>
+  <input type="hidden" id="medNextAction" value="end">
+`}
             </div>
 
             <div id="step-schednext" style="display:none;">
@@ -2636,6 +6055,57 @@ async function openMediationSessionModal(id, opts = {}) {
                 <div class="dm-inline-rule"><i class="fas fa-info-circle"></i><span>Office hours: <b>8:00 AM – 6:30 PM</b> · min. 2 hours from now.</span></div>
                 <div class="dm-conflict" id="medConflict"><i class="fas fa-exclamation-triangle"></i><div></div></div>
                 <div class="dm-available" id="medAvailable"><i class="fas fa-check-circle"></i><span>Available.</span></div>
+            </div>
+
+            <div id="step-schedjustified" style="display:none;">
+                <div class="dm-section-title"><span class="dm-step">4B</span> Schedule Next Mediation Hearing (Justified Absences)</div>
+
+                <div class="dm-info" style="background:#e8f5e9;border-left-color:#2E7D32;color:#1b5e20;margin-bottom:14px;">
+                    <i class="fas fa-check-circle"></i>
+                    <div>
+                        <div style="font-weight:700;">Absence decision saved — Justified.</div>
+                        <div style="margin-top:4px;">Now pick the next mediation hearing date and time.</div>
+                    </div>
+                </div>
+
+                <div class="dm-warning" style="background:#fff8e1;border-left-color:#f57c00;">
+                    <i class="fas fa-hourglass-half"></i>
+                    <div>
+                        <div style="font-weight:700;">A new hearing date is required.</div>
+                        <div style="margin-top:4px;">
+                            The absent part${(window.__lastJustifiedCount || 0) > 1 ? 'ies were' : 'y was'} declared <b>JUSTIFIED</b>.
+                            Schedule the next mediation hearing <b>within the 15-day window</b>
+                            ${deadlineNice ? `(ends <b>${deadlineNice}</b>)` : ''}.
+                        </div>
+                    </div>
+                </div>
+
+                <div class="dm-inline-rule">
+                    <i class="fas fa-gavel"></i>
+                    <span>Per RA 7160: a justified absence does not dismiss the case — it is <b>rescheduled with a strict warning</b> to the absent party.</span>
+                </div>
+
+                <div class="dm-grid-2">
+                    <div class="dm-field" style="margin-bottom:0;">
+                        <label>New Hearing Date <span class="req">*</span></label>
+                        <input type="date" id="justDate" min="${new Date().toISOString().split('T')[0]}">
+                    </div>
+                    <div class="dm-field" style="margin-bottom:0;">
+                        <label>Time <span class="req">*</span></label>
+                        <input type="time" id="justTime" value="09:00">
+                    </div>
+                </div>
+                <div class="dm-inline-rule" style="margin-top:8px;">
+                    <i class="fas fa-info-circle"></i>
+                    <span>Office hours: <b>8:00 AM – 6:30 PM</b> · min. 2 hours from now · no overlaps.</span>
+                </div>
+                <div class="dm-conflict" id="justConflict"><i class="fas fa-exclamation-triangle"></i><div></div></div>
+                <div class="dm-available" id="justAvailable"><i class="fas fa-check-circle"></i><span>Available.</span></div>
+
+                <div class="dm-field" style="margin-top:18px;margin-bottom:0;">
+                    <label>Remarks to absent party <span class="opt">(optional — appears in audit trail)</span></label>
+                    <textarea id="justRemarks" rows="2" placeholder="e.g. Stated reason: hospitalized. Warning issued in person."></textarea>
+                </div>
             </div>
 
             <div id="step-constitute" style="display:none;">
@@ -2651,7 +6121,61 @@ async function openMediationSessionModal(id, opts = {}) {
                 <div class="handbook-quote"><div class="handbook-quote-title"><i class="fas fa-users-cog"></i> Position Assignment Flow</div><p>Pick <b>3 Lupon members</b> to form the Pangkat. <b>Roles are NOT assigned here</b> — the Pangkat members themselves will decide their Chairperson, Secretary, and Member.</p><p>Each chosen member will receive <b>KP Form #11 (Notice to Chosen Pangkat Member)</b>.</p><p>The <b>FIRST-selected member</b> will assign the three positions from the Lupon Portal. The other two members will wait for that assignment.</p></div>
                 <div class="dm-field" style="margin-bottom:12px;"><label>How were the <b>members</b> chosen? <span class="req">*</span></label><div class="dm-chip-group" id="pangkatSelectedByGroup"><div class="dm-chip selected" data-value="parties" onclick="selectPangkatBy(this)"><i class="fas fa-handshake"></i> Parties agreed</div><div class="dm-chip" data-value="lot" onclick="selectPangkatBy(this)"><i class="fas fa-dice"></i> Drawn by lots</div><div class="dm-chip" data-value="captain" onclick="selectPangkatBy(this)"><i class="fas fa-user-tie"></i> Captain decided</div></div><input type="hidden" id="pangkatSelectedBy" value="parties"></div>
                 <div id="manualPickWrap"><div class="dm-field" style="margin-bottom:8px;"><label>Select 3 Lupon members <span class="req">*</span></label><div id="manualPangkatList" style="max-height:260px;overflow-y:auto;border:1.5px solid #cfd8dc;border-radius:8px;padding:10px;background:#fff;"><div style="text-align:center;color:#999;padding:14px;font-size:0.85rem;"><i class="fas fa-spinner fa-spin"></i> Loading…</div></div><div class="dm-helper" style="margin-top:6px;"><i class="fas fa-lightbulb"></i><span>Selected: <b id="manualSelectedCount">0</b> of 3 · <span id="manualOrderHint" style="color:#1565c0;font-weight:600;">The first one checked becomes the first-selected member.</span></span></div></div></div>
-                <div id="wheelModeWrap" style="display:none;"><div id="wheelStage" class="wheel-stage"><div class="wheel-pointer"></div><div id="wheelDisc" class="wheel-disc"></div></div><div class="pick-banner" id="pickBanner"><i class="fas fa-check-circle"></i><span id="pickBannerText">—</span></div><div class="wheel-result" id="wheelResult">Ready — spin to pick member #1</div><button type="button" id="spinBtn" class="wheel-spin-btn" onclick="spinWheel()" disabled><i class="fas fa-dice"></i> Loading…</button></div>
+                <div id="wheelModeWrap" style="display:none;">
+
+    <!-- NEW: Pre-selection step -->
+    <div id="wheelPreSelectWrap">
+        <div class="dm-field" style="margin-bottom:10px;">
+            <label>Who will be included in the draw? <span class="req">*</span></label>
+            <div class="dm-helper" style="margin-bottom:10px;">
+                <i class="fas fa-info-circle"></i>
+                <span>Check <b>at least 3</b> Lupon members. Only checked members will appear on the wheel.</span>
+            </div>
+            <div id="wheelPreSelectList"
+                 style="max-height:260px;overflow-y:auto;border:1.5px solid #cfd8dc;
+                        border-radius:8px;padding:10px;background:#fff;">
+                <div style="text-align:center;color:#999;padding:14px;font-size:0.85rem;">
+                    <i class="fas fa-spinner fa-spin"></i> Loading…
+                </div>
+            </div>
+            <div class="dm-helper" style="margin-top:6px;">
+                <i class="fas fa-lightbulb"></i>
+                <span>Selected for draw: <b id="wheelPreSelectCount">0</b>
+                · <span id="wheelPreSelectHint" style="color:#1565c0;font-weight:600;">
+                    Check at least 3 members to enable the wheel.</span></span>
+            </div>
+        </div>
+
+        <button type="button" id="wheelConfirmPoolBtn"
+                class="ses-btn primary"
+                style="display:block;margin:10px auto 0;padding:10px 24px;"
+                onclick="confirmWheelPool()">
+            <i class="fas fa-check-circle"></i> Confirm & Show Wheel
+        </button>
+    </div>
+
+    <!-- Wheel (hidden until pool confirmed) -->
+    <div id="wheelSpinWrap" style="display:none;">
+        <div id="wheelStage" class="wheel-stage">
+            <div class="wheel-pointer"></div>
+            <div id="wheelDisc" class="wheel-disc"></div>
+        </div>
+        <div class="pick-banner" id="pickBanner">
+            <i class="fas fa-check-circle"></i>
+            <span id="pickBannerText">—</span>
+        </div>
+        <div class="wheel-result" id="wheelResult">Ready — spin to pick member #1</div>
+        <button type="button" id="spinBtn" class="wheel-spin-btn" onclick="spinWheel()" disabled>
+            <i class="fas fa-dice"></i> Loading…
+        </button>
+        <button type="button" id="wheelResetPoolBtn"
+                class="ses-btn close"
+                style="display:block;margin:10px auto 0;"
+                onclick="resetWheelPool()">
+            <i class="fas fa-arrow-left"></i> Change Draw Pool
+        </button>
+    </div>
+</div>
                 <div class="wheel-selected-list" id="wheelSelectedList" style="margin-top:14px;"></div>
             </div>
         </div>
@@ -2683,6 +6207,7 @@ async function openMediationSessionModal(id, opts = {}) {
             window.__hearingId = resume.hearing_id || 0;
             window.__sessionNo = sessionCount;
             window.__complaintId = id;
+            window.__caseStatus = complaint.status || resume.case_status || '';
             window.__parties = parties;
             window.__justificationByPid = justificationByPid;
             window.__decisionState = {};
@@ -2697,7 +6222,7 @@ async function openMediationSessionModal(id, opts = {}) {
 
             const infoBox = document.getElementById('appearanceInfoBox');
             if (infoBox && window.__appearanceAt) {
-                infoBox.innerHTML = `<div class="appear-info-banner"><i class="fas fa-user-clock"></i><div><div>Appearance was set for: <strong>${new Date(window.__appearanceAt.replace(' ','T')).toLocaleString('en-US',{dateStyle:'full',timeStyle:'short'})}</strong></div><div style="font-size:0.78rem;color:#666;margin-top:3px;">Decide below whether the absence is Justified or Unjustified. Use the notes box to record what they said.</div></div></div>`;
+                infoBox.innerHTML = `<div class="appear-info-banner"><i class="fas fa-user-clock"></i><div><div>Appearance was set for: <strong>${new Date(window.__appearanceAt.replace(' ','T')).toLocaleString('en-US',{dateStyle:'full',timeStyle:'short'})}</strong></div><div style="font-size:0.78rem;color:#666;margin-top:3px;">Decide below whether the absence is Justified or Unjustified. If no decision is made within 5 days, it will be automatically declared UNJUSTIFIED.</div></div></div>`;
             }
 
             const cbox = document.getElementById('constitutionInfoBox');
@@ -2756,14 +6281,51 @@ function renderDecisionCards(parties, justificationByPid) {
 function goToStep(step) {
     window.__step = step;
     setFooterButtons({ primaryLabel: null, secondaryLabel: null });
-    ['attendance','decision','result','settlement','nosettle','schednext','constitute','pangkat'].forEach(s => { const el = document.getElementById('step-' + s); if (el) el.style.display = 'none'; });
+   ['attendance','decision','unjustified_outcome','result','settle_branch','settlement','arbitration_terms','nosettle','schednext','schedjustified','constitute','pangkat'].forEach(s => {
+        const el = document.getElementById('step-' + s); if (el) el.style.display = 'none';
+    });
     const show = (id) => { const el = document.getElementById(id); if (el) el.style.display = 'block'; };
     if (step === 'attendance') { show('step-attendance'); updateContinueButton(); }
     else if (step === 'absence_decision') { show('step-decision'); setFooterButtons({ primaryLabel: '<i class="fas fa-gavel"></i> Confirm Decision', disablePrimary: !isDecisionComplete(), primaryVariant: 'danger' }); }
+    else if (step === 'unjustified_outcome') { show('step-unjustified-outcome'); setFooterButtons({ primaryLabel: '<i class="fas fa-arrow-right"></i> Continue', disablePrimary: false, primaryVariant: 'danger' }); }
     else if (step === 'result') { show('step-result'); populateResultStatements(); setFooterButtons({ primaryLabel: '<i class="fas fa-arrow-right"></i> Continue', disablePrimary: !document.getElementById('medSettled').value }); }
+        else if (step === 'settle_branch') {
+        show('step-settle-branch');
+        setFooterButtons({
+            primaryLabel: '<i class="fas fa-arrow-right"></i> Continue',
+            disablePrimary: true,
+            primaryVariant: '',
+        });
+    }
+    else if (step === 'arbitration_terms') {
+        show('step-arbitration-terms');
+        setFooterButtons({
+            primaryLabel: '<i class="fas fa-gavel"></i> Save & Issue KP Form #14',
+            disablePrimary: false,
+            primaryVariant: 'danger',
+        });
+    }
     else if (step === 'settlement_terms') { show('step-settlement'); setFooterButtons({ primaryLabel: '<i class="fas fa-save"></i> Save Record', disablePrimary: false }); }
     else if (step === 'no_settlement') { show('step-nosettle'); setFooterButtons({ primaryLabel: '<i class="fas fa-arrow-right"></i> Continue', disablePrimary: false }); }
     else if (step === 'schedule_next') { show('step-schednext'); setFooterButtons({ primaryLabel: '<i class="fas fa-calendar-check"></i> Save & Schedule', disablePrimary: false, primaryVariant: 'warn' }); }
+    else if (step === 'schedule_justified') {
+        show('step-schedjustified');
+
+        if (window.__nosetSummary) {
+            const noSum = document.getElementById('medNoSummary');
+            if (noSum && !noSum.value) noSum.value = window.__nosetSummary;
+            const srSum = document.getElementById('noset-sr-summary');
+            if (srSum && !srSum.value) srSum.value = window.__nosetSummary;
+        }
+
+        setFooterButtons({
+            primaryLabel: '<i class="fas fa-check"></i> Confirm & Schedule',
+            disablePrimary: false,
+            primaryVariant: 'warn',
+            hideClose: true
+        });
+        initJustifiedSchedulingValidation();
+    }
     else if (step === 'constitute_pangkat') { show('step-constitute'); setFooterButtons({ primaryLabel: '<i class="fas fa-file-signature"></i> Save & Issue KP Form #10', disablePrimary: false, primaryVariant: 'danger' }); }
     else if (step === 'pangkat_constitution_waiting') {
         if (!window.__canConstitute) {
@@ -2779,7 +6341,7 @@ function goToStep(step) {
         }
     }
     const closeBtn = document.getElementById('sesBtnClose');
-    if (closeBtn) closeBtn.style.display = '';
+    if (closeBtn) closeBtn.style.display = (step === 'schedule_justified') ? 'none' : '';
 }
 
 function isAttendanceComplete() {
@@ -2824,7 +6386,7 @@ function updateContinueButton() {
 }
 
 async function sendNudge(partyId, residentId, btnEl) {
-    if (!residentId) { Swal.fire('Not possible', 'No linked resident account.', 'info'); return; }
+    if (!residentId) { alertInlineError('No linked resident account.'); return; }
     const original = btnEl.innerHTML;
     btnEl.disabled = true;
     btnEl.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Sending…';
@@ -2836,17 +6398,17 @@ async function sendNudge(partyId, residentId, btnEl) {
         const r = await fetch('../admin_complaint_ajax.php', { method: 'POST', body: fd });
         const d = await r.json();
         if (d.success) {
-            Swal.fire({ toast: true, position: 'top-end', icon: 'success', title: d.message, showConfirmButton: false, timer: 2200 });
+            clearInlineError();
             const row = document.getElementById('nudge-row-' + partyId);
             if (row) { const span = row.querySelector('span'); if (span) span.innerHTML = `<i class="fas fa-bell"></i> Reminder sent ${d.nudge_count || 1} time(s).`; btnEl.innerHTML = '<i class="fas fa-paper-plane"></i> Nudge Again'; btnEl.disabled = (d.nudge_count >= 3); }
-        } else { Swal.fire('Error', d.message || 'Failed.', 'error'); btnEl.innerHTML = original; btnEl.disabled = false; }
-    } catch (e) { Swal.fire('Error', 'Network error.', 'error'); btnEl.innerHTML = original; btnEl.disabled = false; }
+        } else { alertInlineError(d.message || 'Failed.'); btnEl.innerHTML = original; btnEl.disabled = false; }
+    } catch (e) { alertInlineError('Network error.'); btnEl.innerHTML = original; btnEl.disabled = false; }
 }
 
 async function onAttContinue() {
     const parties = window.__parties || [];
     const missing = parties.filter(p => { const st = window.__attendanceState[p.id]; return !st || st === 'pending'; });
-    if (missing.length) { Swal.fire('Incomplete', 'Mark attendance for: ' + missing.map(p => p.full_name).join(', '), 'warning'); return; }
+    if (missing.length) { alertInlineError('Mark attendance for: ' + missing.map(p => p.full_name).join(', ')); return; }
     const anyAbsent = hasAnyAbsent();
     let appearance_at = null;
     if (anyAbsent) {
@@ -2888,7 +6450,27 @@ async function saveAttendanceAndAdvance(appearance_at, immediate) {
             }).join('') || '<div style="padding:10px;color:#999;text-align:center;">No notices.</div>';
             const printBanner = printRequired.length ? `<div class="dm-danger" style="margin-top:16px;animation: pulseBadge 1.5s infinite;"><i class="fas fa-print"></i><div><b>⚠ PRINT REQUIRED — ${printRequired.length} notice(s)</b><br>The Secretary has been notified to print and hand-deliver the Failure-to-Appear notice.</div></div>` : '';
             const niceAppear = new Date(appearance_at.replace(' ', 'T')).toLocaleString('en-US', {dateStyle:'full',timeStyle:'short'});
-            await Swal.fire({ icon: 'success', title: 'Appearance Date Set', html: `<div style="text-align:left;font-size:0.9rem;"><p>The absent part${notices.length>1?'ies':'y'} must appear before you on:</p><p style="font-weight:700;color:#c62828;font-size:1rem;">${escapeHtml(niceAppear)}</p><div class="notice-panel"><div class="notice-panel-title"><i class="fas fa-file-signature"></i> Failure-to-Appear Notices (${notices.length})</div>${list}</div>${printBanner}</div>`, confirmButtonText: '<i class="fas fa-check"></i> Done', confirmButtonColor: '#2E7D32', width: 720, allowOutsideClick: false }).then(() => reloadComplaints());
+            const niceExplainDeadline = dA.explain_deadline
+                ? new Date(dA.explain_deadline.replace(' ', 'T')).toLocaleString('en-US', {dateStyle:'full',timeStyle:'short'})
+                : '';
+            await Swal.fire({
+                icon: 'success',
+                title: 'Appearance Date Set',
+                html: `<div style="text-align:left;font-size:0.9rem;">
+                    <p>The absent part${notices.length>1?'ies':'y'} must appear before you on:</p>
+                    <p style="font-weight:700;color:#c62828;font-size:1rem;">${escapeHtml(niceAppear)}</p>
+                    ${niceExplainDeadline ? `<div style="margin-top:12px;padding:10px 12px;background:#ffebee;border-left:4px solid #c62828;border-radius:8px;font-size:0.82rem;color:#b71c1c;">
+                        <b>5-Day Explain Deadline:</b> ${escapeHtml(niceExplainDeadline)}<br>
+                        If no explanation is received by then, the absence will be auto-declared <b>UNJUSTIFIED</b>.
+                    </div>` : ''}
+                    <div class="notice-panel"><div class="notice-panel-title"><i class="fas fa-file-signature"></i> Failure-to-Appear Notices (${notices.length})</div>${list}</div>
+                    ${printBanner}
+                </div>`,
+                confirmButtonText: '<i class="fas fa-check"></i> Done',
+                confirmButtonColor: '#2E7D32',
+                width: 720,
+                allowOutsideClick: false
+            }).then(() => reloadComplaints());
         } else if (dA.waiting) {
             Swal.fire({ icon: 'success', title: 'Appearance Date Set', text: 'The absent party must appear on the scheduled date.', confirmButtonColor: '#2E7D32' }).then(() => reloadComplaints());
         } else { setTimeout(() => openMediationSessionModal(window.__complaintId, { startStep: 'result' }), 200); }
@@ -2916,6 +6498,7 @@ function isDecisionComplete() {
 }
 
 async function onDecisionConfirm() {
+    clearInlineError();
     const parties = window.__parties || [];
     const absent = parties.filter(p => window.__attendanceState[p.id] === 'no_show');
     const decisions = absent.map(p => {
@@ -2923,39 +6506,181 @@ async function onDecisionConfirm() {
         const ta = card?.querySelector('textarea[data-role="appearance_notes"]');
         const d = window.__decisionState[p.id] || {};
         const appNotes = (ta?.value || '').trim();
-        return { party_id: p.id, party_type: p.role, status: d.status, reason: appNotes, appeared: 0, appearance_notes: appNotes };
+        return {
+            party_id: p.id,
+            party_type: p.role,
+            status: d.status,
+            reason: appNotes,
+            appeared: 0,
+            appearance_notes: appNotes
+        };
     });
-    if (!isSessionRecordValid('dec')) { Swal.fire('Incomplete', 'Please fill the "Summary of this mediation hearing" field.', 'warning'); return; }
-    const summary = decisions.map(d => { const pname = (parties.find(p => p.id === d.party_id) || {}).full_name || ''; return `<li><b>${escapeHtml(pname)}</b> — ${escapeHtml(d.party_type)}<br>Decision: <b style="color:${d.status === 'unjustified' ? '#c62828' : '#2E7D32'}">${(d.status || '').toUpperCase()}</b></li>`; }).join('');
-    const confirm = await Swal.fire({ icon: 'warning', title: 'Confirm Absence Decision?', html: `<div style="text-align:left;font-size:0.9rem;"><p>This will be executed immediately:</p><ul style="margin-top:8px;line-height:1.7;">${summary}</ul><p style="margin-top:12px;font-size:0.82rem;color:#b71c1c;font-weight:700;"><i class="fas fa-exclamation-triangle"></i>Unjustified complainant → COMPLAINT DISMISSED + KP Form #23 auto-issued.<br>Unjustified respondent → counterclaim barred + KP Form #24 auto-issued + case to Pangkat.</p></div>`, showCancelButton: true, confirmButtonText: '<i class="fas fa-gavel"></i> Confirm Decision', confirmButtonColor: '#c62828', cancelButtonText: 'Back', cancelButtonColor: '#6c757d', allowOutsideClick: false, allowEscapeKey: false });
-    if (!confirm.isConfirmed) return;
-    Swal.fire({ title: 'Recording decision…', allowOutsideClick: false, didOpen: () => Swal.showLoading() });
+
+    if (!decisions.length) { alertInlineError('No absence decisions to confirm.'); return; }
+    window.__pendingDecisions = decisions;
+
+    const anyUnjust         = decisions.some(d => d.status === 'unjustified');
+    const complainantUnjust = decisions.some(d => d.status === 'unjustified' && d.party_type === 'complainant');
+    const respondentUnjustOnly = anyUnjust && !complainantUnjust;
+
+    // Respondent-only unjustified → show the Pangkat confirmation screen
+    if (respondentUnjustOnly) {
+        goToStep('unjustified_outcome');
+        return;
+    }
+
+    // Complainant unjustified → keep the existing scary confirmation
+    if (anyUnjust) {
+        const summary = decisions.map(d => {
+            const pname = (parties.find(p => p.id === d.party_id) || {}).full_name || '';
+            return `<li><b>${escapeHtml(pname)}</b> — ${escapeHtml(d.party_type)}<br>Decision: <b style="color:${d.status === 'unjustified' ? '#c62828' : '#2E7D32'}">${(d.status || '').toUpperCase()}</b></li>`;
+        }).join('');
+
+        const confirm = await Swal.fire({
+            icon: 'warning',
+            title: 'Confirm Absence Decision?',
+            html: `<div style="text-align:left;font-size:0.9rem;">
+                <p>This will be executed immediately:</p>
+                <ul style="margin-top:8px;line-height:1.7;">${summary}</ul>
+                <p style="margin-top:12px;font-size:0.82rem;color:#b71c1c;font-weight:700;">
+                    <i class="fas fa-exclamation-triangle"></i>
+                    Unjustified complainant → COMPLAINT DISMISSED + KP Form #23 auto-issued.
+                </p>
+            </div>`,
+            showCancelButton: true,
+            confirmButtonText: '<i class="fas fa-gavel"></i> Confirm Decision',
+            confirmButtonColor: '#c62828',
+            cancelButtonText: 'Back',
+            cancelButtonColor: '#6c757d',
+            allowOutsideClick: false,
+            allowEscapeKey: false
+        });
+        if (!confirm.isConfirmed) return;
+
+        await submitAbsenceDecisions(null);
+        return;
+    }
+
+    // All justified → straight through
+    await submitAbsenceDecisions(null);
+}
+
+function selectUnjustOutcome(val) {
+    // Only one option exists now, but keep the hook so the UI stays consistent.
+    const group = document.getElementById('unjustOutcomeGroup');
+    if (!group) return;
+    group.querySelectorAll('.dm-option').forEach(o => o.classList.remove('selected'));
+    const sel = group.querySelector(`.dm-option[data-value="${val}"]`);
+    if (sel) sel.classList.add('selected');
+    document.getElementById('unjustOutcomeChoice').value = val;
+}
+
+async function onUnjustOutcomeContinue() {
+    // Only one choice exists → always "end_mediation"
+    await submitAbsenceDecisions('end_mediation');
+}
+
+async function submitAbsenceDecisions(outcomeChoice) {
+    clearInlineError();
+    const decisions = window.__pendingDecisions || [];
+    if (!decisions.length) { alertInlineError('No absence decisions to submit.'); return; }
+
+    showSessionProgress('Saving absence decision…', 15);
+
+    const fd = new FormData();
+    fd.append('action', 'resolve_absence_decisions');
+    fd.append('complaint_id', window.__complaintId);
+    fd.append('hearing_id', window.__hearingId);
+    fd.append('decisions', JSON.stringify(decisions));
+    if (outcomeChoice) fd.append('outcome_choice', outcomeChoice);
+
+    let d;
     try {
-        const sr = collectSessionRecord('dec');
-        const fd = new FormData();
-        fd.append('action', 'resolve_absence_decisions');
-        fd.append('complaint_id', window.__complaintId);
-        fd.append('hearing_id', window.__hearingId);
-        fd.append('decisions', JSON.stringify(decisions));
-        fd.append('session_record', JSON.stringify(sr));
         const r = await fetch('../admin_complaint_ajax.php', { method: 'POST', body: fd });
-        const d = await r.json();
+        showSessionProgress('Saving absence decision…', 60);
+        d = await r.json();
+    } catch (e) {
+        hideSessionProgress();
+        alertInlineError('Network error while saving the decision.');
+        return;
+    }
+
+    if (!d.success) {
+        hideSessionProgress();
+        alertInlineError(d.message || 'Failed to save decision.');
+        return;
+    }
+
+    showSessionProgress('Decision saved.', 100);
+    window.__sessionSaved = true;
+
+    // ── Justified → inline schedule step ──
+    if (d.outcome === 'reschedule') {
+        window.__lastJustifiedCount = decisions.filter(x => x.status === 'justified').length;
+        const autoSummary = decisions.map(x => {
+            const pname = (window.__parties.find(p => p.id === x.party_id) || {}).full_name || '';
+            return `${pname} (${x.party_type}) — justified${x.appearance_notes ? ': ' + x.appearance_notes : ''}`;
+        }).join('; ');
+        window.__nosetSummary = `Mediation Hearing #${window.__sessionNo} — absences justified. ${autoSummary}. Rescheduled with strict warning.`;
+        hideSessionProgress();
+        goToStep('schedule_justified');
+        return;
+    }
+
+    // ── End mediation → reopen wizard on the constitution step ──
+    if (d.outcome === 'end_to_pangkat') {
+        hideSessionProgress();
         Swal.close();
-        if (!d.success) { Swal.fire('Error', d.message || 'Failed.', 'error'); return; }
-        window.__sessionSaved = true;
-        if (d.outcome === 'reschedule') {
-            Swal.close();
-            Swal.fire({ icon: 'info', title: 'Absences Justified', html: `<div style="text-align:left;font-size:0.9rem;"><p>All absences were justified. The complaint is now marked <b>Rescheduled</b>.</p><p style="margin-top:8px;">Please pick the new mediation date & time in the next screen.</p></div>`, confirmButtonText: '<i class="fas fa-calendar-plus"></i> Schedule Next Hearing', confirmButtonColor: '#e65100', allowOutsideClick: false }).then(() => { reloadComplaints(); openScheduleModal(window.__complaintId); });
-            return;
-        }
-        const cert = d.cert_info;
-        const certBlock = cert ? `<div style="margin-top:12px;padding:12px 14px;background:#ffebee;border-left:4px solid #c62828;border-radius:8px;font-size:0.85rem;color:#b71c1c;"><b><i class="fas fa-gavel"></i> ${escapeHtml(cert.label)}</b><br>Cert No: <b>${escapeHtml(cert.cert_no)}</b><br><a href="#" onclick="event.preventDefault(); window.open('../../${escapeHtml(cert.pdf_url)}', '_blank');" style="display:inline-block;margin-top:6px;padding:5px 12px;background:#c62828;color:#fff;border-radius:6px;text-decoration:none;font-size:0.78rem;font-weight:700;"><i class="fas fa-file-pdf"></i> Open PDF</a></div>` : '';
-        let outcomeTitle = 'Decision Recorded';
-        let outcomeMsg = '';
-        if (d.outcome === 'dismissed_complaint') { outcomeTitle = 'Complaint Dismissed'; outcomeMsg = `Complaint was DISMISSED because the complainant did not appear without justifiable cause.`; }
-        else if (d.outcome === 'end_to_pangkat') { outcomeTitle = 'Mediation Ended — Proceeding to Pangkat'; outcomeMsg = `The respondent did not appear without justifiable cause. The counterclaim is barred. The case will now proceed to the Pangkat.`; }
-        Swal.fire({ icon: d.outcome === 'dismissed_complaint' ? 'error' : 'info', title: outcomeTitle, html: `<div style="text-align:left;font-size:0.9rem;"><p>${escapeHtml(outcomeMsg)}</p>${certBlock}</div>`, confirmButtonText: 'Done', confirmButtonColor: '#2E7D32', allowOutsideClick: false }).then(() => reloadComplaints());
-    } catch (e) { Swal.close(); Swal.fire('Error', 'Network error.', 'error'); }
+        await Swal.fire({
+            icon: 'success',
+            title: 'Mediation Ended — Proceeding to Pangkat',
+            html: `<div style="text-align:left;font-size:0.9rem;">
+                <p>The respondent did not appear without justifiable cause. Their counterclaim is <b>barred</b>.</p>
+                <p style="margin-top:6px;">You will now set the <b>Pangkat constitution meeting</b>.</p>
+                ${d.cert_info ? `<div style="margin-top:12px;padding:12px 14px;background:#ffebee;border-left:4px solid #c62828;border-radius:8px;font-size:0.83rem;color:#b71c1c;">
+                    <b><i class="fas fa-gavel"></i> ${escapeHtml(d.cert_info.label)}</b><br>
+                    Cert No: <b>${escapeHtml(d.cert_info.cert_no)}</b><br>
+                    <a href="#" onclick="event.preventDefault(); window.open('../../${escapeHtml(d.cert_info.pdf_url)}','_blank');"
+                       style="display:inline-block;margin-top:6px;padding:5px 12px;background:#c62828;color:#fff;border-radius:6px;text-decoration:none;font-size:0.78rem;font-weight:700;">
+                        <i class="fas fa-file-pdf"></i> Open PDF
+                    </a>
+                </div>` : ''}
+            </div>`,
+            confirmButtonText: '<i class="fas fa-calendar-plus"></i> Set Constitution Meeting',
+            confirmButtonColor: '#2E7D32',
+            allowOutsideClick: false
+        });
+        reloadComplaints();
+        setTimeout(() => {
+            openMediationSessionModal(window.__complaintId, { startStep: 'constitute_pangkat' });
+        }, 250);
+        return;
+    }
+
+    // ── Fallback: complainant unjustified → dismissed ──
+    hideSessionProgress();
+    const cert = d.cert_info;
+    const certBlock = cert
+        ? `<div style="margin-top:12px;padding:12px 14px;background:#ffebee;border-left:4px solid #c62828;border-radius:8px;font-size:0.85rem;color:#b71c1c;">
+            <b><i class="fas fa-gavel"></i> ${escapeHtml(cert.label)}</b><br>
+            Cert No: <b>${escapeHtml(cert.cert_no)}</b><br>
+            <a href="#" onclick="event.preventDefault(); window.open('../../${escapeHtml(cert.pdf_url)}', '_blank');"
+               style="display:inline-block;margin-top:6px;padding:5px 12px;background:#c62828;color:#fff;border-radius:6px;text-decoration:none;font-size:0.78rem;font-weight:700;">
+                <i class="fas fa-file-pdf"></i> Open PDF
+            </a>
+        </div>` : '';
+    Swal.close();
+    Swal.fire({
+        icon: 'error',
+        title: 'Complaint Dismissed',
+        html: `<div style="text-align:left;font-size:0.9rem;">
+            <p>Complaint was DISMISSED because the complainant did not appear without justifiable cause.</p>
+            ${certBlock}
+        </div>`,
+        confirmButtonText: 'Done',
+        confirmButtonColor: '#2E7D32',
+        allowOutsideClick: false
+    }).then(() => reloadComplaints());
 }
 
 function selectMedResult(val) {
@@ -2968,9 +6693,406 @@ function selectMedResult(val) {
     if (window.__step === 'result') setFooterButtons({ primaryLabel: '<i class="fas fa-arrow-right"></i> Continue', disablePrimary: false });
 }
 
+function selectSettleBranch(value) {
+    const group = document.getElementById('settleBranchGroup');
+    if (!group) return;
+    group.querySelectorAll('.dm-option').forEach(o => o.classList.remove('selected'));
+    const sel = group.querySelector(`.dm-option[data-value="${value}"]`);
+    if (sel) sel.classList.add('selected');
+    document.getElementById('settleBranch').value = value;
+
+    if (window.__step === 'settle_branch') {
+        setFooterButtons({
+            primaryLabel: value === 'arbitration'
+                ? '<i class="fas fa-gavel"></i> Continue to KP Form #14'
+                : '<i class="fas fa-file-signature"></i> Continue to KP Form #16',
+            disablePrimary: false,
+            primaryVariant: value === 'arbitration' ? 'danger' : '',
+        });
+    }
+}
+
+function onSettleBranchContinue() {
+    const branch = document.getElementById('settleBranch').value;
+    if (branch === 'settlement') {
+        goToStep('settlement_terms');
+    } else if (branch === 'arbitration') {
+        goToStep('arbitration_terms');
+    } else {
+        alertInlineError('Please pick a resolution type.');
+    }
+}
+
+async function onSaveArbitrationTerms() {
+const sr = collectSessionRecord('arb');
+const summary = (sr.summary || '').trim();
+if (!summary) { alertInlineError('Please fill the "Summary of this mediation hearing" field.'); return; }
+
+    const primBtn = document.getElementById('sesBtnPrimary');
+    const oldLabel = primBtn ? primBtn.innerHTML : '';
+    if (primBtn) { primBtn.disabled = true; primBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Saving…'; }
+
+    try {
+        const uploadRes = await uploadAllPendingStatements('res', window.__complaintId, window.__hearingId);
+        const failedUploads = Object.entries(uploadRes)
+            .filter(([_, r]) => !r.success)
+            .map(([p, r]) => p + ': ' + (r.message || 'unknown'));
+        if (failedUploads.length) {
+            if (primBtn) { primBtn.disabled = false; primBtn.innerHTML = oldLabel; }
+            alertInlineError('Could not upload: ' + failedUploads.join(', '));
+            return;
+        }
+
+
+
+// Read the signing date from the input
+const signedDate = (document.getElementById('arbSignedDate')?.value || '').trim();
+if (!signedDate) {
+    alertInlineError('Please enter the date the parties signed KP Form #14.');
+    return;
+}
+
+const fd = new FormData();
+fd.append('action', 'captain_record_mediation_outcome');
+fd.append('complaint_id', window.__complaintId);
+fd.append('outcome_kind', 'arbitration');
+fd.append('summary', summary);
+fd.append('session_record', JSON.stringify(sr));
+fd.append('signed_date', signedDate);   // ← NEW
+
+        const csText = document.getElementById('res-cs-text')?.value.trim() || '';
+        const rsText = document.getElementById('res-rs-text')?.value.trim() || '';
+        if (csText) fd.append('complainant_statement', csText);
+        if (rsText) fd.append('respondent_statement',  rsText);
+
+        const attPayload = buildAttendancePayload();
+        if (attPayload.length) fd.append('attendance', JSON.stringify(attPayload));
+
+        const r = await fetch('../admin_complaint_ajax.php', { method: 'POST', body: fd });
+        const d = await r.json();
+        if (!d.success) {
+            if (primBtn) { primBtn.disabled = false; primBtn.innerHTML = oldLabel; }
+            alertInlineError(d.message || 'Failed.');
+            return;
+        }
+        window.__sessionSaved = true;
+
+        Swal.close();
+        Swal.fire({
+            icon: 'success',
+            title: 'KP Form #14 Issued',
+            html: `<div style="text-align:left;font-size:0.9rem;">
+                <p>The Agreement for Arbitration (KP Form #14) has been recorded.</p>
+                <div style="margin-top:12px;padding:12px 14px;background:#fff8e1;border-left:4px solid #f57c00;border-radius:8px;font-size:0.82rem;color:#e65100;">
+                    <b>5-Day Repudiation Window</b><br>
+                    Ends: <b>${escapeHtml(d.repudiation_deadline ? new Date(d.repudiation_deadline.replace(' ','T')).toLocaleString('en-US',{dateStyle:'long',timeStyle:'short'}) : '—')}</b>
+                </div>
+                <div style="margin-top:12px;padding:12px 14px;background:#e3f2fd;border-left:4px solid #1565c0;border-radius:8px;font-size:0.82rem;color:#0d47a1;">
+                    <b>KP Form #15 (Arbitration Award) Due</b><br>
+                    By: <b>${escapeHtml(d.award_deadline ? new Date(d.award_deadline.replace(' ','T')).toLocaleString('en-US',{dateStyle:'long'}) : '—')}</b>
+                </div>
+            </div>`,
+            confirmButtonText: '<i class="fas fa-check"></i> Done',
+            confirmButtonColor: '#2E7D32',
+            width: 620
+        }).then(() => reloadComplaints());
+    } catch (e) {
+        if (primBtn) { primBtn.disabled = false; primBtn.innerHTML = oldLabel; }
+        alertInlineError('Network error.');
+    }
+}
+
+async function openIssueArbitrationAwardModal(caseId) {
+    const result = await Swal.fire({
+        title: '',
+        html: `<div class="dm-form">
+            <div class="dm-header red">
+                <div class="dm-header-left">
+                    <i class="fas fa-gavel"></i>
+                    <div>
+                        <div class="dm-header-title">Render KP Form #15 — Arbitration Award</div>
+                        <div class="dm-header-sub">Final and binding decision</div>
+                    </div>
+                </div>
+            </div>
+            <div class="dm-body">
+                <div class="dm-warning">
+                    <i class="fas fa-exclamation-triangle"></i>
+                    <div>
+                        <b>The award is final and binding.</b><br>
+                        Once rendered, both parties must comply. Enter the full text of your decision.
+                    </div>
+                </div>
+                <div class="dm-field">
+                    <label>Award Text <span class="req">*</span></label>
+                    <textarea id="arbAwardText" rows="8" placeholder="Write the full arbitration award here…"></textarea>
+                </div>
+            </div>
+        </div>`,
+        width: 720,
+        showCancelButton: true,
+        confirmButtonText: '<i class="fas fa-file-signature"></i> Render KP Form #15',
+        confirmButtonColor: '#b71c1c',
+        cancelButtonColor: '#6c757d',
+        allowOutsideClick: false,
+        preConfirm: () => {
+            const text = document.getElementById('arbAwardText').value.trim();
+            if (!text) { Swal.showValidationMessage('Please enter the award text.'); return false; }
+            return { award_text: text };
+        }
+    });
+    if (!result.isConfirmed) return;
+
+    Swal.fire({ title: 'Rendering award…', allowOutsideClick: false, didOpen: () => Swal.showLoading() });
+    const fd = new FormData();
+    fd.append('action', 'captain_issue_arbitration_award');
+    fd.append('complaint_id', caseId);
+    fd.append('award_text', result.value.award_text);
+
+    try {
+        const r = await fetch('../admin_complaint_ajax.php', { method: 'POST', body: fd });
+        const d = await r.json();
+        Swal.close();
+        if (d.success) {
+            Swal.fire({
+                icon: 'success',
+                title: 'KP Form #15 Issued',
+                html: `<div style="text-align:left;font-size:0.9rem;">
+                    <p>The Arbitration Award has been rendered. Both parties have been notified.</p>
+                    ${d.kp15 && d.kp15.pdf_path ? `<a href="#" onclick="event.preventDefault(); window.open('../../${escapeHtml(d.kp15.pdf_path)}','_blank');" style="display:inline-block;margin-top:8px;padding:6px 14px;background:#b71c1c;color:#fff;border-radius:6px;text-decoration:none;font-size:0.8rem;font-weight:700;"><i class="fas fa-file-pdf"></i> Open KP Form #15</a>` : ''}
+                </div>`,
+                confirmButtonColor: '#2E7D32'
+            }).then(() => reloadComplaints());
+        } else {
+            Swal.fire('Error', d.message || 'Failed.', 'error');
+        }
+    } catch (e) { Swal.close(); Swal.fire('Error', 'Network error.', 'error'); }
+}
+
+
+// ============================================================
+// ISSUE CERTIFICATE TO FILE ACTION (KP #20) — PRINTED COPY
+// ============================================================
+async function openIssueCfaModal(complaintId, forWhom) {
+    if (!complaintId) return;
+
+    Swal.fire({ title: 'Loading…', allowOutsideClick: false, didOpen: () => Swal.showLoading() });
+
+    let d;
+    try {
+        const r = await fetch(`../admin_complaint_ajax.php?action=get_admin_complaint_details&id=${complaintId}`);
+        d = await r.json();
+    } catch (e) {
+        Swal.close();
+        Swal.fire('Error', 'Could not load complaint.', 'error');
+        return;
+    }
+    Swal.close();
+
+    if (!d || !d.success) { Swal.fire('Error', d.message || 'Not found.', 'error'); return; }
+
+    const c = d.complaint;
+    const complainants = d.complainants || [];
+    const respondents  = d.respondents  || [];
+
+    const isForComplainant = (forWhom === 'complainant');
+    const primaryName = isForComplainant
+        ? (complainants[0]?.full_name || 'Complainant')
+        : (respondents[0]?.full_name || 'Respondent');
+
+    const wasAmicableRep = Number(c.amicable_repudiated || 0) === 1;
+    const wasArbRep      = Number(c.arbitration_repudiated || 0) === 1;
+
+    let repudiationBlock = '';
+    let defaultReason = '';
+
+    if (wasAmicableRep) {
+        const t = c.amicable_repudiated_at
+            ? new Date(c.amicable_repudiated_at.replace(' ','T')).toLocaleString('en-US',{dateStyle:'long',timeStyle:'short'})
+            : '—';
+        const by = (c.amicable_repudiated_by_party || 'party').toUpperCase();
+        repudiationBlock = `
+            <div style="margin-top:12px;padding:12px 14px;background:#ffebee;border-left:4px solid #c62828;border-radius:8px;font-size:0.82rem;color:#b71c1c;line-height:1.6;">
+                <b><i class="fas fa-file-signature"></i> KP #16 (Amicable Settlement) was REPUDIATED</b><br>
+                Repudiated by: <b>${escapeHtml(by)}</b><br>
+                Filed: ${escapeHtml(t)}
+            </div>`;
+        defaultReason = `The Amicable Settlement (KP Form #16) was repudiated by the ${by.toLowerCase()}. The case cannot proceed to conciliation and must be filed in court.`;
+    } else if (wasArbRep) {
+        const t = c.arbitration_repudiated_at
+            ? new Date(c.arbitration_repudiated_at.replace(' ','T')).toLocaleString('en-US',{dateStyle:'long',timeStyle:'short'})
+            : '—';
+        const by = (c.arbitration_repudiated_by_party || 'party').toUpperCase();
+        repudiationBlock = `
+            <div style="margin-top:12px;padding:12px 14px;background:#ffebee;border-left:4px solid #c62828;border-radius:8px;font-size:0.82rem;color:#b71c1c;line-height:1.6;">
+                <b><i class="fas fa-gavel"></i> KP #14 (Agreement for Arbitration) was REPUDIATED</b><br>
+                Repudiated by: <b>${escapeHtml(by)}</b><br>
+                Filed: ${escapeHtml(t)}
+            </div>`;
+        defaultReason = `The Agreement for Arbitration (KP Form #14) was repudiated by the ${by.toLowerCase()}. The case must now proceed to court.`;
+    }
+
+    const result = await Swal.fire({
+        title: '',
+        html: `
+        <div class="dm-form">
+            <div class="dm-header red">
+                <div class="dm-header-left">
+                    <i class="fas fa-print"></i>
+                    <div>
+                        <div class="dm-header-title">Issue Certificate to File Action (KP #20)</div>
+                        <div class="dm-header-sub">Printed copy — hand-deliver to the complainant</div>
+                    </div>
+                </div>
+                <div class="dm-header-ref">
+                    <div class="dm-header-ref-label">Reference</div>
+                    <div class="dm-header-ref-value">${escapeHtml(c.reference_number)}</div>
+                </div>
+            </div>
+            <div class="dm-body">
+                <div class="dm-info" style="background:#fff8e1;border-left-color:#f57c00;color:#8a3e00;">
+                    <i class="fas fa-info-circle"></i>
+                    <div>
+                        <div class="dm-info-title" style="color:#c62828;">Per KP Handbook / RA 7160</div>
+                        <div style="font-size:0.82rem;line-height:1.6;">
+                            After the settlement or arbitration agreement was repudiated, the case cannot be mediated again.
+                            The complainant must be issued a <b>Certificate to File Action (KP Form #20)</b> so they can
+                            file the case in court. This is a <b>printed document</b> — the digital copy is for record only.
+                        </div>
+                    </div>
+                </div>
+
+                ${repudiationBlock}
+
+                <div class="dm-field" style="margin-top:16px;">
+                    <label>Issued To <span class="req">*</span></label>
+                    <input type="text" id="cfaIssuedTo" value="${escapeHtml(primaryName)}" readonly
+                           style="background:#f5f5f5;cursor:not-allowed;">
+                    <div class="dm-helper" style="margin-top:6px;">
+                        <i class="fas fa-info-circle"></i>
+                        <span>The CFA is issued to the <b>complainant</b>. The respondent receives a copy for their records.</span>
+                    </div>
+                </div>
+
+                <div class="dm-field">
+                    <label>Reason for Certification <span class="req">*</span></label>
+                    <textarea id="cfaReason" rows="4" placeholder="e.g. The Amicable Settlement (KP Form #16) was repudiated by the respondent on grounds of fraud...">${escapeHtml(defaultReason)}</textarea>
+                </div>
+
+                <div class="dm-field">
+                    <label>Date of Issuance <span class="req">*</span></label>
+                    <input type="date" id="cfaIssuedDate" value="${new Date().toISOString().split('T')[0]}">
+                </div>
+
+                <div class="dm-warning" style="margin-top:8px;">
+                    <i class="fas fa-print"></i>
+                    <div>
+                        <b>PRINT & HAND-DELIVER</b><br>
+                        After you issue this, the case becomes <b>certificate_issued</b>. You must print the PDF
+                        and personally hand-deliver it to the complainant. The Secretary will be notified
+                        that printing is required.
+                    </div>
+                </div>
+            </div>
+        </div>`,
+        width: 720,
+        showCancelButton: true,
+        confirmButtonText: '<i class="fas fa-print"></i> Issue CFA (Printed Copy)',
+        confirmButtonColor: '#c62828',
+        cancelButtonColor: '#6c757d',
+        allowOutsideClick: false,
+        preConfirm: () => {
+            const issuedTo = document.getElementById('cfaIssuedTo').value.trim();
+            const reason   = document.getElementById('cfaReason').value.trim();
+            const issuedDate = document.getElementById('cfaIssuedDate').value;
+            if (!issuedTo)   { Swal.showValidationMessage('Issued To is required.'); return false; }
+            if (!reason)     { Swal.showValidationMessage('Reason is required.'); return false; }
+            if (!issuedDate) { Swal.showValidationMessage('Date is required.'); return false; }
+            return { issued_to: issuedTo, reason, issued_date: issuedDate };
+        }
+    });
+
+    if (!result.isConfirmed) return;
+
+    Swal.fire({
+        title: 'Issuing CFA…',
+        html: 'Generating KP Form #20 and preparing for printing…',
+        allowOutsideClick: false,
+        didOpen: () => Swal.showLoading()
+    });
+
+    const fd = new FormData();
+    fd.append('action', 'captain_issue_certificate_to_file');
+    fd.append('complaint_id', complaintId);
+    fd.append('issued_to',   result.value.issued_to);
+    fd.append('reason',      result.value.reason);
+    fd.append('issued_date', result.value.issued_date);
+
+    try {
+        const r = await fetch('../admin_complaint_ajax.php', { method: 'POST', body: fd });
+        const resp = await r.json();
+        Swal.close();
+
+        if (resp.success) {
+            await Swal.fire({
+                icon: 'success',
+                title: 'CFA Issued — Ready for Printing',
+                html: `
+                <div style="text-align:left;font-size:0.9rem;">
+                    <p>The Certificate to File Action (KP Form #20) has been issued.</p>
+                    <p style="margin-top:8px;font-weight:700;color:#c62828;">
+                        Cert No: ${escapeHtml(resp.certificate_no || '—')}
+                    </p>
+                    <div style="margin-top:12px;padding:12px 14px;background:#e8f5e9;border-left:4px solid #2E7D32;border-radius:8px;font-size:0.82rem;color:#1b5e20;">
+                        <b><i class="fas fa-print"></i> Next step: PRINT & HAND-DELIVER</b><br>
+                        The Secretary has been notified to print the CFA and deliver it to the complainant.
+                    </div>
+                    ${resp.pdf_url ? `
+                        <a href="#" onclick="event.preventDefault(); window.open('../../${escapeHtml(resp.pdf_url)}','_blank');"
+                           style="display:inline-block;margin-top:12px;padding:8px 16px;background:#c62828;color:#fff;border-radius:6px;text-decoration:none;font-size:0.82rem;font-weight:700;">
+                            <i class="fas fa-file-pdf"></i> Open KP Form #20 PDF
+                        </a>` : ''}
+                </div>`,
+                confirmButtonText: '<i class="fas fa-check"></i> Done',
+                confirmButtonColor: '#2E7D32',
+                width: 640
+            });
+            reloadComplaints();
+        } else {
+            Swal.fire('Error', resp.message || 'Failed to issue CFA.', 'error');
+        }
+    } catch (e) {
+        Swal.close();
+        Swal.fire('Error', 'Network error while issuing CFA.', 'error');
+    }
+}
+
+// ============================================================
+// OPEN THE STORED CFA PDF (KP #20)
+// ============================================================
+async function openCfaPdf(complaintId, forWhom) {
+    if (!complaintId) return;
+    Swal.fire({ title: 'Loading CFA…', allowOutsideClick: false, didOpen: () => Swal.showLoading() });
+
+    try {
+        const r = await fetch(`../admin_complaint_ajax.php?action=get_cfa_pdf&complaint_id=${complaintId}&for=${forWhom || 'complainant'}`);
+        const d = await r.json();
+        Swal.close();
+        if (d.success && d.pdf_url) {
+            window.open('../../' + d.pdf_url, '_blank');
+        } else {
+            Swal.fire('Error', d.message || 'No CFA PDF on file.', 'error');
+        }
+    } catch (e) {
+        Swal.close();
+        Swal.fire('Error', 'Network error.', 'error');
+    }
+}
+
 async function onResultContinue() {
     const settled = document.getElementById('medSettled').value === '1';
-    if (settled) goToStep('settlement_terms'); else goToStep('no_settlement');
+    if (settled) goToStep('settle_branch');
+    else goToStep('no_settlement');
 }
 
 function selectMedReason(el) {
@@ -2995,47 +7117,254 @@ function populateResultStatements() {
 
 async function onSaveSettlement() {
     const summary = document.getElementById('medSettleSummary').value.trim();
-    if (!summary) { Swal.fire('Missing', 'Please describe the settlement terms.', 'warning'); return; }
-    if (!isSessionRecordValid('set')) { Swal.fire('Incomplete', 'Please fill the "Summary of this mediation hearing" field.', 'warning'); return; }
+    if (!summary) { alertInlineError('Please describe the settlement terms.'); return; }
+    if (!isSessionRecordValid('set')) { alertInlineError('Please fill the "Summary of this mediation hearing" field.'); return; }
     await finalizeMediation({ settled: true, summary, next_action: 'end', sr_prefix: 'set' });
 }
 
 function onNotSettledContinue() {
     const summary = document.getElementById('medNoSummary').value.trim();
-    if (!summary) { Swal.fire('Missing', 'Please describe what happened in this mediation hearing.', 'warning'); return; }
-    if (!isSessionRecordValid('noset')) { Swal.fire('Incomplete', 'Please fill the "Summary of this mediation hearing" field.', 'warning'); return; }
-    window.__nosetSummary = summary;
+    if (!summary) { alertInlineError('Please describe what happened in this mediation hearing.'); return; }
+    if (!isSessionRecordValid('noset')) { alertInlineError('Please fill the "Summary of this mediation hearing" field.'); return; }
+
     const nextAction = document.getElementById('medNextAction').value;
-    if (nextAction === 'schedule') goToStep('schedule_next'); else goToStep('constitute_pangkat');
+    if (nextAction !== 'schedule' && nextAction !== 'end') {
+        alertInlineError('Please choose whether to schedule another hearing or to end mediation.');
+        return;
+    }
+
+    window.__nosetSummary = summary;
+
+    if (nextAction === 'schedule') {
+        goToStep('schedule_next');
+    } else {
+        finalizeMediation({
+            settled: false,
+            summary: summary,
+            reason: document.getElementById('medReason').value,
+            next_action: 'end',
+            sr_prefix: 'noset'
+        }).then((ok) => {
+            setTimeout(() => {
+                openMediationSessionModal(window.__complaintId, { startStep: 'constitute_pangkat' });
+            }, 250);
+        });
+    }
 }
 
 function selectMedNext(val) {
     document.getElementById('medNextAction').value = val;
     const group = document.getElementById('medNextGroup');
-    if (group) { group.querySelectorAll('.dm-option').forEach(o => o.classList.remove('selected')); const sel = group.querySelector(`.dm-option[data-value="${val}"]`); if (sel) sel.classList.add('selected'); }
+    if (group) {
+        group.querySelectorAll('.dm-option').forEach(o => o.classList.remove('selected'));
+        const sel = group.querySelector(`.dm-option[data-value="${val}"]`);
+        if (sel) sel.classList.add('selected');
+    }
+    if (window.__step === 'no_settlement') {
+        if (val === 'schedule') {
+            setFooterButtons({ primaryLabel: '<i class="fas fa-calendar-plus"></i> Continue to Schedule', disablePrimary: false });
+        } else if (val === 'end') {
+            setFooterButtons({ primaryLabel: '<i class="fas fa-balance-scale"></i> Continue to Pangkat', disablePrimary: false, primaryVariant: 'danger' });
+        }
+    }
 }
 
 async function onSaveScheduleNext() {
-    const summary = window.__nosetSummary || document.getElementById('medNoSummary').value.trim();
-    const reason  = document.getElementById('medReason').value;
+    const summary = (window.__nosetSummary || document.getElementById('medNoSummary')?.value.trim() || '').trim()
+                  || 'Mediation hearing rescheduled.';
+    const reason  = document.getElementById('medReason')?.value || 'Mediation hearing rescheduled';
     const date    = document.getElementById('medNextDate').value;
     const time    = document.getElementById('medNextTime').value;
-    if (!date) { Swal.fire('Missing', 'Pick a date.', 'warning'); return; }
-    if (!time) { Swal.fire('Missing', 'Pick a time.', 'warning'); return; }
+    if (!date) { alertInlineError('Pick a date.'); return; }
+    if (!time) { alertInlineError('Pick a time.'); return; }
     try {
         const r = await fetch(`../admin_complaint_ajax.php?action=check_scheduling_live&date=${date}&time=${time}`);
         const d = await r.json();
-        if (d.success && !d.allowed) { Swal.fire('Cannot schedule', d.reason, 'warning'); return; }
+        if (d.success && !d.allowed) { alertInlineError(d.reason); return; }
     } catch (e) {}
     await finalizeMediation({ settled: false, summary, reason, next_action: 'schedule', next_date: date, next_time: time, sr_prefix: 'noset' });
+}
+
+function initJustifiedSchedulingValidation() {
+    const dEl   = document.getElementById('justDate');
+    const tEl   = document.getElementById('justTime');
+    const warn  = document.getElementById('justConflict');
+    const avail = document.getElementById('justAvailable');
+    if (!dEl || !tEl || !warn) return;
+    if (dEl.dataset.bound) return;
+    dEl.dataset.bound = '1';
+
+    let debounceTimer = null;
+    const liveCheck = () => {
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(async () => {
+            if (!dEl.value || !tEl.value) return;
+            try {
+                const r = await fetch(`../admin_complaint_ajax.php?action=check_scheduling_live&date=${dEl.value}&time=${tEl.value}`);
+                const d = await r.json();
+                if (!d.success) return;
+                if (d.min_time) tEl.setAttribute('min', d.min_time);
+                if (d.max_time) tEl.setAttribute('max', d.max_time);
+                if (d.allowed) { warn.classList.remove('show'); if (avail) avail.classList.add('show'); }
+                else {
+                    warn.querySelector('div').innerHTML = `<b>Not allowed:</b> ${escapeHtml(d.reason)}`;
+                    warn.classList.add('show'); if (avail) avail.classList.remove('show');
+                }
+            } catch (e) {}
+        }, 300);
+    };
+
+    const onDateChange = async () => {
+        try {
+            const r = await fetch(`../admin_complaint_ajax.php?action=get_scheduling_limits&date=${dEl.value}`);
+            const d = await r.json();
+            if (!d.success) return;
+            if (!d.allowed) {
+                warn.querySelector('div').innerHTML = `<b>Not allowed:</b> ${escapeHtml(d.reason)}`;
+                warn.classList.add('show'); if (avail) avail.classList.remove('show');
+                tEl.value = '';
+                return;
+            }
+            tEl.setAttribute('min', d.min_time);
+            tEl.setAttribute('max', d.max_time);
+            if (!tEl.value || tEl.value < d.min_time || tEl.value > d.max_time) tEl.value = d.min_time;
+            liveCheck();
+        } catch (e) {}
+    };
+
+    dEl.addEventListener('change', onDateChange);
+    tEl.addEventListener('change', liveCheck);
+    onDateChange();
+}
+
+async function onSaveScheduleJustified() {
+    clearInlineError();
+    const date    = document.getElementById('justDate').value;
+    const time    = document.getElementById('justTime').value;
+    const remarks = (document.getElementById('justRemarks')?.value || '').trim();
+
+    if (!date) { alertInlineError('Pick a date for the new hearing.'); return; }
+    if (!time) { alertInlineError('Pick a time for the new hearing.'); return; }
+
+    // Live check
+    try {
+        const r = await fetch(`../admin_complaint_ajax.php?action=check_scheduling_live&date=${date}&time=${time}`);
+        const d = await r.json();
+        if (d.success && !d.allowed) { alertInlineError(d.reason); return; }
+    } catch (e) { /* fall through */ }
+
+    // Save attendance snapshot (already saved, but re-affirm for safety)
+    showSessionProgress('Scheduling next mediation hearing…', 15);
+
+    const attPayload = buildAttendancePayload();
+
+    const fd = new FormData();
+    fd.append('action', 'captain_summon_and_schedule');
+    fd.append('complaint_id', window.__complaintId);
+    fd.append('hearing_date', date);
+    fd.append('hearing_time', time);
+    fd.append('hearing_location', 'Barangay Hall');
+    fd.append('schedule_reason', 'Rescheduled after justified absence decision');
+    fd.append('notes', remarks);
+    if (attPayload.length) fd.append('attendance', JSON.stringify(attPayload));
+
+    let d;
+    try {
+        const r = await fetch('../admin_complaint_ajax.php', { method: 'POST', body: fd });
+        showSessionProgress('Scheduling next mediation hearing…', 60);
+        d = await r.json();
+    } catch (e) {
+        hideSessionProgress();
+        alertInlineError('Network error while scheduling.');
+        return;
+    }
+
+    if (!d.success) {
+        hideSessionProgress();
+        alertInlineError(d.message || 'Failed to schedule next hearing.');
+        return;
+    }
+
+    showSessionProgress('Next hearing scheduled.', 100);
+
+    // Log the outcome against the previous hearing too
+    try {
+        const fdLog = new FormData();
+        fdLog.append('action', 'add_complaint_note');
+        fdLog.append('complaint_id', window.__complaintId);
+        fdLog.append('note', `[Justified Absence] Next mediation hearing scheduled for ${date} ${time}. ${remarks}`);
+        await fetch('../admin_complaint_ajax.php', { method: 'POST', body: fdLog });
+    } catch (e) { /* silent */ }
+
+    window.__sessionSaved = true;
+    hideSessionProgress();
+
+    Swal.close();
+    Swal.fire({
+        icon: 'success',
+        title: 'Next Mediation Hearing Scheduled',
+        html: `<div style="text-align:left;font-size:0.9rem;">
+            <p><b>Mediation Hearing #${d.session_number || ''}</b> set for:</p>
+            <p style="font-weight:700;color:#2E7D32;font-size:1rem;">${escapeHtml(d.hearing_date || date)} at ${escapeHtml(d.hearing_time || time)}</p>
+            <p style="font-size:0.83rem;color:#666;margin-top:6px;">
+                KP Form #8 (Notice of Hearing) and KP Form #9 (Summons) have been issued and saved on disk.
+            </p>
+        </div>`,
+        confirmButtonText: '<i class="fas fa-check"></i> Done',
+        confirmButtonColor: '#2E7D32',
+        width: 620,
+        allowOutsideClick: false
+    }).then(() => reloadComplaints());
 }
 
 async function onSaveConstitutionMeeting() {
     const date = document.getElementById('constitDate').value;
     const time = document.getElementById('constitTime').value;
-    if (!date) { Swal.fire('Missing', 'Pick a date for the constitution meeting.', 'warning'); return; }
-    if (!time) { Swal.fire('Missing', 'Pick a time for the constitution meeting.', 'warning'); return; }
-    Swal.fire({ title: 'Issuing KP Form #10…', html: 'Saving PDFs for both parties…', allowOutsideClick: false, didOpen: () => Swal.showLoading() });
+    if (!date) { alertInlineError('Pick a date for the constitution meeting.'); return; }
+    if (!time) { alertInlineError('Pick a time for the constitution meeting.'); return; }
+
+    if (window.__caseStatus !== 'failed_mediation') {
+        // Keep spinner in footer, no Swal.fire
+        const primBtn = document.getElementById('sesBtnPrimary');
+        const oldLabel = primBtn ? primBtn.innerHTML : '';
+        if (primBtn) { primBtn.disabled = true; primBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Ending…'; }
+
+        const summary = window.__nosetSummary || (document.getElementById('medNoSummary')?.value.trim() || '');
+        const reason  = document.getElementById('medReason')?.value || '';
+
+        const sr = collectSessionRecord('noset');
+        const fdEnd = new FormData();
+        fdEnd.append('action', 'captain_mediate');
+        fdEnd.append('complaint_id', window.__complaintId);
+        fdEnd.append('settled', '0');
+        fdEnd.append('summary', summary || 'Mediation ended by Captain — proceeding to Pangkat.');
+        fdEnd.append('reason', reason);
+        fdEnd.append('next_action', 'end');
+        fdEnd.append('session_record', JSON.stringify(sr));
+
+        const attPayload = buildAttendancePayload();
+        if (attPayload.length) fdEnd.append('attendance', JSON.stringify(attPayload));
+
+        try {
+            const rEnd = await fetch('../admin_complaint_ajax.php', { method: 'POST', body: fdEnd });
+            const dEnd = await rEnd.json();
+            if (!dEnd.success) {
+                if (primBtn) { primBtn.disabled = false; primBtn.innerHTML = oldLabel; }
+                alertInlineError(dEnd.message || 'Could not end mediation.');
+                return;
+            }
+            window.__caseStatus = 'failed_mediation';
+        } catch (e) {
+            if (primBtn) { primBtn.disabled = false; primBtn.innerHTML = oldLabel; }
+            alertInlineError('Network error while ending mediation.');
+            return;
+        }
+    }
+
+    const primBtn2 = document.getElementById('sesBtnPrimary');
+    const oldLabel2 = primBtn2 ? primBtn2.innerHTML : '';
+    if (primBtn2) { primBtn2.disabled = true; primBtn2.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Issuing…'; }
+
     try {
         const fd = new FormData();
         fd.append('action', 'schedule_pangkat_constitution');
@@ -3044,8 +7373,11 @@ async function onSaveConstitutionMeeting() {
         fd.append('constitution_time', time);
         const r = await fetch('../admin_complaint_ajax.php', { method: 'POST', body: fd });
         const d = await r.json();
-        Swal.close();
-        if (!d.success) { Swal.fire('Error', d.message || 'Failed.', 'error'); return; }
+        if (!d.success) {
+            if (primBtn2) { primBtn2.disabled = false; primBtn2.innerHTML = oldLabel2; }
+            alertInlineError(d.message || 'Failed.');
+            return;
+        }
         window.__sessionSaved = true;
         const notices = d.notices || [];
         const printRequired = notices.filter(n => n.print);
@@ -3056,18 +7388,27 @@ async function onSaveConstitutionMeeting() {
             return `<div class="notice-item kp10 ${printCls}"><div class="notice-item-icon ${iconCls}"><i class="fas fa-users-cog"></i></div><div class="notice-item-body"><div class="notice-item-title">${escapeHtml(n.name)} — KP Form #10 — Notice for Constitution of Pangkat</div><div class="notice-item-meta"><span><i class="fas fa-folder"></i> Saved on disk</span>${badge}</div><button type="button" class="notice-item-btn kp10" onclick="openKp10Pdf(${window.__complaintId}, ${n.party_id})"><i class="fas fa-file-pdf"></i> Open PDF</button></div></div>`;
         }).join('') || '<div style="padding:10px;color:#999;text-align:center;">No notices.</div>';
         const printBanner = printRequired.length ? `<div class="dm-danger" style="margin-top:16px;animation: pulseBadge 1.5s infinite;"><i class="fas fa-print"></i><div><b>⚠ PRINT REQUIRED — ${printRequired.length} notice(s)</b><br>The Secretary has been notified to print and hand-deliver KP Form #10.</div></div>` : '';
+
+        Swal.close();
         await Swal.fire({
             icon: 'success', title: 'KP Form #10 Issued',
             html: `<div style="text-align:left;font-size:0.9rem;"><p>Constitution meeting scheduled for:</p><p style="font-weight:700;color:#4a148c;font-size:1rem;">${escapeHtml(d.constitution_date)} at ${escapeHtml(d.constitution_time)}</p><div class="notice-panel"><div class="notice-panel-title"><i class="fas fa-users-cog"></i> KP Form #10 — Notices Issued (${notices.length})</div>${list}</div>${printBanner}<p style="font-size:0.82rem;color:#666;margin-top:14px;"><b>Reminder:</b> You may constitute the Pangkat <b>on or after the day of the meeting</b>. Reopen this case then to pick the 3 Lupon members.</p></div>`,
             confirmButtonText: '<i class="fas fa-check"></i> Done', confirmButtonColor: '#2E7D32', width: 720, allowOutsideClick: false
         }).then(() => reloadComplaints());
-    } catch (e) { Swal.close(); Swal.fire('Error', 'Network error.', 'error'); }
+    } catch (e) {
+        if (primBtn2) { primBtn2.disabled = false; primBtn2.innerHTML = oldLabel2; }
+        alertInlineError('Network error.');
+    }
 }
 
 async function onSaveConstitutePangkat() {
-    if (window.__wheelSelected.length !== 3) { Swal.fire('Incomplete', 'Select exactly 3 Pangkat members.', 'warning'); return; }
+    if (window.__wheelSelected.length !== 3) { alertInlineError('Select exactly 3 Pangkat members.'); return; }
     const selectedBy = document.getElementById('pangkatSelectedBy').value || 'parties';
-    Swal.fire({ title: 'Constituting Pangkat…', html: 'Issuing KP Form #11 to each chosen member…', allowOutsideClick: false, didOpen: () => Swal.showLoading() });
+
+    const primBtn = document.getElementById('sesBtnPrimary');
+    const oldLabel = primBtn ? primBtn.innerHTML : '';
+    if (primBtn) { primBtn.disabled = true; primBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Constituting…'; }
+
     try {
         const fdP = new FormData();
         fdP.append('action', 'constitute_pangkat');
@@ -3076,40 +7417,55 @@ async function onSaveConstitutePangkat() {
         fdP.append('members', JSON.stringify(window.__wheelSelected.map(mid => ({ member_id: Number(mid) }))));
         const rP = await fetch('../admin_complaint_ajax.php', { method: 'POST', body: fdP });
         const dP = await rP.json();
+        if (!dP.success) {
+            if (primBtn) { primBtn.disabled = false; primBtn.innerHTML = oldLabel; }
+            alertInlineError(dP.message || 'Constitution failed.');
+            return;
+        }
+        window.__sessionSaved = true;
+        const firstMember = (dP.members || []).find(m => m.is_first);
+        const firstName = firstMember ? firstMember.name : 'the first-selected member';
+
         Swal.close();
-        if (dP.success) {
-            window.__sessionSaved = true;
-            const firstMember = (dP.members || []).find(m => m.is_first);
-            const firstName = firstMember ? firstMember.name : 'the first-selected member';
-            Swal.fire({
-                icon: 'success', title: 'Pangkat Constituted',
-                html: `<div style="text-align:left;font-size:0.9rem;"><p>Members selected:</p><ul>${(dP.members || []).map(m => `<li>${escapeHtml(m.name)}${m.is_first ? ' <span style="color:#2E7D32;font-weight:700;">(first-selected)</span>' : ''} — KP Form #11 issued</li>`).join('')}</ul><div style="margin-top:12px;padding:10px 12px;background:#e8f5e9;border-left:4px solid #2E7D32;border-radius:8px;font-size:0.82rem;color:#1b5e20;"><b>Next steps:</b><br>• <b>${escapeHtml(firstName)}</b> will assign Chairperson / Secretary / Member in the Lupon Portal<br>• The <b>Chairperson</b> will then schedule the conciliation hearing<br>• You and the Secretary will be notified</div></div>`,
-                confirmButtonColor: '#2E7D32', width: 620
-            }).then(() => reloadComplaints());
-        } else { Swal.fire('Error', dP.message || 'Constitution failed.', 'error'); }
-    } catch (e) { Swal.close(); Swal.fire('Error', 'Network error.', 'error'); }
+        Swal.fire({
+            icon: 'success', title: 'Pangkat Constituted',
+            html: `<div style="text-align:left;font-size:0.9rem;"><p>Members selected:</p><ul>${(dP.members || []).map(m => `<li>${escapeHtml(m.name)}${m.is_first ? ' <span style="color:#2E7D32;font-weight:700;">(first-selected)</span>' : ''} — KP Form #11 issued</li>`).join('')}</ul><div style="margin-top:12px;padding:10px 12px;background:#e8f5e9;border-left:4px solid #2E7D32;border-radius:8px;font-size:0.82rem;color:#1b5e20;"><b>Next steps:</b><br>• <b>${escapeHtml(firstName)}</b> will assign Chairperson / Secretary / Member in the Lupon Portal<br>• The <b>Chairperson</b> will then schedule the conciliation hearing<br>• You and the Secretary will be notified</div></div>`,
+            confirmButtonColor: '#2E7D32', width: 620
+        }).then(() => reloadComplaints());
+    } catch (e) {
+        if (primBtn) { primBtn.disabled = false; primBtn.innerHTML = oldLabel; }
+        alertInlineError('Network error.');
+    }
 }
 
 async function finalizeMediation(payload) {
+    clearInlineError();
+
     const pstmtHost = document.getElementById('step-result-pstmt-host');
     if (pstmtHost && pstmtHost.innerHTML.trim()) {
         const v = validatePartyStatements('res');
-        if (!v.ok) { Swal.fire('Missing Statement', v.message, 'warning'); return; }
+        if (!v.ok) { alertInlineError(v.message); return false; }
     }
 
-    Swal.fire({ title: 'Saving…', allowOutsideClick: false, didOpen: () => Swal.showLoading() });
+    const primBtn = document.getElementById('sesBtnPrimary');
+    const oldLabel = primBtn ? primBtn.innerHTML : '';
+    if (primBtn) { primBtn.disabled = true; primBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Saving…'; }
+
     try {
         const uploadRes = await uploadAllPendingStatements('res', window.__complaintId, window.__hearingId);
         const failedUploads = Object.entries(uploadRes)
             .filter(([_, r]) => !r.success)
             .map(([p, r]) => p + ': ' + (r.message || 'unknown'));
         if (failedUploads.length) {
-            Swal.close();
-            Swal.fire('Upload Failed', 'Could not upload: <br>' + failedUploads.join('<br>'), 'error');
-            return;
+            if (primBtn) { primBtn.disabled = false; primBtn.innerHTML = oldLabel; }
+            alertInlineError('Could not upload: ' + failedUploads.join(', '));
+            return false;
         }
 
         const sr = collectSessionRecord(payload.sr_prefix || 'noset');
+        if (!sr.summary && (payload.summary || window.__nosetSummary)) {
+            sr.summary = payload.summary || window.__nosetSummary || '';
+        }
         const fd = new FormData();
         fd.append('action', 'captain_mediate');
         fd.append('complaint_id', window.__complaintId);
@@ -3131,14 +7487,19 @@ async function finalizeMediation(payload) {
 
         const r = await fetch('../admin_complaint_ajax.php', { method: 'POST', body: fd });
         const d = await r.json();
-        if (!d.success) { Swal.close(); Swal.fire('Error', d.message || 'Failed.', 'error'); return; }
+        if (!d.success) {
+            if (primBtn) { primBtn.disabled = false; primBtn.innerHTML = oldLabel; }
+            alertInlineError(d.message || 'Failed.');
+            return false;
+        }
         window.__sessionSaved = true;
-        Swal.close();
 
         const kp16Url = (d.kp16 && d.kp16.ok) ? d.kp16.pdf_path : null;
         const wasSettled = !!payload.settled && !!d.final;
         const complaintId = window.__complaintId;
 
+        // End the wizard cleanly, then show the summary modal.
+        Swal.close();
         Swal.fire({
             icon: 'success',
             title: d.final ? 'Case Closed' : 'Mediation Hearing Recorded',
@@ -3167,10 +7528,36 @@ async function finalizeMediation(payload) {
                 setTimeout(() => openCaseKpFormsModal(complaintId), 250);
             }
         });
-    } catch (e) { Swal.close(); Swal.fire('Error', 'Network error.', 'error'); }
+    } catch (e) {
+        if (primBtn) { primBtn.disabled = false; primBtn.innerHTML = oldLabel; }
+        alertInlineError('Network error.');
+    }
 }
 
 function attemptSessionClose() {
+    if (window.__step === 'schedule_justified' && !window.__sessionSaved) {
+        Swal.fire({
+            icon: 'warning',
+            title: 'Leave without scheduling?',
+            html: `<div style="text-align:left;font-size:0.9rem;">
+                <p>The absences have been recorded as <b>justified</b>, but no next mediation hearing has been scheduled yet.</p>
+                <p style="margin-top:8px;">You will need to come back and schedule the next hearing <b>before the 15-day mediation window expires</b>, otherwise the case will be auto-forwarded to the Pangkat.</p>
+            </div>`,
+            showCancelButton: true,
+            confirmButtonText: 'Yes, leave it for later',
+            confirmButtonColor: '#e65100',
+            cancelButtonText: 'Stay here',
+            cancelButtonColor: '#2E7D32'
+        }).then(r => {
+            if (r.isConfirmed) {
+                window.__sessionSaved = true;
+                Swal.close();
+                reloadComplaints();
+            }
+        });
+        return;
+    }
+
     if (window.__sessionSaved) { Swal.close(); return; }
     Swal.fire({
         icon: 'warning', title: 'Mediation hearing not saved',
@@ -3226,6 +7613,107 @@ window.__wheelSelected = [];
 window.__wheelAngle = 0;
 window.__wheelSpinning = false;
 window.__pangkatMode = 'parties';
+window.__wheelPoolCandidates = [];   // IDs checked for inclusion
+window.__wheelPoolConfirmed  = false;
+
+/* ── Render the pre-selection checkbox list ── */
+function renderWheelPreSelectList() {
+    const list = document.getElementById('wheelPreSelectList');
+    if (!list) return;
+
+    if (!window.__allLupon.length) {
+        list.innerHTML = '<div style="padding:14px;color:#c62828;font-size:0.85rem;">' +
+                         'No active Lupon members found.</div>';
+        return;
+    }
+
+    const checkedSet = new Set(window.__wheelPoolCandidates.map(Number));
+    list.innerHTML = window.__allLupon.map(m => {
+        const checked = checkedSet.has(Number(m.id));
+        return `<label class="manual-pangkat-row ${checked ? 'checked' : ''}">
+            <input type="checkbox" class="wheel-pool-cb" value="${m.id}"
+                   ${checked ? 'checked' : ''}
+                   onchange="onWheelPoolToggle(this)"
+                   style="width:16px;height:16px;cursor:pointer;">
+            <span style="flex:1;">${escapeHtml(m.full_name)}</span>
+        </label>`;
+    }).join('');
+
+    updateWheelPreSelectSummary();
+}
+
+function onWheelPoolToggle(cb) {
+    const val = Number(cb.value);
+    if (cb.checked) {
+        if (!window.__wheelPoolCandidates.includes(val)) {
+            window.__wheelPoolCandidates.push(val);
+        }
+    } else {
+        window.__wheelPoolCandidates = window.__wheelPoolCandidates.filter(x => x !== val);
+    }
+    renderWheelPreSelectList();
+}
+
+function updateWheelPreSelectSummary() {
+    const countEl = document.getElementById('wheelPreSelectCount');
+    const hintEl  = document.getElementById('wheelPreSelectHint');
+    const btn     = document.getElementById('wheelConfirmPoolBtn');
+    const n       = window.__wheelPoolCandidates.length;
+
+    if (countEl) countEl.textContent = String(n);
+
+    if (n < 3) {
+        if (hintEl) {
+            hintEl.textContent = 'Check at least 3 members to enable the wheel.';
+            hintEl.style.color = '#c62828';
+        }
+        if (btn) btn.disabled = true;
+    } else {
+        if (hintEl) {
+            hintEl.textContent = `${n} member${n > 1 ? 's' : ''} in the draw.`;
+            hintEl.style.color = '#2E7D32';
+        }
+        if (btn) btn.disabled = false;
+    }
+}
+
+/* ── Confirm the pool and switch to the wheel ── */
+function confirmWheelPool() {
+    if (window.__wheelPoolCandidates.length < 3) {
+        showPickBanner('Select at least 3 members.', 'warn');
+        return;
+    }
+    window.__wheelPoolConfirmed = true;
+
+    const preWrap  = document.getElementById('wheelPreSelectWrap');
+    const spinWrap = document.getElementById('wheelSpinWrap');
+    if (preWrap)  preWrap.style.display  = 'none';
+    if (spinWrap) spinWrap.style.display = 'block';
+
+    renderWheelDisc();
+    const btn = document.getElementById('spinBtn');
+    if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-dice"></i> Spin to Pick Member #1';
+    }
+    const res = document.getElementById('wheelResult');
+    if (res) res.textContent = 'Ready — spin to pick member #1';
+}
+
+/* ── Go back to the pre-selection step ── */
+function resetWheelPool() {
+    window.__wheelPoolConfirmed = false;
+    window.__wheelSelected = [];
+    window.__wheelAngle = 0;
+
+    const preWrap  = document.getElementById('wheelPreSelectWrap');
+    const spinWrap = document.getElementById('wheelSpinWrap');
+    if (preWrap)  preWrap.style.display  = 'block';
+    if (spinWrap) spinWrap.style.display = 'none';
+
+    renderWheelPreSelectList();
+    updatePickedList();
+}
 
 async function loadPangkatMembers() {
     try {
@@ -3257,14 +7745,24 @@ function applyPangkatMode(mode) {
     window.__wheelAngle = 0;
     updatePickedList();
     if (mode === 'lot') {
-        if (manualWrap) manualWrap.style.display = 'none';
-        if (wheelWrap)  wheelWrap.style.display  = 'block';
-        renderWheelDisc();
-        const btn = document.getElementById('spinBtn');
-        if (btn) { btn.disabled = window.__allLupon.length < 3; btn.innerHTML = '<i class="fas fa-dice"></i> Spin to Pick Member #1'; }
-        const res = document.getElementById('wheelResult');
-        if (res) res.textContent = window.__allLupon.length < 3 ? 'Need at least 3 active Lupon members.' : 'Ready — spin to pick member #1';
-    } else {
+    if (manualWrap) manualWrap.style.display = 'none';
+    if (wheelWrap)  wheelWrap.style.display  = 'block';
+
+    // Reset to pre-selection view
+    window.__wheelPoolCandidates = [];
+    window.__wheelPoolConfirmed  = false;
+    window.__wheelSelected = [];
+    window.__wheelAngle    = 0;
+
+    const preWrap  = document.getElementById('wheelPreSelectWrap');
+    const spinWrap = document.getElementById('wheelSpinWrap');
+    if (preWrap)  preWrap.style.display  = 'block';
+    if (spinWrap) spinWrap.style.display = 'none';
+
+    renderWheelPreSelectList();
+    updatePickedList();
+
+}else {
         if (manualWrap) manualWrap.style.display = 'block';
         if (wheelWrap)  wheelWrap.style.display  = 'none';
         renderManualPickList();
@@ -3302,7 +7800,10 @@ function onManualPickChange(cb) {
 function renderWheelDisc() {
     const disc = document.getElementById('wheelDisc');
     if (!disc) return;
-    const members = window.__allLupon.filter(m => !window.__wheelSelected.includes(m.id));
+   const pool = window.__allLupon.filter(m =>
+    window.__wheelPoolCandidates.includes(Number(m.id))
+);
+const members = pool.filter(m => !window.__wheelSelected.includes(m.id));
     if (!members.length) { disc.innerHTML = '<div class="wheel-center">DONE</div>'; return; }
     const n = members.length;
     const colors = ['#E53935','#8E24AA','#3949AB','#039BE5','#00897B','#7CB342','#FDD835','#FB8C00','#6D4C41','#546E7A','#D81B60','#5E35B1','#1E88E5','#43A047','#F4511E'];
@@ -3323,8 +7824,14 @@ function renderWheelDisc() {
 async function spinWheel() {
     if (window.__wheelSpinning) return;
     if (window.__pangkatMode !== 'lot') return;
-    if (window.__wheelSelected.length >= 3) { showPickBanner('All 3 members already picked.', 'warn'); return; }
-    const members = window.__allLupon.filter(m => !window.__wheelSelected.includes(m.id));
+    if (!window.__wheelPoolConfirmed) {
+        showPickBanner('Confirm the draw pool first.', 'warn');
+        return;
+    }
+const pool = window.__allLupon.filter(m =>
+    window.__wheelPoolCandidates.includes(Number(m.id))
+);
+const members = pool.filter(m => !window.__wheelSelected.includes(m.id));
     if (!members.length) return;
     const disc = document.getElementById('wheelDisc');
     const btn  = document.getElementById('spinBtn');
@@ -3393,7 +7900,7 @@ function selectPangkatBy(el) {
 }
 
 // ============================================================
-// SCHEDULE MEDIATION MODAL
+// SCHEDULE MEDIATION MODAL (first-time scheduling)
 // ============================================================
 async function openScheduleModal(id) {
     let complaint = null;
@@ -3580,8 +8087,79 @@ async function openSignReferralModal(id) {
     } catch (e) { Swal.close(); Swal.fire('Error', 'Network error.', 'error'); }
 }
 
+async function renderComplaintsView() {
+    document.getElementById('dashboardBody').innerHTML = `
+        <div class="unified-header">
+            <div class="unified-title"><i class="fas fa-gavel"></i> Complaint Management</div>
+            <div class="unified-sub">All complaints requiring your action — review, mediate, sign.</div>
+
+            <!-- ═══════ COLLAPSIBLE FILTERS ═══════ -->
+            <div class="complaint-filter-accordion">
+                <div class="complaint-filter-accordion-header"
+                     onclick="toggleComplaintFiltersBar()"
+                     id="complaintFilterHeader">
+                    <i class="fas fa-filter cfa-icon"></i>
+                    <div class="cfa-title">Filters</div>
+                    <div class="cfa-summary" id="complaintFiltersSummary">
+                        ${complaintFiltersSummaryHtml()}
+                    </div>
+                    <i id="complaintFiltersChevron"
+                       class="fas fa-chevron-down cfa-chevron"
+                       style="transform:${complaintFiltersExpanded ? 'rotate(180deg)' : 'rotate(0)'};"></i>
+                </div>
+                <div class="complaint-filter-accordion-body"
+                     id="complaintFiltersWrapper"
+                     style="display:${complaintFiltersExpanded ? 'block' : 'none'};
+                            max-height:${complaintFiltersExpanded ? 'none' : '0'};
+                            opacity:${complaintFiltersExpanded ? '1' : '0'};
+                            margin-top:${complaintFiltersExpanded ? '10px' : '0'};">
+
+                    <div class="unified-chips">
+                        <button class="u-chip active" onclick="switchComplaintView('pending')" id="chip-pending"><i class="fas fa-inbox"></i> Pending Action <span class="u-count" id="count-pending">0</span></button>
+                        <button class="u-chip" onclick="switchComplaintView('mediation')" id="chip-mediation"><i class="fas fa-gavel"></i> Mediation <span class="u-count" id="count-mediation">0</span></button>
+                        <button class="u-chip" onclick="switchComplaintView('pangkat')" id="chip-pangkat"><i class="fas fa-balance-scale"></i> For Pangkat <span class="u-count" id="count-pangkat">0</span></button>
+                        <button class="u-chip" onclick="switchComplaintView('repudiated')" id="chip-repudiated" style="border-color:#c62828;color:#c62828;"><i class="fas fa-file-signature"></i> Repudiated <span class="u-count" id="count-repudiated" style="background:#c62828;color:#fff;">0</span></button>
+                        <button class="u-chip" onclick="switchComplaintView('unresolved')" id="chip-unresolved" style="border-color:#8e24aa;color:#8e24aa;"><i class="fas fa-file-certificate"></i> Unresolved <span class="u-count" id="count-unresolved" style="background:#8e24aa;color:#fff;">0</span></button>
+                        <button class="u-chip" onclick="switchComplaintView('referrals')" id="chip-referrals"><i class="fas fa-file-signature"></i> Referrals <span class="u-count" id="count-referrals">0</span></button>
+                        <button class="u-chip" onclick="switchComplaintView('handled')" id="chip-handled"><i class="fas fa-check-double"></i> Handled <span class="u-count" id="count-handled">0</span></button>
+                    </div>
+
+                    <div class="case-toolbar">
+                        <div class="case-search">
+                            <i class="fas fa-search"></i>
+                            <input type="text" id="caseSearch" placeholder="Search reference, title, complainant…"
+                                   oninput="onCaseSearch(this.value)">
+                        </div>
+                        <select id="caseDateRange" class="case-date-select" onchange="onDateRangeChange(this.value)">
+                            <option value="7">Last 7 days</option>
+                            <option value="30" selected>Last 30 days (default)</option>
+                            <option value="90">Last 90 days</option>
+                            <option value="365">Last year</option>
+                            <option value="0">All time</option>
+                            <option value="-1">Custom range…</option>
+                        </select>
+                        <div id="caseCustomRange" style="display:none;gap:6px;align-items:center;">
+                            <input type="date" id="caseDateFrom" class="case-date-input" onchange="onCustomRangeChange()">
+                            <span style="color:#666;">→</span>
+                            <input type="date" id="caseDateTo" class="case-date-input" onchange="onCustomRangeChange()">
+                        </div>
+                        <button type="button" class="case-reset-btn" onclick="resetCaseToolbar()">
+                            <i class="fas fa-times"></i> Reset
+                        </button>
+                        <div class="case-result-count" id="caseResultCount"></div>
+                    </div>
+                </div>
+            </div>
+            <!-- ═══════ /COLLAPSIBLE FILTERS ═══════ -->
+        </div>
+        <div id="complaintsList"><div style="text-align:center;padding:40px;color:#999;"><i class="fas fa-spinner fa-spin fa-2x"></i><p style="margin-top:10px;">Loading…</p></div></div>
+    `;
+    await loadAllComplaints();
+    switchComplaintView('pending');
+}
+
 // ============================================================
-// VIEW COMPLAINT — Audit Trail + Evidence collapsible
+// VIEW COMPLAINT
 // ============================================================
 function toggleCdBlock(blockId) { const el = document.getElementById(blockId); if (el) el.classList.toggle('collapsed'); }
 
@@ -3597,6 +8175,8 @@ function renderEvidenceBlock(evidence) {
     }).join('');
     return `<div class="cd-block collapsed" id="evidenceBlock"><div class="cd-block-title toggleable" onclick="toggleCdBlock('evidenceBlock')"><span style="display:flex;align-items:center;gap:12px;"><i class="fas fa-paperclip"></i> Evidence (${evidence.length})</span><i class="fas fa-chevron-down cd-arrow"></i></div><div class="cd-block-body">${rows}</div></div>`;
 }
+
+
 
 async function viewComplaint(id) {
     let d;
@@ -3653,10 +8233,20 @@ async function viewComplaint(id) {
             </div>
             <div class="cd-actions">
                 ${isPendingAction ? `<button class="cd-btn schedule" onclick="Swal.close(); openScheduleModal(${c.id});"><i class="fas fa-calendar-plus"></i> Schedule Mediation</button>` : ''}
-                ${isInMediation ? `<button class="cd-btn primary" onclick="Swal.close(); openMediationSessionModal(${c.id});"><i class="fas fa-play-circle"></i> ${isWaiting ? 'Continue Mediation' : 'Start Mediation'}</button>` : ''}
+                
                 ${isPangkatReady ? `<button class="cd-btn schedule" onclick="Swal.close(); openMediationSessionModal(${c.id});"><i class="fas fa-calendar-plus"></i> Set Constitution Meeting</button>` : ''}
                 ${isConstitutionScheduled ? `<button class="cd-btn primary" onclick="Swal.close(); openMediationSessionModal(${c.id});"><i class="fas fa-users-cog"></i> Continue Constitution</button>` : ''}
-                ${c.status === 'pending_captain_review' ? `<button class="cd-btn primary" onclick="Swal.close(); openSignReferralModal(${c.id});"><i class="fas fa-signature"></i> Sign & Dispatch</button>` : ''}
+                ${(c.status === 'amicable_repudiated'
+    || c.status === 'arbitration_repudiated'
+    || c.status === 'failed_conciliation_final'
+    || c.status === 'failed_mediation') ? `
+    <button class="cd-btn" style="background:#c62828;color:#fff;" onclick="Swal.close(); openIssueCfaModal(${c.id}, 'complainant');">
+        <i class="fas fa-print"></i> Issue CFA to Complainant (KP #20)
+    </button>` : ''}
+${c.status === 'unresolved' ? `
+    <button class="cd-btn" style="background:#8e24aa;color:#fff;" onclick="openCfaPdf(${c.id}, 'complainant');">
+        <i class="fas fa-file-pdf"></i> View CFA PDF (KP #20)
+    </button>` : ''}
                 <button class="cd-btn" style="background:#1565c0;color:#fff;" onclick="openCaseKpFormsModal(${c.id})"><i class="fas fa-file-signature"></i> Generate KP Forms</button>
                 <button class="cd-btn secondary" onclick="Swal.close()">Close</button>
             </div>
@@ -3674,15 +8264,28 @@ function navigateTo(view) {
     document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active'));
     const item = document.querySelector(`.nav-item[data-view="${view}"]`);
     if (item) item.classList.add('active');
-    if (view === 'dashboard') { document.getElementById('dashboardBody').innerHTML = renderDashboard(); displayCurrentDate(); }
-    else if (view === 'complaints') { document.getElementById('dashboardBody').innerHTML = ''; renderComplaintsView(); }
+
+    if (view === 'dashboard') {
+        document.getElementById('dashboardBody').innerHTML = renderDashboard();
+        displayCurrentDate();
+        loadAnnouncements();
+        initDashboardWidgets();
+    } else if (view === 'complaints') {
+        document.getElementById('dashboardBody').innerHTML = '';
+        renderComplaintsView();
+    } else if (view === 'household') {
+        document.getElementById('dashboardBody').innerHTML = '';
+        if (typeof window.__renderHouseholdDashboard === 'function') {
+            window.__renderHouseholdDashboard();
+        }
+    }
 }
 document.querySelectorAll('.nav-item[data-view]').forEach(item => { item.addEventListener('click', () => navigateTo(item.getAttribute('data-view'))); });
 function displayCurrentDate() { const el = document.getElementById('currentDate'); if (el) el.innerHTML = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }); }
 navigateTo('dashboard');
 
 // ============================================================
-// NOTIFICATIONS + PUSH (with select-all + delete)
+// NOTIFICATIONS + PUSH
 // ============================================================
 const VAPID_PUBLIC_KEY = 'BBZsq_4dt_q371blgDoM-5GnfyxZi6jSvngIRw_h8tYzNr0AxO5tscRJ8WCj8kBxJNMGouU1U-ON9EF5MLy5NCg';
 const SW_URL = '../sw.js';

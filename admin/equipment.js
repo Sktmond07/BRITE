@@ -16,6 +16,27 @@ let currentEquipmentTypeId = null;
 let currentEquipmentTypeName = '';
 
 let autoRefreshEnabled = true;
+let currentBookingTypeFilter = 'all';
+
+
+
+// ── Search + date filter state ──
+let bookingFilters = {
+    search: '',
+    days: 30,
+    dateFrom: '',
+    dateTo: ''
+};
+
+// ── Collapsible filter bar state ──
+let bookingFiltersExpanded = false;
+
+// ── Collapsed groups (per type) ──
+let collapsedGroups = {
+    equipment: true,
+    facility:  true,
+    vehicle:   true
+};
 
 // Validation tracking
 let lastValidatedName = '';
@@ -89,6 +110,267 @@ function triggerRefresh() {
             await refreshEquipmentItemsList();
         }
     }, 500);
+}
+
+// ═══════════════════════════════════════════════════════
+// COLLAPSIBLE FILTER BAR
+// ═══════════════════════════════════════════════════════
+function toggleBookingFiltersBar() {
+    bookingFiltersExpanded = !bookingFiltersExpanded;
+
+    const wrapper = document.getElementById('bookingFiltersWrapper');
+    const chevron = document.getElementById('bookingFiltersChevron');
+    const summary = document.getElementById('bookingFiltersSummary');
+
+    if (wrapper) {
+        if (bookingFiltersExpanded) {
+            wrapper.style.display = 'block';
+            wrapper.style.maxHeight = '0px';
+            wrapper.style.overflow  = 'hidden';
+            wrapper.style.transition = 'max-height 0.3s ease, opacity 0.25s ease, margin-top 0.25s ease';
+            wrapper.style.opacity   = '0';
+            wrapper.style.marginTop = '0px';
+
+            void wrapper.offsetHeight;
+            wrapper.style.maxHeight = wrapper.scrollHeight + 'px';
+            wrapper.style.opacity   = '1';
+            wrapper.style.marginTop = '10px';
+
+            setTimeout(() => {
+                if (bookingFiltersExpanded) wrapper.style.maxHeight = 'none';
+            }, 320);
+        } else {
+            wrapper.style.maxHeight = wrapper.scrollHeight + 'px';
+            wrapper.style.overflow  = 'hidden';
+            void wrapper.offsetHeight;
+            wrapper.style.maxHeight = '0px';
+            wrapper.style.opacity   = '0';
+            wrapper.style.marginTop = '0px';
+            setTimeout(() => {
+                if (!bookingFiltersExpanded) wrapper.style.display = 'none';
+            }, 320);
+        }
+    }
+
+    if (chevron) chevron.style.transform = bookingFiltersExpanded ? 'rotate(180deg)' : 'rotate(0deg)';
+    if (summary) summary.style.display = bookingFiltersExpanded ? 'none' : 'inline-block';
+
+    try { sessionStorage.setItem('bookingFiltersExpanded', bookingFiltersExpanded ? '1' : '0'); } catch(e) {}
+}
+
+(function restoreBookingFilterBarState() {
+    try {
+        const saved = sessionStorage.getItem('bookingFiltersExpanded');
+        if (saved === '1') bookingFiltersExpanded = true;
+    } catch(e) {}
+})();
+
+function bookingFiltersSummaryHtml() {
+    const parts = [];
+
+    const t = (currentBookingTypeFilter || 'all');
+    parts.push(`<i class="fas fa-layer-group"></i> ${
+        t === 'all' ? 'All Types' :
+        t === 'equipment' ? 'Equipment' :
+        t === 'facility'  ? 'Facilities' :
+        t === 'vehicle'   ? 'Vehicles' : t
+    }`);
+
+    parts.push(`<i class="fas fa-list"></i> ${
+        currentBookingFilter === 'all' ? 'All Status' :
+        currentBookingFilter.charAt(0).toUpperCase() + currentBookingFilter.slice(1)
+    }`);
+
+    if (bookingFilters.search) {
+        parts.push(`<i class="fas fa-search"></i> "${escapeHtml(bookingFilters.search)}"`);
+    }
+
+    const days = bookingFilters.days;
+    if (days === -1 && bookingFilters.dateFrom && bookingFilters.dateTo) {
+        parts.push(`<i class="fas fa-calendar"></i> ${bookingFilters.dateFrom} → ${bookingFilters.dateTo}`);
+    } else if (days === 0) {
+        parts.push(`<i class="fas fa-calendar"></i> All time`);
+    } else if (days > 0) {
+        parts.push(`<i class="fas fa-calendar"></i> Last ${days} day${days === 1 ? '' : 's'}`);
+    }
+
+    return parts.join('<span style="color:#cfd8dc;margin:0 6px;">·</span>');
+}
+
+function toggleBookingGroup(type) {
+    collapsedGroups[type] = !collapsedGroups[type];
+    if (currentBookingView === 'calendar') {
+        loadBookingsCalendar();
+    } else {
+        loadFilteredBookings(currentBookingFilter, currentBookingPage);
+    }
+}
+
+// ═══════════════════════════════════════════════════════
+// SEARCH + DATE FILTER HANDLERS
+// ═══════════════════════════════════════════════════════
+function bookingFilterToolbarHtml() {
+    const f = bookingFilters;
+    return `
+        <div class="case-toolbar" style="margin-top:12px;">
+            <div class="case-search">
+                <i class="fas fa-search"></i>
+                <input type="text" id="bookingSearchInput"
+                       placeholder="Search resident, item, purpose, reference…"
+                       value="${escapeHtml(f.search)}"
+                       oninput="onBookingSearch(this.value)">
+            </div>
+            <select id="bookingDateRange" class="case-date-select" onchange="onBookingDateRangeChange(this.value)">
+                <option value="7"   ${f.days === 7   ? 'selected' : ''}>Last 7 days</option>
+                <option value="30"  ${f.days === 30  ? 'selected' : ''}>Last 30 days (default)</option>
+                <option value="90"  ${f.days === 90  ? 'selected' : ''}>Last 90 days</option>
+                <option value="365" ${f.days === 365 ? 'selected' : ''}>Last year</option>
+                <option value="0"   ${f.days === 0   ? 'selected' : ''}>All time</option>
+                <option value="-1"  ${f.days === -1  ? 'selected' : ''}>Custom range…</option>
+            </select>
+            <div id="bookingCustomRange" style="display:${f.days === -1 ? 'flex' : 'none'};gap:6px;align-items:center;">
+                <input type="date" id="bookingDateFrom" class="case-date-input"
+                       value="${escapeHtml(f.dateFrom)}" onchange="onBookingCustomRangeChange()">
+                <span style="color:#666;">→</span>
+                <input type="date" id="bookingDateTo" class="case-date-input"
+                       value="${escapeHtml(f.dateTo)}" onchange="onBookingCustomRangeChange()">
+            </div>
+            <button type="button" class="case-reset-btn" onclick="resetBookingFilters()">
+                <i class="fas fa-times"></i> Reset
+            </button>
+            <div class="case-result-count" id="bookingResultCount"></div>
+        </div>`;
+}
+
+let __bookingSearchDebounce = null;
+function onBookingSearch(val) {
+    clearTimeout(__bookingSearchDebounce);
+    __bookingSearchDebounce = setTimeout(() => {
+        bookingFilters.search = val.trim();
+        if (currentBookingView === 'calendar') loadBookingsCalendar();
+        else loadFilteredBookings(currentBookingFilter, 1);
+    }, 300);
+}
+
+function onBookingDateRangeChange(val) {
+    const v = Number(val);
+    bookingFilters.days = v;
+    const wrap = document.getElementById('bookingCustomRange');
+    if (v === -1) {
+        if (wrap) wrap.style.display = 'flex';
+        if (!bookingFilters.dateFrom) {
+            const d = new Date();
+            d.setDate(d.getDate() - 30);
+            bookingFilters.dateFrom = d.toISOString().split('T')[0];
+            document.getElementById('bookingDateFrom').value = bookingFilters.dateFrom;
+        }
+        if (!bookingFilters.dateTo) {
+            bookingFilters.dateTo = new Date().toISOString().split('T')[0];
+            document.getElementById('bookingDateTo').value = bookingFilters.dateTo;
+        }
+    } else {
+        if (wrap) wrap.style.display = 'none';
+        bookingFilters.dateFrom = '';
+        bookingFilters.dateTo   = '';
+    }
+    if (currentBookingView === 'calendar') loadBookingsCalendar();
+    else loadFilteredBookings(currentBookingFilter, 1);
+}
+
+function onBookingCustomRangeChange() {
+    bookingFilters.dateFrom = document.getElementById('bookingDateFrom').value;
+    bookingFilters.dateTo   = document.getElementById('bookingDateTo').value;
+    if (!bookingFilters.dateFrom || !bookingFilters.dateTo) return;
+    if (currentBookingView === 'calendar') loadBookingsCalendar();
+    else loadFilteredBookings(currentBookingFilter, 1);
+}
+
+function resetBookingFilters() {
+    bookingFilters = { search: '', days: 30, dateFrom: '', dateTo: '' };
+    if (currentBookingView === 'calendar') loadBookingsCalendar();
+    else loadFilteredBookings(currentBookingFilter, 1);
+}
+
+function applyBookingFilters(list) {
+    const f = bookingFilters;
+
+    let datePred = () => true;
+
+    const pickDate = (b) => {
+        let cd = {};
+        try { cd = b.custom_data ? JSON.parse(b.custom_data) : {}; } catch(e) {}
+        const raw = cd.trip_date
+                 || b.trip_date
+                 || b.booking_date
+                 || b.start_datetime
+                 || b.request_date
+                 || b.created_at;
+        if (!raw) return null;
+        const d = new Date(String(raw).replace(' ', 'T'));
+        return isNaN(d.getTime()) ? null : d;
+    };
+
+    if (f.days === -1 && f.dateFrom && f.dateTo) {
+        const fromTs = new Date(f.dateFrom + 'T00:00:00').getTime();
+        const toTs   = new Date(f.dateTo   + 'T23:59:59').getTime();
+        datePred = (b) => {
+            const d = pickDate(b);
+            if (!d) return true;
+            const ts = d.getTime();
+            return ts >= fromTs && ts <= toTs;
+        };
+    } else if (f.days > 0) {
+        const cutoff = Date.now() - (f.days * 86400000);
+        datePred = (b) => {
+            const d = pickDate(b);
+            if (!d) return true;
+            return d.getTime() >= cutoff;
+        };
+    }
+
+    const q = (f.search || '').trim().toLowerCase();
+    const searchPred = (b) => {
+        if (!q) return true;
+        const blob = [
+            b.first_name, b.last_name, b.email, b.phone,
+            b.equipment_name, b.item_global_id,
+            b.purpose, b.reference, b.request_type
+        ].filter(Boolean).join(' ').toLowerCase();
+        return blob.includes(q);
+    };
+
+    return list.filter(b => datePred(b) && searchPred(b));
+}
+
+// ═══════════════════════════════════════════════════════
+// TYPE FILTER CHIPS
+// ═══════════════════════════════════════════════════════
+function bookingTypeChipsHtml() {
+    const t = currentBookingTypeFilter || 'all';
+    return `
+        <div class="filter-row filter-row-type">
+            <span class="filter-row-label"><i class="fas fa-filter"></i> Type:</span>
+            <button class="filter-chip ${t === 'all'       ? 'active' : ''}" onclick="filterBookingByType('all')"><i class="fas fa-layer-group"></i> All Types</button>
+            <button class="filter-chip ${t === 'equipment' ? 'active' : ''}" onclick="filterBookingByType('equipment')"><i class="fas fa-tools"></i> Equipment</button>
+            <button class="filter-chip ${t === 'facility'  ? 'active' : ''}" onclick="filterBookingByType('facility')"><i class="fas fa-building"></i> Facilities</button>
+            <button class="filter-chip ${t === 'vehicle'   ? 'active' : ''}" onclick="filterBookingByType('vehicle')"><i class="fas fa-truck"></i> Vehicles</button>
+        </div>
+    `;
+}
+
+function filterBookingByType(type) {
+    currentBookingTypeFilter = type || 'all';
+    if (currentBookingView === 'calendar') {
+        loadBookingsCalendar();
+    } else {
+        loadFilteredBookings(currentBookingFilter, 1);
+    }
+}
+
+function filterCalendarByType(type) {
+    currentBookingTypeFilter = type || 'all';
+    currentBookingView = 'calendar';
+    loadBookingsCalendar();
 }
 
 // ============ VALIDATION FUNCTIONS ============
@@ -2854,16 +3136,25 @@ function closeScheduleModal() {
 async function loadBookings(status = 'pending', page = 1) {
     currentBookingFilter = status;
     currentBookingPage = page;
+
+    if (currentBookingView === 'calendar') {
+        await loadBookingsCalendar();
+        return;
+    }
+
     const dashboardBody = document.getElementById('dashboardBody');
     if (!dashboardBody) return;
-    
+
     dashboardBody.innerHTML = `<div class="content-card"><div class="loading-spinner"><i class="fas fa-spinner fa-spin fa-2x"></i><p>Loading bookings...</p></div></div>`;
-    
+
     try {
-        const response = await fetch(`equipment_ajax.php?action=get_bookings&status=${status}&page=${page}`);
+        const typeFilter = currentBookingTypeFilter || 'all';
+        const response = await fetch(`equipment_ajax.php?action=get_all_bookings&status=${status}&type=${typeFilter}`);
         const data = await response.json();
         if (data.success) {
-            dashboardBody.innerHTML = renderBookingsList(data.data);
+            const raw = (data.data && data.data.bookings) ? data.data.bookings : [];
+            const filtered = applyBookingFilters(raw);
+            dashboardBody.innerHTML = renderBookingsList({ bookings: filtered, totalPages: 1, currentPage: 1 });
         } else {
             dashboardBody.innerHTML = `<div class="content-card"><div class="empty-state"><i class="fas fa-exclamation-triangle"></i><p>Failed to load bookings</p></div></div>`;
         }
@@ -2900,16 +3191,14 @@ async function loadBookingsCalendar() {
     dashboardBody.innerHTML = `<div class="content-card"><div class="loading-spinner"><i class="fas fa-spinner fa-spin fa-2x"></i><p>Loading calendar...</p></div></div>`;
     
     try {
-        // Get all bookings for filtered status and type
-        const typeFilter = document.getElementById('calendarTypeFilterSelect') ? 
-            document.getElementById('calendarTypeFilterSelect').value : 
-            (window.currentCalendarTypeFilter || 'all');
-        
+        const typeFilter = currentBookingTypeFilter || 'all';
         const response = await fetch(`equipment_ajax.php?action=get_all_bookings&status=${currentBookingFilter}&type=${typeFilter}`);
         const data = await response.json();
         
         if (data.success) {
-            dashboardBody.innerHTML = renderBookingsCalendar(data.data.bookings, data.data);
+            const raw = (data.data && data.data.bookings) ? data.data.bookings : [];
+            const filtered = applyBookingFilters(raw);
+            dashboardBody.innerHTML = renderBookingsCalendar(filtered, data.data);
         } else {
             dashboardBody.innerHTML = `<div class="content-card"><div class="empty-state"><i class="fas fa-exclamation-triangle"></i><p>Failed to load calendar</p></div></div>`;
         }
@@ -2941,10 +3230,16 @@ function renderBookingsCalendar(bookings, metadata) {
         });
     }
     
-    // Process all bookings and calculate their span in the month
+    // ═══════════════════════════════════════════════════════════
+    // SEPARATE: Vehicles (grouped) vs Equipment/Facility (bars)
+    // ═══════════════════════════════════════════════════════════
+    const vehicleBookings = bookings.filter(b => b.request_type === 'vehicle');
+    const otherBookings   = bookings.filter(b => b.request_type !== 'vehicle');
+
+    // Process all NON-vehicle bookings and calculate their span in the month
     const processedBookings = [];
     
-    bookings.forEach(booking => {
+    otherBookings.forEach(booking => {
         const startDate = new Date(booking.start_datetime || booking.booking_date);
         const endDate = new Date(booking.end_datetime || booking.return_date);
         
@@ -3004,6 +3299,42 @@ function renderBookingsCalendar(bookings, metadata) {
     processedBookings.sort((a, b) => {
         if (a.span !== b.span) return b.span - a.span;
         return a.startDay - b.startDay;
+    });
+
+    // ═══════════════════════════════════════════════════════════
+    // VEHICLE GROUPING – one entry per (vehicle, day)
+    // ═══════════════════════════════════════════════════════════
+    const vehicleGroupsByDay = {};
+
+    vehicleBookings.forEach(booking => {
+        const customData = (() => {
+            try { return booking.custom_data ? JSON.parse(booking.custom_data) : {}; }
+            catch(e) { return {}; }
+        })();
+
+        const tripDateRaw = customData.trip_date || booking.trip_date || booking.start_datetime;
+        const tripDate = new Date(tripDateRaw);
+        if (isNaN(tripDate.getTime())) return;
+
+        if (tripDate.getFullYear() !== year || tripDate.getMonth() !== month) return;
+
+        const dayNum = tripDate.getDate();
+        const dateKey = `${year}-${String(month + 1).padStart(2, '0')}-${String(dayNum).padStart(2, '0')}`;
+        const vehicleKey = booking.equipment_name || booking.item_global_id || 'Vehicle';
+
+        if (!vehicleGroupsByDay[dateKey]) vehicleGroupsByDay[dateKey] = {};
+        if (!vehicleGroupsByDay[dateKey][vehicleKey]) vehicleGroupsByDay[dateKey][vehicleKey] = [];
+        vehicleGroupsByDay[dateKey][vehicleKey].push({ ...booking, __customData: customData, __tripDate: tripDate });
+    });
+
+    Object.values(vehicleGroupsByDay).forEach(vehicleMap => {
+        Object.values(vehicleMap).forEach(arr => {
+            arr.sort((a, b) => {
+                const ta = a.__customData.pickup_time || '00:00';
+                const tb = b.__customData.pickup_time || '00:00';
+                return ta.localeCompare(tb);
+            });
+        });
     });
     
     // Calculate vertical stacking positions (handle overlaps)
@@ -3437,26 +3768,20 @@ function renderBookingsCalendar(bookings, metadata) {
             <div class="section-sub">Manage equipment, facility, and vehicle booking requests</div>
             
            <!-- Filters -->
-<div class="filter-bar">
-    <button class="filter-chip ${currentBookingFilter === 'all' ? 'active' : ''}" onclick="loadCalendarWithFilters('all')">All</button>
-    <button class="filter-chip ${currentBookingFilter === 'pending' ? 'active' : ''}" onclick="loadCalendarWithFilters('pending')">Pending</button>
-    <button class="filter-chip ${currentBookingFilter === 'approved' ? 'active' : ''}" onclick="loadCalendarWithFilters('approved')">Approved</button>
-    <button class="filter-chip ${currentBookingFilter === 'borrowed' ? 'active' : ''}" onclick="loadCalendarWithFilters('borrowed')">Borrowed</button>
-    <button class="filter-chip ${currentBookingFilter === 'returned' ? 'active' : ''}" onclick="loadCalendarWithFilters('returned')">Returned</button>
-    <button class="filter-chip ${currentBookingFilter === 'rejected' ? 'active' : ''}" onclick="loadCalendarWithFilters('rejected')">Rejected</button>
-    <select id="calendarTypeFilterSelect" class="filter-select" onchange="loadCalendarWithFilters(currentBookingFilter)">
-        <option value="all" ${window.currentCalendarTypeFilter === 'all' ? 'selected' : ''}>All Types</option>
-        <option value="equipment" ${window.currentCalendarTypeFilter === 'equipment' ? 'selected' : ''}>Equipment Only</option>
-        <option value="facility" ${window.currentCalendarTypeFilter === 'facility' ? 'selected' : ''}>Facility Only</option>
-        <option value="vehicle" ${window.currentCalendarTypeFilter === 'vehicle' ? 'selected' : ''}>Vehicle Only</option>
-    </select>
-    <div style="margin-left: auto; display: flex; gap: 10px;">
-        <button class="btn-verify" onclick="toggleBookingView()" style="background: #17a2b8;">
-            <i class="fas fa-list"></i> Card View
-        </button>
-        <button class="btn-verify" onclick="refreshBookingsList()" style="background: #28a745;">
-            <i class="fas fa-sync-alt"></i> Refresh
-        </button>
+<div class="filter-bar filter-bar-stacked">
+    ${bookingTypeChipsHtml()}
+    <div class="filter-row filter-row-status">
+        <span class="filter-row-label"><i class="fas fa-list"></i> Status:</span>
+        <button class="filter-chip ${currentBookingFilter === 'all' ? 'active' : ''}" onclick="loadCalendarWithFilters('all')">All</button>
+        <button class="filter-chip ${currentBookingFilter === 'pending' ? 'active' : ''}" onclick="loadCalendarWithFilters('pending')">Pending</button>
+        <button class="filter-chip ${currentBookingFilter === 'approved' ? 'active' : ''}" onclick="loadCalendarWithFilters('approved')">Approved</button>
+        <button class="filter-chip ${currentBookingFilter === 'borrowed' ? 'active' : ''}" onclick="loadCalendarWithFilters('borrowed')">Borrowed</button>
+        <button class="filter-chip ${currentBookingFilter === 'returned' ? 'active' : ''}" onclick="loadCalendarWithFilters('returned')">Returned</button>
+        <button class="filter-chip ${currentBookingFilter === 'rejected' ? 'active' : ''}" onclick="loadCalendarWithFilters('rejected')">Rejected</button>
+        <div class="filter-row-actions">
+            <button class="btn-verify" onclick="toggleBookingView()" style="background:#17a2b8;"><i class="fas fa-list"></i> Card View</button>
+            <button class="btn-verify" onclick="refreshBookingsList()" style="background:#28a745;"><i class="fas fa-sync-alt"></i> Refresh</button>
+        </div>
     </div>
 </div>
             
@@ -3601,11 +3926,54 @@ barsHtml += `
             }
         }
         
+        // ═══════════════════════════════════════════════════════════
+        // VEHICLE BARS – one bar per vehicle on this day
+        // ═══════════════════════════════════════════════════════════
+        const dayVehicles = vehicleGroupsByDay[dateKey] || {};
+        let vehicleBarsHtml = '';
+
+        Object.keys(dayVehicles).forEach(vehicleName => {
+            const trips = dayVehicles[vehicleName];
+            const tripCount = trips.length;
+
+            const statusRank = { pending:1, approved:2, borrowed:3, returned:4, rejected:5, cancelled:6 };
+            const dominant = trips.reduce((acc, t) => {
+                return (statusRank[t.status] || 99) < (statusRank[acc] || 99) ? t.status : acc;
+            }, trips[0].status);
+
+            const statusIcon = {
+                pending:   'fa-clock',
+                approved:  'fa-check-circle',
+                borrowed:  'fa-hand-holding',
+                returned:  'fa-undo-alt',
+                rejected:  'fa-times-circle',
+                cancelled: 'fa-ban'
+            }[dominant] || 'fa-truck';
+
+            const tripTimes = trips
+                .map(t => t.__customData.pickup_time || '--:--')
+                .join(', ');
+
+            vehicleBarsHtml += `
+                <div class="booking-row vehicle-row">
+                    <div class="booking-bar vehicle-bar ${dominant}"
+                         style="width: 100%; left: 0; cursor: pointer;"
+                         title="${tripCount} trip(s): ${escapeHtml(tripTimes)}"
+                         onclick="event.stopPropagation(); showVehicleTripsForDay('${dateKey}', '${escapeHtml(vehicleName).replace(/'/g, "\\'")}');">
+                        <i class="fas fa-truck"></i>
+                        <span class="booking-name">${escapeHtml(vehicleName)}</span>
+                        <span class="vehicle-trip-count">${tripCount} trip${tripCount > 1 ? 's' : ''}</span>
+                        <i class="fas ${statusIcon} vehicle-status-icon"></i>
+                    </div>
+                </div>`;
+        });
+
         calendarHtml += `
             <td>
-                <div class="day-cell ${todayClass}" data-date="${dateKey}" onclick="showDayBookingsModalForBooking('${dateKey}', true)">
+                <div class="day-cell ${todayClass}" data-date="${dateKey}">
                     <span class="day-number">${currentDay}</span>
                     ${barsHtml}
+                    ${vehicleBarsHtml}
                 </div>
             </td>
         `;
@@ -3638,6 +4006,8 @@ barsHtml += `
                 <div><i class="fas fa-hand-holding" style="color: #17a2b8;"></i> Borrowed: <strong>${bookings.filter(b => b.status === 'borrowed').length}</strong></div>
                 <div><i class="fas fa-undo-alt" style="color: #6c757d;"></i> Returned: <strong>${bookings.filter(b => b.status === 'returned').length}</strong></div>
                 <div><i class="fas fa-times-circle" style="color: #dc3545;"></i> Rejected: <strong>${bookings.filter(b => b.status === 'rejected').length}</strong></div>
+                <div><i class="fas fa-ban" style="color: #6c757d;"></i> Cancelled: <strong>${bookings.filter(b => b.status === 'cancelled').length}</strong></div>
+                <div><i class="fas fa-truck" style="color: #1b5e20;"></i> Vehicle Trips: <strong>${vehicleBookings.length}</strong></div>
             </div>
         </div>
     </div>
@@ -3645,36 +4015,160 @@ barsHtml += `
     
     return calendarHtml;
 }
-// Replace the existing loadCalendarWithFilters function
+/**
+ * Show all trips for a specific vehicle on a specific day.
+ * Clicking a trip opens the full booking details modal.
+ */
+function showVehicleTripsForDay(dateKey, vehicleName) {
+    const modal = document.getElementById('dayBookingsModal');
+    const modalTitle = document.getElementById('dayBookingsModalTitle');
+    const modalBody = document.getElementById('dayBookingsModalBody');
+    if (!modal || !modalTitle || !modalBody) return;
+
+    const typeFilter = currentBookingTypeFilter || 'all';
+
+    fetch(`equipment_ajax.php?action=get_all_bookings&status=${currentBookingFilter}&type=${typeFilter}&date=${dateKey}`)
+        .then(r => r.json())
+        .then(data => {
+            if (!data.success || !data.data.bookings) {
+                modalBody.innerHTML = `<div class="empty-state-mini"><p>No trips found.</p></div>`;
+                modalTitle.innerHTML = `<i class="fas fa-truck"></i> ${escapeHtml(vehicleName)}`;
+                modal.style.display = 'block';
+                return;
+            }
+
+            const trips = data.data.bookings.filter(b => {
+                if (b.request_type !== 'vehicle') return false;
+                if ((b.equipment_name || '') !== vehicleName) return false;
+
+                let cd = {};
+                try { cd = b.custom_data ? JSON.parse(b.custom_data) : {}; } catch(e) {}
+                const tripRaw = cd.trip_date || b.trip_date || b.start_datetime;
+                const td = new Date(tripRaw);
+                if (isNaN(td.getTime())) return false;
+
+                const key = `${td.getFullYear()}-${String(td.getMonth() + 1).padStart(2, '0')}-${String(td.getDate()).padStart(2, '0')}`;
+                return key === dateKey;
+            });
+
+            const selectedDate = new Date(dateKey + 'T00:00:00');
+            const formattedDate = selectedDate.toLocaleDateString('en-US', {
+                weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
+            });
+
+            modalTitle.innerHTML = `<i class="fas fa-truck"></i> ${escapeHtml(vehicleName)} — ${formattedDate}`;
+
+            if (trips.length === 0) {
+                modalBody.innerHTML = `<div class="empty-state-mini"><p>No trips scheduled for this vehicle on this day.</p></div>`;
+                modal.style.display = 'block';
+                return;
+            }
+
+            trips.sort((a, b) => {
+                const ta = (a.custom_data ? JSON.parse(a.custom_data).pickup_time : '') || '00:00';
+                const tb = (b.custom_data ? JSON.parse(b.custom_data).pickup_time : '') || '00:00';
+                return ta.localeCompare(tb);
+            });
+
+            const getStatusClass = (s) => ({
+                pending:'badge-unverified', approved:'badge-verified',
+                borrowed:'badge-borrowed', returned:'badge-returned',
+                rejected:'status-unverified', cancelled:'badge-cancelled'
+            }[s] || 'badge-unverified');
+
+            const getStatusIcon = (s) => ({
+                pending:'<i class="fas fa-clock"></i>',
+                approved:'<i class="fas fa-check-circle"></i>',
+                borrowed:'<i class="fas fa-hand-holding"></i>',
+                returned:'<i class="fas fa-undo-alt"></i>',
+                rejected:'<i class="fas fa-times-circle"></i>',
+                cancelled:'<i class="fas fa-ban"></i>'
+            }[s] || '<i class="fas fa-question-circle"></i>');
+
+            const tripsHtml = trips.map((t, idx) => {
+                let cd = {};
+                try { cd = t.custom_data ? JSON.parse(t.custom_data) : {}; } catch(e) {}
+
+                const pickupTime = cd.pickup_time || '--:--';
+                const windowEnd  = cd.pickup_window_end || '';
+                const dropoff    = cd.dropoff_location || '-';
+                const pickup     = cd.pickup_location || '-';
+                const pax        = cd.passenger_count || 1;
+                const hours      = cd.estimated_hours || '-';
+
+                return `
+                    <div class="day-booking-item vehicle-trip-item"
+                         onclick="closeDayBookingsModal(); viewBookingDetails(${t.id});"
+                         style="background:#f8faf8; border-radius:12px; padding:14px;
+                                margin-bottom:10px; cursor:pointer; border-left:4px solid #1b5e20;">
+                        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+                            <div style="display:flex; align-items:center; gap:10px;">
+                                <div style="background:#1b5e20; color:#fff; width:32px; height:32px;
+                                            border-radius:50%; display:flex; align-items:center;
+                                            justify-content:center; font-weight:800; font-size:0.85rem; flex-shrink:0;">
+                                    ${idx + 1}
+                                </div>
+                                <div>
+                                    <strong style="font-size:0.95rem;">${escapeHtml(t.first_name)} ${escapeHtml(t.last_name)}</strong>
+                                    <div style="font-size:0.75rem; color:#666; margin-top:2px;">
+                                        <i class="fas fa-clock"></i> Pickup: <strong>${pickupTime}</strong>
+                                        ${windowEnd ? ` <span style="color:#999;">(until ${windowEnd})</span>` : ''}
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="${getStatusClass(t.status)}"
+                                 style="padding:4px 12px; border-radius:40px; font-size:11px; white-space:nowrap;">
+                                ${getStatusIcon(t.status)} ${t.status}
+                            </div>
+                        </div>
+                        <div style="margin-top:10px; font-size:0.78rem; color:#555;
+                                    display:grid; grid-template-columns:1fr 1fr; gap:6px;">
+                            <div><i class="fas fa-map-marker-alt" style="color:#2E7D32;"></i>
+                                 <strong>From:</strong> ${escapeHtml(pickup)}</div>
+                            <div><i class="fas fa-flag-checkered" style="color:#c62828;"></i>
+                                 <strong>To:</strong> ${escapeHtml(dropoff)}</div>
+                            <div><i class="fas fa-users" style="color:#1565c0;"></i>
+                                 <strong>Passengers:</strong> ${pax}</div>
+                            <div><i class="fas fa-hourglass-half" style="color:#f57c00;"></i>
+                                 <strong>Est. Hours:</strong> ${hours}</div>
+                        </div>
+                        ${t.purpose ? `
+                            <div style="margin-top:8px; font-size:0.78rem; color:#444;
+                                        background:#eef5f0; padding:6px 10px; border-radius:6px;">
+                                <i class="fas fa-comment"></i> ${escapeHtml(t.purpose.substring(0, 120))}${t.purpose.length > 120 ? '...' : ''}
+                            </div>` : ''}
+                        <div style="margin-top:8px; font-size:0.72rem; color:#2E7D32;
+                                    font-weight:600; text-align:right;">
+                            <i class="fas fa-info-circle"></i> Click to view full details
+                        </div>
+                    </div>`;
+            }).join('');
+
+            modalBody.innerHTML = `
+                <div style="margin-bottom:12px; padding:10px 14px; background:#e8f5e9;
+                            border-left:4px solid #1b5e20; border-radius:8px;
+                            font-size:0.85rem; color:#1b5e20;">
+                    <i class="fas fa-truck"></i>
+                    <strong>${trips.length}</strong> trip${trips.length > 1 ? 's' : ''} scheduled
+                    for <strong>${escapeHtml(vehicleName)}</strong> on this day.
+                </div>
+                <div class="day-bookings-list" style="max-height:60vh; overflow-y:auto;">
+                    ${tripsHtml}
+                </div>`;
+
+            modal.style.display = 'block';
+        })
+        .catch(err => {
+            console.error('Error loading vehicle trips:', err);
+            modalBody.innerHTML = `<div class="empty-state-mini"><p>Error loading trips.</p></div>`;
+            modalTitle.innerHTML = `<i class="fas fa-truck"></i> ${escapeHtml(vehicleName)}`;
+            modal.style.display = 'block';
+        });
+}
+
 async function loadCalendarWithFilters(status) {
     currentBookingFilter = status;
     currentBookingView = 'calendar';
-    
-    // Also get the type filter from the select element
-    const typeFilter = document.getElementById('calendarTypeFilterSelect');
-    if (typeFilter) {
-        // Store the type filter in a global variable or pass it via URL
-        window.currentCalendarTypeFilter = typeFilter.value;
-    }
-    
-    await loadBookingsCalendar();
-}
-
-async function changeBookingCalendarMonth(year, month, delta) {
-    const newMonth = month + delta;
-    let newYear = year;
-    let newMonthIndex = newMonth;
-    
-    if (newMonth < 0) {
-        newYear = year - 1;
-        newMonthIndex = 11;
-    } else if (newMonth > 11) {
-        newYear = year + 1;
-        newMonthIndex = 0;
-    }
-    
-    currentBookingCalendarYear = newYear;
-    currentBookingCalendarMonth = newMonthIndex;
     await loadBookingsCalendar();
 }
 
@@ -3703,8 +4197,7 @@ async function showDayBookingsModalForBooking(dateKey, hasBookings) {
     const formattedDate = selectedDate.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
     
     // Fetch bookings for this specific date with current filters
-    const typeFilter = document.getElementById('calendarTypeFilterSelect') ? 
-        document.getElementById('calendarTypeFilterSelect').value : 'all';
+const typeFilter = currentBookingTypeFilter || 'all';
     const response = await fetch(`equipment_ajax.php?action=get_all_bookings&status=${currentBookingFilter}&type=${typeFilter}&date=${dateKey}`);
     const data = await response.json();
     
@@ -3818,27 +4311,28 @@ function showDayBookingsListModal(date, bookings) {
     modal.style.display = 'block';
 }
 
-// Update the loadFilteredBookings function to handle calendar view
 async function loadFilteredBookings(status, page) {
-    const typeFilter = document.getElementById('typeFilterSelect') ? document.getElementById('typeFilterSelect').value : 'all';
     currentBookingFilter = status;
     currentBookingPage = page;
-    
+
     if (currentBookingView === 'calendar') {
         await loadBookingsCalendar();
         return;
     }
-    
+
     const dashboardBody = document.getElementById('dashboardBody');
     if (!dashboardBody) return;
-    
+
     dashboardBody.innerHTML = `<div class="content-card"><div class="loading-spinner"><i class="fas fa-spinner fa-spin fa-2x"></i><p>Loading bookings...</p></div></div>`;
-    
+
     try {
-        const response = await fetch(`equipment_ajax.php?action=get_bookings&status=${status}&page=${page}&type=${typeFilter}`);
+        const typeFilter = currentBookingTypeFilter || 'all';
+        const response = await fetch(`equipment_ajax.php?action=get_all_bookings&status=${status}&type=${typeFilter}`);
         const data = await response.json();
         if (data.success) {
-            dashboardBody.innerHTML = renderBookingsList(data.data);
+            const raw = (data.data && data.data.bookings) ? data.data.bookings : [];
+            const filtered = applyBookingFilters(raw);
+            dashboardBody.innerHTML = renderBookingsList({ bookings: filtered, totalPages: 1, currentPage: 1 });
         } else {
             dashboardBody.innerHTML = `<div class="content-card"><div class="empty-state"><i class="fas fa-exclamation-triangle"></i><p>Failed to load bookings</p></div></div>`;
         }
@@ -3865,12 +4359,13 @@ function renderBookingsList(bookingsData) {
     
     const getStatusBadge = (status) => {
         switch(status) {
-            case 'pending': return '<span class="badge-unverified"><i class="fas fa-clock"></i> Pending</span>';
-            case 'approved': return '<span class="badge-verified"><i class="fas fa-check-circle"></i> Approved</span>';
-            case 'borrowed': return '<span class="badge-borrowed"><i class="fas fa-hand-holding"></i> Borrowed</span>';
-            case 'returned': return '<span class="badge-returned"><i class="fas fa-undo-alt"></i> Returned</span>';
-            case 'rejected': return '<span class="status-unverified"><i class="fas fa-times-circle"></i> Rejected</span>';
-            default: return '<span class="badge-unverified">' + status + '</span>';
+            case 'pending':   return '<span class="badge-unverified"><i class="fas fa-clock"></i> Pending</span>';
+            case 'approved':  return '<span class="badge-verified"><i class="fas fa-check-circle"></i> Approved</span>';
+            case 'borrowed':  return '<span class="badge-borrowed"><i class="fas fa-hand-holding"></i> Borrowed</span>';
+            case 'returned':  return '<span class="badge-returned"><i class="fas fa-undo-alt"></i> Returned</span>';
+            case 'rejected':  return '<span class="status-unverified"><i class="fas fa-times-circle"></i> Rejected</span>';
+            case 'cancelled': return '<span class="badge-cancelled"><i class="fas fa-ban"></i> Cancelled</span>';
+            default:          return '<span class="badge-unverified">' + status + '</span>';
         }
     };
     
@@ -3888,26 +4383,52 @@ function renderBookingsList(bookingsData) {
             <div class="content-card">
                 <div class="section-title"><i class="fas fa-calendar-alt"></i> Booking Requests</div>
                 <div class="section-sub">Manage equipment, facility, and vehicle booking requests from residents</div>
-                <div class="filter-bar">
-                    <button class="filter-chip ${currentBookingFilter === 'all' ? 'active' : ''}" onclick="loadFilteredBookings('all', 1)">All</button>
-                    <button class="filter-chip ${currentBookingFilter === 'pending' ? 'active' : ''}" onclick="loadFilteredBookings('pending', 1)">Pending</button>
-                    <button class="filter-chip ${currentBookingFilter === 'approved' ? 'active' : ''}" onclick="loadFilteredBookings('approved', 1)">Approved</button>
-                    <button class="filter-chip ${currentBookingFilter === 'borrowed' ? 'active' : ''}" onclick="loadFilteredBookings('borrowed', 1)">Borrowed</button>
-                    <button class="filter-chip ${currentBookingFilter === 'returned' ? 'active' : ''}" onclick="loadFilteredBookings('returned', 1)">Returned</button>
-                    <button class="filter-chip ${currentBookingFilter === 'rejected' ? 'active' : ''}" onclick="loadFilteredBookings('rejected', 1)">Rejected</button>
-                    <select id="typeFilterSelect" class="filter-select" onchange="loadFilteredBookings(currentBookingFilter, 1)">
-                        <option value="all">All Types</option>
-                        <option value="equipment">Equipment Only</option>
-                        <option value="facility">Facility Only</option>
-                        <option value="vehicle">Vehicle Only</option>
-                    </select>
-                    <button class="btn-verify" onclick="toggleBookingView()" style="background: #17a2b8; margin-left: auto;">
-                        <i class="fas fa-calendar-alt"></i> Calendar View
-                    </button>
-                    <button class="btn-verify" onclick="refreshBookingsList()">
-                        <i class="fas fa-sync-alt"></i> Refresh
-                    </button>
+
+                <div class="booking-filter-accordion">
+                    <div class="booking-filter-accordion-header"
+                         onclick="toggleBookingFiltersBar()"
+                         style="display:flex;align-items:center;gap:12px;padding:12px 16px;
+                                background:#f8faf8;border:1px solid #e2efe8;border-radius:10px;
+                                cursor:pointer;user-select:none;">
+                        <i class="fas fa-filter" style="color:#2E7D32;font-size:0.95rem;"></i>
+                        <div style="font-weight:800;color:#1a472a;font-size:0.85rem;
+                                    letter-spacing:0.3px;text-transform:uppercase;flex-shrink:0;">Filters</div>
+                        <div id="bookingFiltersSummary"
+                             style="flex:1;min-width:0;font-size:0.78rem;color:#5f7f6e;
+                                    font-weight:600;overflow:hidden;white-space:nowrap;
+                                    text-overflow:ellipsis;display:${bookingFiltersExpanded ? 'none' : 'inline-block'};">
+                            ${bookingFiltersSummaryHtml()}
+                        </div>
+                        <i id="bookingFiltersChevron" class="fas fa-chevron-down"
+                           style="color:#2E7D32;font-size:0.8rem;transition:transform 0.25s ease;
+                                  transform:${bookingFiltersExpanded ? 'rotate(180deg)' : 'rotate(0)'};"></i>
+                    </div>
+                    <div id="bookingFiltersWrapper"
+                         style="display:${bookingFiltersExpanded ? 'block' : 'none'};
+                                max-height:${bookingFiltersExpanded ? 'none' : '0'};
+                                overflow:hidden;opacity:${bookingFiltersExpanded ? '1' : '0'};
+                                margin-top:${bookingFiltersExpanded ? '10px' : '0'};
+                                transition:max-height 0.3s ease, opacity 0.25s ease, margin-top 0.25s ease;">
+                        <div class="filter-bar filter-bar-stacked">
+                            ${bookingTypeChipsHtml()}
+                            <div class="filter-row filter-row-status">
+                                <span class="filter-row-label"><i class="fas fa-list"></i> Status:</span>
+                                <button class="filter-chip ${currentBookingFilter === 'all' ? 'active' : ''}" onclick="loadFilteredBookings('all', 1)">All</button>
+                                <button class="filter-chip ${currentBookingFilter === 'pending' ? 'active' : ''}" onclick="loadFilteredBookings('pending', 1)">Pending</button>
+                                <button class="filter-chip ${currentBookingFilter === 'approved' ? 'active' : ''}" onclick="loadFilteredBookings('approved', 1)">Approved</button>
+                                <button class="filter-chip ${currentBookingFilter === 'borrowed' ? 'active' : ''}" onclick="loadFilteredBookings('borrowed', 1)">Borrowed</button>
+                                <button class="filter-chip ${currentBookingFilter === 'returned' ? 'active' : ''}" onclick="loadFilteredBookings('returned', 1)">Returned</button>
+                                <button class="filter-chip ${currentBookingFilter === 'cancelled' ? 'active' : ''}" onclick="loadFilteredBookings('cancelled', 1)">Cancel</button>
+                                <div class="filter-row-actions">
+                                    <button class="btn-verify" onclick="toggleBookingView()" style="background:#17a2b8;"><i class="fas fa-calendar-alt"></i> Calendar View</button>
+                                    <button class="btn-verify" onclick="refreshBookingsList()" style="background:#28a745;"><i class="fas fa-sync-alt"></i> Refresh</button>
+                                </div>
+                            </div>
+                        </div>
+                        ${bookingFilterToolbarHtml()}
+                    </div>
                 </div>
+
                 <div class="empty-state">
                     <i class="fas fa-calendar-times fa-3x"></i>
                     <p>No ${currentBookingFilter} booking requests found.</p>
@@ -4022,34 +4543,162 @@ function renderBookingsList(bookingsData) {
         paginationHtml += '</div></div>';
     }
     
+    // GROUPED MODE — only when filter is "All" AND type is "all"
+    const useGrouping = (currentBookingFilter === 'all' && (currentBookingTypeFilter || 'all') === 'all');
+
+    const buildCard = (booking) => {
+        let customData = {};
+        if (booking.custom_data) { try { customData = JSON.parse(booking.custom_data); } catch(e) {} }
+        let displayDate = formatDate(booking.start_datetime || booking.booking_date);
+        if (booking.request_type === 'facility' && customData.start_time) {
+            displayDate = `${formatDate(booking.start_datetime)} (${customData.start_time} - ${customData.end_time})`;
+        }
+        if (booking.request_type === 'vehicle' && customData.trip_date) {
+            displayDate = formatDate(customData.trip_date);
+        }
+
+        let typeInfo = '';
+        if (booking.request_type === 'equipment') {
+            typeInfo = `<div class="info-row-card"><div class="info-icon"><i class="fas fa-cubes"></i></div><div class="info-label-card">Quantity:</div><div class="info-value-card">${customData.quantity || booking.quantity || 1} item(s)</div></div>`;
+        } else if (booking.request_type === 'facility') {
+            typeInfo = `<div class="info-row-card"><div class="info-icon"><i class="fas fa-clock"></i></div><div class="info-label-card">Time:</div><div class="info-value-card">${customData.start_time || '--:--'} - ${customData.end_time || '--:--'}</div></div>
+                        <div class="info-row-card"><div class="info-icon"><i class="fas fa-users"></i></div><div class="info-label-card">Attendees:</div><div class="info-value-card">${customData.expected_attendees || '-'}</div></div>`;
+        } else if (booking.request_type === 'vehicle') {
+            typeInfo = `<div class="info-row-card"><div class="info-icon"><i class="fas fa-map-marker-alt"></i></div><div class="info-label-card">Pickup:</div><div class="info-value-card">${escapeHtml((customData.pickup_location || '-').substring(0, 50))}</div></div>
+                        <div class="info-row-card"><div class="info-icon"><i class="fas fa-users"></i></div><div class="info-label-card">Passengers:</div><div class="info-value-card">${customData.passenger_count || 1}</div></div>`;
+        }
+
+        return `
+            <div class="data-card" onclick="viewBookingDetails(${booking.id})" data-id="${booking.id}">
+                <div class="card-header-gradient ${booking.status === 'pending' ? 'pending' : (booking.status === 'approved' ? 'approved' : (booking.status === 'cancelled' ? 'cancelled' : 'completed'))}">
+                    <div class="card-title-large">
+                        ${getTypeBadge(booking.request_type)}
+                        <span>${escapeHtml(booking.equipment_name)}</span>
+                    </div>
+                    <div class="status-chip">${getStatusBadge(booking.status)}</div>
+                </div>
+                <div class="card-content">
+                    <div class="info-section">
+                        <div class="info-row-card"><div class="info-icon"><i class="fas fa-user"></i></div><div class="info-label-card">Resident:</div><div class="info-value-card"><strong>${escapeHtml(booking.first_name)} ${escapeHtml(booking.last_name)}</strong></div></div>
+                        <div class="info-row-card"><div class="info-icon"><i class="fas fa-phone"></i></div><div class="info-label-card">Phone:</div><div class="info-value-card">${escapeHtml(booking.phone || '-')}</div></div>
+                        <div class="info-row-card"><div class="info-icon"><i class="fas fa-calendar"></i></div><div class="info-label-card">${booking.request_type === 'vehicle' ? 'Trip Date:' : 'Booking Date:'}</div><div class="info-value-card">${displayDate}</div></div>
+                        ${typeInfo}
+                        ${booking.request_type === 'vehicle'
+                            ? `<div class="info-row-card"><div class="info-icon"><i class="fas fa-hourglass-half"></i></div><div class="info-label-card">Duration:</div><div class="info-value-card">${parseFloat(customData.estimated_hours || 2).toFixed(1)} hour(s)</div></div>`
+                            : `<div class="info-row-card"><div class="info-icon"><i class="fas fa-hourglass-half"></i></div><div class="info-label-card">Duration:</div><div class="info-value-card">${booking.duration_days || 1} day(s)</div></div>`}
+                        ${booking.purpose ? `<div class="info-row-card"><div class="info-icon"><i class="fas fa-comment"></i></div><div class="info-label-card">Purpose:</div><div class="info-value-card">${escapeHtml(booking.purpose.substring(0, 100))}${booking.purpose.length > 100 ? '...' : ''}</div></div>` : ''}
+                    </div>
+                </div>
+                <div class="click-hint">
+                    <i class="fas fa-mouse-pointer"></i> Click to view details and take action
+                </div>
+            </div>`;
+    };
+
+    let bodyHtml = '';
+    if (useGrouping) {
+        const groups = {
+            equipment: bookings.filter(b => b.request_type === 'equipment'),
+            facility:  bookings.filter(b => b.request_type === 'facility'),
+            vehicle:   bookings.filter(b => b.request_type === 'vehicle')
+        };
+        const groupMeta = {
+            equipment: { label: 'Equipment Bookings', icon: 'fa-tools',    color: '#2E7D32' },
+            facility:  { label: 'Facility Bookings',  icon: 'fa-building', color: '#1565c0' },
+            vehicle:   { label: 'Vehicle Trips',      icon: 'fa-truck',    color: '#6a1b9a' }
+        };
+
+        bodyHtml = ['equipment', 'facility', 'vehicle'].map(key => {
+            const list = groups[key];
+            if (!list.length) return '';
+            const meta = groupMeta[key];
+            const collapsed = !!collapsedGroups[key];
+
+            return `
+                <div class="booking-group" style="margin-bottom:18px;">
+                    <div class="booking-group-header"
+                         onclick="toggleBookingGroup('${key}')"
+                         style="display:flex;align-items:center;gap:12px;padding:12px 16px;
+                                background:${meta.color}0D;border-left:4px solid ${meta.color};
+                                border-radius:10px;cursor:pointer;user-select:none;">
+                        <i class="fas ${collapsed ? 'fa-chevron-right' : 'fa-chevron-down'}"
+                           style="color:${meta.color};font-size:0.8rem;width:14px;"></i>
+                        <i class="fas ${meta.icon}" style="color:${meta.color};font-size:1rem;"></i>
+                        <div style="font-weight:800;color:${meta.color};
+                                    font-size:0.9rem;letter-spacing:0.3px;text-transform:uppercase;flex:1;">
+                            ${meta.label}
+                        </div>
+                        <span style="background:${meta.color};color:#fff;padding:2px 12px;
+                                     border-radius:12px;font-size:0.72rem;font-weight:800;">
+                            ${list.length}
+                        </span>
+                    </div>
+                    <div class="booking-group-body"
+                         style="display:${collapsed ? 'none' : 'block'};margin-top:12px;">
+                        <div class="cards-grid">${list.map(buildCard).join('')}</div>
+                    </div>
+                </div>`;
+        }).join('');
+    } else {
+        bodyHtml = `<div class="cards-grid">${bookings.map(buildCard).join('')}</div>`;
+    }
+
+    setTimeout(() => {
+        const el = document.getElementById('bookingResultCount');
+        if (el) el.textContent = `${bookings.length} result${bookings.length === 1 ? '' : 's'}`;
+    }, 0);
+
     return `
         <div class="content-card">
             <div class="section-title"><i class="fas fa-calendar-alt"></i> Booking Requests</div>
             <div class="section-sub">Manage equipment, facility, and vehicle booking requests from residents</div>
-            <div class="filter-bar">
-                <button class="filter-chip ${currentBookingFilter === 'all' ? 'active' : ''}" onclick="loadFilteredBookings('all', 1)">All</button>
-                <button class="filter-chip ${currentBookingFilter === 'pending' ? 'active' : ''}" onclick="loadFilteredBookings('pending', 1)">Pending</button>
-                <button class="filter-chip ${currentBookingFilter === 'approved' ? 'active' : ''}" onclick="loadFilteredBookings('approved', 1)">Approved</button>
-                <button class="filter-chip ${currentBookingFilter === 'borrowed' ? 'active' : ''}" onclick="loadFilteredBookings('borrowed', 1)">Borrowed</button>
-                <button class="filter-chip ${currentBookingFilter === 'returned' ? 'active' : ''}" onclick="loadFilteredBookings('returned', 1)">Returned</button>
-                <button class="filter-chip ${currentBookingFilter === 'rejected' ? 'active' : ''}" onclick="loadFilteredBookings('rejected', 1)">Rejected</button>
-                <select id="typeFilterSelect" class="filter-select" onchange="loadFilteredBookings(currentBookingFilter, 1)">
-                    <option value="all">All Types</option>
-                    <option value="equipment">Equipment Only</option>
-                    <option value="facility">Facility Only</option>
-                    <option value="vehicle">Vehicle Only</option>
-                </select>
-                <button class="btn-verify" onclick="toggleBookingView()" style="background: #17a2b8; margin-left: auto;">
-                    <i class="fas fa-calendar-alt"></i> Calendar View
-                </button>
-                <button class="btn-verify" onclick="refreshBookingsList()">
-                    <i class="fas fa-sync-alt"></i> Refresh
-                </button>
+
+            <div class="booking-filter-accordion">
+                <div class="booking-filter-accordion-header"
+                     onclick="toggleBookingFiltersBar()"
+                     style="display:flex;align-items:center;gap:12px;padding:12px 16px;
+                            background:#f8faf8;border:1px solid #e2efe8;border-radius:10px;
+                            cursor:pointer;user-select:none;">
+                    <i class="fas fa-filter" style="color:#2E7D32;font-size:0.95rem;"></i>
+                    <div style="font-weight:800;color:#1a472a;font-size:0.85rem;
+                                letter-spacing:0.3px;text-transform:uppercase;flex-shrink:0;">Filters</div>
+                    <div id="bookingFiltersSummary"
+                         style="flex:1;min-width:0;font-size:0.78rem;color:#5f7f6e;
+                                font-weight:600;overflow:hidden;white-space:nowrap;
+                                text-overflow:ellipsis;display:${bookingFiltersExpanded ? 'none' : 'inline-block'};">
+                        ${bookingFiltersSummaryHtml()}
+                    </div>
+                    <i id="bookingFiltersChevron" class="fas fa-chevron-down"
+                       style="color:#2E7D32;font-size:0.8rem;transition:transform 0.25s ease;
+                              transform:${bookingFiltersExpanded ? 'rotate(180deg)' : 'rotate(0)'};"></i>
+                </div>
+                <div id="bookingFiltersWrapper"
+                     style="display:${bookingFiltersExpanded ? 'block' : 'none'};
+                            max-height:${bookingFiltersExpanded ? 'none' : '0'};
+                            overflow:hidden;opacity:${bookingFiltersExpanded ? '1' : '0'};
+                            margin-top:${bookingFiltersExpanded ? '10px' : '0'};
+                            transition:max-height 0.3s ease, opacity 0.25s ease, margin-top 0.25s ease;">
+                    <div class="filter-bar filter-bar-stacked">
+                        ${bookingTypeChipsHtml()}
+                        <div class="filter-row filter-row-status">
+                            <span class="filter-row-label"><i class="fas fa-list"></i> Status:</span>
+                            <button class="filter-chip ${currentBookingFilter === 'all' ? 'active' : ''}" onclick="loadFilteredBookings('all', 1)">All</button>
+                            <button class="filter-chip ${currentBookingFilter === 'pending' ? 'active' : ''}" onclick="loadFilteredBookings('pending', 1)">Pending</button>
+                            <button class="filter-chip ${currentBookingFilter === 'approved' ? 'active' : ''}" onclick="loadFilteredBookings('approved', 1)">Approved</button>
+                            <button class="filter-chip ${currentBookingFilter === 'borrowed' ? 'active' : ''}" onclick="loadFilteredBookings('borrowed', 1)">Borrowed</button>
+                            <button class="filter-chip ${currentBookingFilter === 'returned' ? 'active' : ''}" onclick="loadFilteredBookings('returned', 1)">Returned</button>
+                            <button class="filter-chip ${currentBookingFilter === 'cancelled' ? 'active' : ''}" onclick="loadFilteredBookings('cancelled', 1)">Cancel</button>
+                            <div class="filter-row-actions">
+                                <button class="btn-verify" onclick="toggleBookingView()" style="background:#17a2b8;"><i class="fas fa-calendar-alt"></i> Calendar View</button>
+                                <button class="btn-verify" onclick="refreshBookingsList()" style="background:#28a745;"><i class="fas fa-sync-alt"></i> Refresh</button>
+                            </div>
+                        </div>
+                    </div>
+                    ${bookingFilterToolbarHtml()}
+                </div>
             </div>
-            <div class="cards-grid">
-                ${cardsHtml}
-            </div>
-            ${paginationHtml}
+
+            ${bodyHtml}
         </div>
     `;
 }
@@ -4059,29 +4708,7 @@ function refreshBookingsList() {
     loadFilteredBookings(currentBookingFilter, currentBookingPage);
 }
 
-// Add new function to load filtered bookings by type
-async function loadFilteredBookings(status, page) {
-    const typeFilter = document.getElementById('typeFilterSelect') ? document.getElementById('typeFilterSelect').value : 'all';
-    currentBookingFilter = status;
-    currentBookingPage = page;
-    const dashboardBody = document.getElementById('dashboardBody');
-    if (!dashboardBody) return;
-    
-    dashboardBody.innerHTML = `<div class="content-card"><div class="loading-spinner"><i class="fas fa-spinner fa-spin fa-2x"></i><p>Loading bookings...</p></div></div>`;
-    
-    try {
-        const response = await fetch(`equipment_ajax.php?action=get_bookings&status=${status}&page=${page}&type=${typeFilter}`);
-        const data = await response.json();
-        if (data.success) {
-            dashboardBody.innerHTML = renderBookingsList(data.data);
-        } else {
-            dashboardBody.innerHTML = `<div class="content-card"><div class="empty-state"><i class="fas fa-exclamation-triangle"></i><p>Failed to load bookings</p></div></div>`;
-        }
-    } catch (error) {
-        console.error('Error:', error);
-        dashboardBody.innerHTML = `<div class="content-card"><div class="empty-state"><i class="fas fa-exclamation-circle"></i><p>Error loading data</p></div></div>`;
-    }
-}
+
 
 async function viewBookingDetails(id) {
     const modal = document.getElementById('bookingModal');
@@ -4154,39 +4781,38 @@ async function viewBookingDetails(id) {
                     </div>
                 `;
             } else if (booking.request_type === 'vehicle') {
+                const tripDate    = customData.trip_date || booking.trip_date || booking.start_datetime;
+                const pickupTime  = customData.pickup_time || '--:--';
+                const windowEnd   = customData.pickup_window_end || '';
+                const estHours    = customData.estimated_hours || '-';
+                const paxCount    = customData.passenger_count || 1;
+                const pickupLoc   = customData.pickup_location || '-';
+                const dropoffLoc  = customData.dropoff_location || '-';
+                const vehicleCap  = customData.vehicle_capacity || booking.vehicle_capacity || '-';
+                const specialReq  = customData.special_requests || booking.special_requests || '';
+                const isEmergency = customData.is_emergency || booking.is_emergency || 0;
+                const slotType    = customData.slot_type || booking.slot_type || 'open';
+
                 typeSpecificHtml = `
                     <div class="detail-section">
-                        <h4><i class="fas fa-truck"></i> Vehicle Details</h4>
-                        <div class="detail-row">
-                            <div class="detail-label">Vehicle Capacity:</div>
-                            <div class="detail-value">${customData.vehicle_capacity || '-'} persons</div>
-                        </div>
-                        <div class="detail-row">
-                            <div class="detail-label">Trip Date:</div>
-                            <div class="detail-value">${formatDate(booking.start_datetime)}</div>
-                        </div>
-                        <div class="detail-row">
-                            <div class="detail-label">Pickup Time:</div>
-                            <div class="detail-value">${customData.pickup_time || '--:--'}</div>
-                        </div>
-                        <div class="detail-row">
-                            <div class="detail-label">Pickup Location:</div>
-                            <div class="detail-value">${escapeHtml(customData.pickup_location || '-')}</div>
-                        </div>
-                        <div class="detail-row">
-                            <div class="detail-label">Dropoff Location:</div>
-                            <div class="detail-value">${escapeHtml(customData.dropoff_location || '-')}</div>
-                        </div>
-                        <div class="detail-row">
-                            <div class="detail-label">Passenger Count:</div>
-                            <div class="detail-value">${customData.passenger_count || 1}</div>
-                        </div>
-                        <div class="detail-row">
-                            <div class="detail-label">Estimated Hours:</div>
-                            <div class="detail-value">${customData.estimated_hours || '-'}</div>
-                        </div>
-                    </div>
-                `;
+                        <h4><i class="fas fa-truck"></i> Vehicle Trip Details</h4>
+                        ${isEmergency ? `
+                            <div style="background:#ffebee; border-left:4px solid #c62828;
+                                        padding:8px 12px; border-radius:8px; margin-bottom:10px;
+                                        color:#b71c1c; font-weight:700; font-size:0.85rem;">
+                                <i class="fas fa-exclamation-triangle"></i> EMERGENCY TRIP
+                            </div>` : ''}
+                        <div class="detail-row"><div class="detail-label">Vehicle:</div><div class="detail-value"><strong>${escapeHtml(booking.equipment_name)}</strong></div></div>
+                        <div class="detail-row"><div class="detail-label">Vehicle Capacity:</div><div class="detail-value">${vehicleCap} persons</div></div>
+                        <div class="detail-row"><div class="detail-label">Trip Date:</div><div class="detail-value"><strong>${formatDate(tripDate)}</strong></div></div>
+                        <div class="detail-row"><div class="detail-label">Pickup Time:</div><div class="detail-value"><strong>${pickupTime}</strong>${windowEnd ? `<span style="color:#666; font-size:0.85rem;"> (window until ${windowEnd})</span>` : ''}</div></div>
+                        <div class="detail-row"><div class="detail-label">Estimated Duration:</div><div class="detail-value">${estHours} hour(s)</div></div>
+                        <div class="detail-row"><div class="detail-label">Passenger Count:</div><div class="detail-value">${paxCount} person(s)</div></div>
+                        <div class="detail-row"><div class="detail-label">Pickup Location:</div><div class="detail-value">${escapeHtml(pickupLoc)}</div></div>
+                        <div class="detail-row"><div class="detail-label">Dropoff Location:</div><div class="detail-value">${escapeHtml(dropoffLoc)}</div></div>
+                        <div class="detail-row"><div class="detail-label">Slot Type:</div><div class="detail-value" style="text-transform:capitalize;">${escapeHtml(slotType)}</div></div>
+                        ${specialReq ? `<div class="detail-row"><div class="detail-label">Special Requests:</div><div class="detail-value">${escapeHtml(specialReq)}</div></div>` : ''}
+                    </div>`;
             }
             
             const getStatusActions = () => {
@@ -4298,12 +4924,13 @@ async function viewBookingDetails(id) {
 
 function getStatusBadgeHtml(status) {
     switch(status) {
-        case 'pending': return '<span class="badge-unverified"><i class="fas fa-clock"></i> Pending</span>';
-        case 'approved': return '<span class="badge-verified"><i class="fas fa-check-circle"></i> Approved</span>';
-        case 'borrowed': return '<span class="badge-borrowed"><i class="fas fa-hand-holding"></i> Borrowed</span>';
-        case 'returned': return '<span class="badge-returned"><i class="fas fa-undo-alt"></i> Returned</span>';
-        case 'rejected': return '<span class="status-unverified"><i class="fas fa-times-circle"></i> Rejected</span>';
-        default: return '<span class="badge-unverified">' + status + '</span>';
+        case 'pending':   return '<span class="badge-unverified"><i class="fas fa-clock"></i> Pending</span>';
+        case 'approved':  return '<span class="badge-verified"><i class="fas fa-check-circle"></i> Approved</span>';
+        case 'borrowed':  return '<span class="badge-borrowed"><i class="fas fa-hand-holding"></i> Borrowed</span>';
+        case 'returned':  return '<span class="badge-returned"><i class="fas fa-undo-alt"></i> Returned</span>';
+        case 'rejected':  return '<span class="status-unverified"><i class="fas fa-times-circle"></i> Rejected</span>';
+        case 'cancelled': return '<span class="badge-cancelled"><i class="fas fa-ban"></i> Cancelled</span>';
+        default:          return '<span class="badge-unverified">' + status + '</span>';
     }
 }
 

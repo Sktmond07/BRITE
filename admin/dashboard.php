@@ -281,6 +281,260 @@ header("Cache-Control: no-cache, no-store, must-revalidate");
 header("Pragma: no-cache");
 header("Expires: 0");
 
+// ═══════════════════════════════════════════════════════════
+// ANNOUNCEMENTS — setup
+// ═══════════════════════════════════════════════════════════
+define('ANN_UPLOAD_DIR', __DIR__ . '/../uploads/announcements/');
+define('ANN_UPLOAD_URL', 'uploads/announcements/');
+
+function annEnsureUploadDir() {
+    if (!is_dir(ANN_UPLOAD_DIR)) @mkdir(ANN_UPLOAD_DIR, 0755, true);
+}
+
+function annFormatRow($r) {
+    $now = time();
+    $expTs = !empty($r['expires_at']) ? strtotime($r['expires_at']) : null;
+    return [
+        'id'           => (int)$r['id'],
+        'title'        => $r['title'],
+        'body'         => $r['body'],
+        'category'     => $r['category'],
+        'image_url'    => $r['image_path'] ? ANN_UPLOAD_URL . $r['image_path'] : null,
+        'is_pinned'    => (int)$r['is_pinned'],
+        'is_active'    => (int)$r['is_active'],
+        'expires_at'   => $r['expires_at'],
+        'event_date'   => $r['event_date'] ?? null,
+        'event_time'   => $r['event_time'] ?? null,
+        'is_expired'   => $expTs !== null && $expTs < $now,
+        'auto_deactivated' => (int)($r['auto_deactivated'] ?? 0),
+        'created_by'   => (int)$r['created_by'],
+        'created_at'   => $r['created_at'],
+        'updated_at'   => $r['updated_at'],
+        'author'       => $r['author_name'] ?? null,
+    ];
+}
+
+/**
+ * Auto-deactivate any announcements whose expires_at has passed.
+ * Returns the number of rows flipped.
+ */
+function annAutoDeactivateExpired($conn) {
+    $stmt = mysqli_prepare($conn,
+        "UPDATE announcements
+         SET is_active = 0, auto_deactivated = 1
+         WHERE is_active = 1
+           AND expires_at IS NOT NULL
+           AND expires_at < NOW()");
+    mysqli_stmt_execute($stmt);
+    $affected = mysqli_stmt_affected_rows($stmt);
+    mysqli_stmt_close($stmt);
+    return $affected;
+}
+
+$admin_id = (int)$_SESSION['user_id'];
+
+// ═══════════════════════════════════════════════════════════
+// ANNOUNCEMENTS — AJAX (all inside this file)
+// ═══════════════════════════════════════════════════════════
+if (isset($_REQUEST['ann_action'])) {
+    header('Content-Type: application/json');
+    $act = $_REQUEST['ann_action'];
+
+    // ── Auto-deactivate expired first (runs on every list/get) ──
+    $autoDeactivated = annAutoDeactivateExpired($conn);
+
+    // ── LIST ──
+    if ($act === 'list') {
+        $activeOnly = isset($_GET['active_only']) && $_GET['active_only'] === '1';
+        $sql = "SELECT a.*, ad.full_name AS author_name
+                FROM announcements a
+                LEFT JOIN admin ad ON ad.id = a.created_by
+                WHERE 1=1";
+        if ($activeOnly) $sql .= " AND a.is_active = 1";
+        $sql .= " ORDER BY a.is_pinned DESC, a.created_at DESC LIMIT 100";
+        $res = mysqli_query($conn, $sql);
+        $out = [];
+        while ($r = mysqli_fetch_assoc($res)) $out[] = annFormatRow($r);
+        echo json_encode([
+            'success' => true,
+            'data'    => $out,
+            'auto_deactivated_count' => $autoDeactivated,
+        ]);
+        exit;
+    }
+
+    // ── GET ONE ──
+    if ($act === 'get') {
+        $id = (int)($_GET['id'] ?? 0);
+        $stmt = mysqli_prepare($conn,
+            "SELECT a.*, ad.full_name AS author_name
+             FROM announcements a
+             LEFT JOIN admin ad ON ad.id = a.created_by
+             WHERE a.id = ?");
+        mysqli_stmt_bind_param($stmt, "i", $id);
+        mysqli_stmt_execute($stmt);
+        $r = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
+        mysqli_stmt_close($stmt);
+        if (!$r) { echo json_encode(['success'=>false,'message'=>'Not found']); exit; }
+        echo json_encode(['success'=>true,'data'=>annFormatRow($r)]);
+        exit;
+    }
+
+    // ── SAVE (create or update) ──
+    if ($act === 'save') {
+        $id         = (int)($_POST['id'] ?? 0);
+        $title      = trim($_POST['title'] ?? '');
+        $body       = trim($_POST['body'] ?? '');
+        $category   = $_POST['category'] ?? 'general';
+        $is_pinned  = (isset($_POST['is_pinned']) && $_POST['is_pinned'] === '1') ? 1 : 0;
+        $is_active  = (isset($_POST['is_active']) && $_POST['is_active'] === '1') ? 1 : 0;
+        $expires_at = !empty($_POST['expires_at']) ? trim($_POST['expires_at']) : null;
+
+        // Optional event schedule
+        $event_date = !empty($_POST['event_date']) ? trim($_POST['event_date']) : null;
+        $event_time = !empty($_POST['event_time']) ? trim($_POST['event_time']) : null;
+        if ($event_date !== null && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $event_date)) $event_date = null;
+        if ($event_time !== null && !preg_match('/^\d{2}:\d{2}(:\d{2})?$/', $event_time)) $event_time = null;
+        if ($event_time !== null && strlen($event_time) === 5) $event_time .= ':00';
+
+        $allowed = ['general','urgent','event','advisory','health','safety'];
+        if (!in_array($category, $allowed)) $category = 'general';
+
+        if ($title === '' || $body === '') {
+            echo json_encode(['success'=>false,'message'=>'Title and message are required.']); exit;
+        }
+        if (mb_strlen($title) > 255) $title = mb_substr($title, 0, 255);
+
+        // Validate expiry
+        if ($expires_at !== null) {
+            // Accept 'YYYY-MM-DDTHH:MM' or 'YYYY-MM-DD HH:MM:SS' or 'YYYY-MM-DD'
+            $expires_at = str_replace('T', ' ', $expires_at);
+            if (strlen($expires_at) === 10) $expires_at .= ' 23:59:59';
+            elseif (strlen($expires_at) === 16) $expires_at .= ':00';
+            $ts = strtotime($expires_at);
+            if ($ts === false) {
+                echo json_encode(['success'=>false,'message'=>'Invalid expiry date.']); exit;
+            }
+            $expires_at = date('Y-m-d H:i:s', $ts);
+        }
+
+        // ── IMAGE UPLOAD ──
+        $imageName = null;
+        if (!empty($_FILES['image']['name']) && $_FILES['image']['error'] === UPLOAD_ERR_OK) {
+            annEnsureUploadDir();
+            $ext = strtolower(pathinfo($_FILES['image']['name'], PATHINFO_EXTENSION));
+            if (!in_array($ext, ['jpg','jpeg','png','gif','webp'])) {
+                echo json_encode(['success'=>false,'message'=>'Only JPG, PNG, GIF, WEBP allowed.']); exit;
+            }
+            if ($_FILES['image']['size'] > 5 * 1024 * 1024) {
+                echo json_encode(['success'=>false,'message'=>'Image too large (max 5 MB).']); exit;
+            }
+            $imageName = 'ann_' . time() . '_' . bin2hex(random_bytes(4)) . '.' . $ext;
+            if (!move_uploaded_file($_FILES['image']['tmp_name'], ANN_UPLOAD_DIR . $imageName)) {
+                echo json_encode(['success'=>false,'message'=>'Failed to save image.']); exit;
+            }
+        }
+
+        // ── UPDATE ──
+        if ($id > 0) {
+            if ($imageName) {
+                $old = mysqli_fetch_assoc(mysqli_query($conn,
+                    "SELECT image_path FROM announcements WHERE id = $id"));
+                if ($old && $old['image_path'] && file_exists(ANN_UPLOAD_DIR . $old['image_path'])) {
+                    @unlink(ANN_UPLOAD_DIR . $old['image_path']);
+                }
+                $stmt = mysqli_prepare($conn,
+                    "UPDATE announcements
+                     SET title=?, body=?, category=?, image_path=?,
+                         is_pinned=?, is_active=?, expires_at=?,
+                         event_date=?, event_time=?, auto_deactivated=0
+                     WHERE id=?");
+                mysqli_stmt_bind_param($stmt, "ssssisissi",
+                    $title, $body, $category, $imageName,
+                    $is_pinned, $is_active, $expires_at,
+                    $event_date, $event_time, $id);
+            } else {
+                $stmt = mysqli_prepare($conn,
+                    "UPDATE announcements
+                     SET title=?, body=?, category=?,
+                         is_pinned=?, is_active=?, expires_at=?,
+                         event_date=?, event_time=?, auto_deactivated=0
+                     WHERE id=?");
+                mysqli_stmt_bind_param($stmt, "sssisissi",
+                    $title, $body, $category,
+                    $is_pinned, $is_active, $expires_at,
+                    $event_date, $event_time, $id);
+            }
+            mysqli_stmt_execute($stmt);
+            mysqli_stmt_close($stmt);
+            echo json_encode(['success'=>true,'id'=>$id,'message'=>'Announcement updated.']);
+            exit;
+        }
+
+        // ── CREATE ──
+        $stmt = mysqli_prepare($conn,
+            "INSERT INTO announcements
+                (title, body, category, image_path, is_pinned, is_active, expires_at,
+                 event_date, event_time, created_by)
+             VALUES (?,?,?,?,?,?,?,?,?,?)");
+        mysqli_stmt_bind_param($stmt, "ssssisissi",
+            $title, $body, $category, $imageName,
+            $is_pinned, $is_active, $expires_at,
+            $event_date, $event_time, $admin_id);
+        mysqli_stmt_execute($stmt);
+        $newId = mysqli_insert_id($conn);
+        mysqli_stmt_close($stmt);
+        echo json_encode(['success'=>true,'id'=>$newId,'message'=>'Announcement created.']);
+        exit;
+    }
+
+    // ── DELETE ──
+    if ($act === 'delete') {
+        $id = (int)($_POST['id'] ?? 0);
+        $old = mysqli_fetch_assoc(mysqli_query($conn,
+            "SELECT image_path FROM announcements WHERE id = $id"));
+        if ($old && $old['image_path'] && file_exists(ANN_UPLOAD_DIR . $old['image_path'])) {
+            @unlink(ANN_UPLOAD_DIR . $old['image_path']);
+        }
+        $stmt = mysqli_prepare($conn, "DELETE FROM announcements WHERE id = ?");
+        mysqli_stmt_bind_param($stmt, "i", $id);
+        mysqli_stmt_execute($stmt);
+        mysqli_stmt_close($stmt);
+        echo json_encode(['success'=>true]);
+        exit;
+    }
+
+    // ── TOGGLE PIN / ACTIVE ──
+    if ($act === 'toggle') {
+        $id    = (int)($_POST['id'] ?? 0);
+        $field = $_POST['field'] ?? '';
+        if (!in_array($field, ['is_pinned','is_active'])) {
+            echo json_encode(['success'=>false,'message'=>'Invalid field']); exit;
+        }
+        // When reactivating, also clear the auto_deactivated flag
+        $extra = ($field === 'is_active') ? ", auto_deactivated = 0" : "";
+        $stmt = mysqli_prepare($conn,
+            "UPDATE announcements SET {$field} = 1 - {$field}{$extra} WHERE id = ?");
+        mysqli_stmt_bind_param($stmt, "i", $id);
+        mysqli_stmt_execute($stmt);
+        mysqli_stmt_close($stmt);
+        echo json_encode(['success'=>true]);
+        exit;
+    }
+
+    // ── FORCE EXPIRE CHECK (manual trigger) ──
+    if ($act === 'check_expired') {
+        echo json_encode([
+            'success' => true,
+            'deactivated' => $autoDeactivated,
+        ]);
+        exit;
+    }
+
+    echo json_encode(['success'=>false,'message'=>'Unknown action']);
+    exit;
+}
+
 // ============ FUNCTION DEFINITIONS ============
 
 function getVerifiedResidents($conn) {
@@ -402,6 +656,112 @@ $totalPages = $documentRequestsResult['totalPages'];
 $currentPage = $documentRequestsResult['currentPage'];
 $totalRecords = $documentRequestsResult['totalRecords'];
 $pendingCount = getPendingCount($conn);
+
+// ═══════════════════════════════════════════════════════════
+// DASHBOARD ANALYTICS (charts + calendar + KPI data)
+// ═══════════════════════════════════════════════════════════
+function dxRows($conn, $sql) {
+    try {
+        $r = mysqli_query($conn, $sql);
+        if (!$r) return [];
+        $out = [];
+        while ($row = mysqli_fetch_assoc($r)) $out[] = $row;
+        return $out;
+    } catch (Throwable $e) {
+        return [];
+    }
+}
+function dxCount($conn, $sql) {
+    $r = dxRows($conn, $sql);
+    return $r ? (int)array_values($r[0])[0] : 0;
+}
+
+$dxMonths = [];
+for ($i = 5; $i >= 0; $i--) {
+    $d = new DateTime('first day of this month');
+    $d->modify("-$i month");
+    $dxMonths[$d->format('Y-m')] = $d->format('M');
+}
+$dxDocMonthly  = array_fill_keys(array_keys($dxMonths), 0);
+$dxCompMonthly = array_fill_keys(array_keys($dxMonths), 0);
+$dxResMonthly  = array_fill_keys(array_keys($dxMonths), 0);
+
+foreach (dxRows($conn, "SELECT DATE_FORMAT(request_date,'%Y-%m') ym, COUNT(*) c FROM document_requests
+                        WHERE request_date >= DATE_FORMAT(CURDATE() - INTERVAL 5 MONTH,'%Y-%m-01') GROUP BY ym") as $row) {
+    if (isset($dxDocMonthly[$row['ym']])) $dxDocMonthly[$row['ym']] = (int)$row['c'];
+}
+foreach (dxRows($conn, "SELECT DATE_FORMAT(created_at,'%Y-%m') ym, COUNT(*) c FROM complaints
+                        WHERE created_at >= DATE_FORMAT(CURDATE() - INTERVAL 5 MONTH,'%Y-%m-01') GROUP BY ym") as $row) {
+    if (isset($dxCompMonthly[$row['ym']])) $dxCompMonthly[$row['ym']] = (int)$row['c'];
+}
+foreach (dxRows($conn, "SELECT DATE_FORMAT(created_at,'%Y-%m') ym, COUNT(*) c FROM resident
+                        WHERE created_at >= DATE_FORMAT(CURDATE() - INTERVAL 5 MONTH,'%Y-%m-01') GROUP BY ym") as $row) {
+    if (isset($dxResMonthly[$row['ym']])) $dxResMonthly[$row['ym']] = (int)$row['c'];
+}
+
+$dxDocStatus = ['pending' => 0, 'approved' => 0, 'unclaimed' => 0, 'claimed' => 0, 'rejected' => 0];
+foreach (dxRows($conn, "SELECT status, COUNT(*) c FROM document_requests GROUP BY status") as $row) {
+    if (isset($dxDocStatus[$row['status']])) $dxDocStatus[$row['status']] = (int)$row['c'];
+}
+
+$dxComplaintStatus = [];
+foreach (dxRows($conn, "SELECT status, COUNT(*) c FROM complaints GROUP BY status") as $row) {
+    $dxComplaintStatus[$row['status']] = (int)$row['c'];
+}
+
+$dxTopDocs = [];
+foreach (dxRows($conn, "SELECT document_type, COUNT(*) c FROM document_requests
+                        GROUP BY document_type ORDER BY c DESC LIMIT 6") as $row) {
+    $dxTopDocs[] = ['name' => $row['document_type'], 'count' => (int)$row['c']];
+}
+
+$dxEvents = [];
+foreach (dxRows($conn, "SELECT id, reference_number, title, status, hearing_date, hearing_time
+                        FROM complaints
+                        WHERE hearing_date IS NOT NULL
+                          AND hearing_date BETWEEN CURDATE() - INTERVAL 90 DAY AND CURDATE() + INTERVAL 270 DAY
+                          AND status <> 'dismissed'
+                        ORDER BY hearing_date ASC LIMIT 400") as $row) {
+    $dxEvents[] = [
+        'kind' => 'hearing', 'id' => (int)$row['id'],
+        'date' => substr($row['hearing_date'], 0, 10), 'time' => $row['hearing_time'],
+        'title' => $row['title'], 'sub' => $row['reference_number'], 'status' => $row['status'],
+    ];
+}
+foreach (dxRows($conn, "SELECT dr.id, dr.document_type, dr.status, dr.pickup_date, dr.pickup_time,
+                               r.first_name, r.last_name
+                        FROM document_requests dr
+                        JOIN resident r ON dr.resident_id = r.id
+                        WHERE dr.pickup_date IS NOT NULL
+                          AND dr.pickup_date BETWEEN CURDATE() - INTERVAL 90 DAY AND CURDATE() + INTERVAL 270 DAY
+                          AND dr.status IN ('approved','unclaimed','claimed')
+                        ORDER BY dr.pickup_date ASC LIMIT 400") as $row) {
+    $dxEvents[] = [
+        'kind' => 'pickup', 'id' => (int)$row['id'],
+        'date' => substr($row['pickup_date'], 0, 10), 'time' => $row['pickup_time'],
+        'title' => $row['document_type'], 'sub' => trim($row['first_name'] . ' ' . $row['last_name']),
+        'status' => $row['status'],
+    ];
+}
+
+$dxData = [
+    'months'           => array_values($dxMonths),
+    'docMonthly'       => array_values($dxDocMonthly),
+    'complaintMonthly' => array_values($dxCompMonthly),
+    'residentMonthly'  => array_values($dxResMonthly),
+    'docStatus'        => $dxDocStatus,
+    'complaintStatus'  => $dxComplaintStatus,
+    'topDocs'          => $dxTopDocs,
+    'events'           => $dxEvents,
+    'kpi' => [
+        'pendingRequests' => $dxDocStatus['pending'],
+        'todayRequests'   => dxCount($conn, "SELECT COUNT(*) FROM document_requests WHERE DATE(request_date) = CURDATE()"),
+        'casesToReview'   => (int)($dxComplaintStatus['pending_review'] ?? 0),
+        'escalated'       => (int)($dxComplaintStatus['escalated'] ?? 0),
+    ],
+    'equip' => null, // filled in by JS from equipment_ajax.php
+];
+$dxJson = json_encode($dxData, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_PARTIAL_OUTPUT_ON_ERROR);
 ?>
 
 <!DOCTYPE html>
@@ -416,6 +776,726 @@ $pendingCount = getPendingCount($conn);
   </style>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.5.13/cropper.min.css">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.5.13/cropper.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <style>
+/* ===== Dashboard widgets + announcements (same look as Secretary dashboard) ===== */
+/* ACTIVITY GRID */
+.recent-activity-grid {
+    display: grid; grid-template-columns: 1fr; gap: 18px;
+}
+@media (min-width: 900px) {
+    .recent-activity-grid { grid-template-columns: 1.5fr 1fr; }
+}
+.activity-card {
+    background: #fff; border-radius: 16px;
+    border: 1px solid #e2efe8;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+    overflow: hidden;
+}
+.activity-header {
+    padding: 16px 20px;
+    display: flex; justify-content: space-between; align-items: center;
+    border-bottom: 1px solid #f0f4f2;
+}
+.activity-header h4 {
+    margin: 0; font-size: 0.92rem;
+    color: #1a472a;
+    display: flex; align-items: center; gap: 8px;
+}
+.activity-header h4 i { color: #2E7D32; }
+.view-all-btn {
+    background: none; border: none; color: #2E7D32;
+    font-size: 0.78rem; font-weight: 700; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 6px 10px; border-radius: 8px;
+    transition: all 0.15s;
+}
+.view-all-btn:hover { background: #e8f5e9; }
+.activity-list { padding: 10px 14px; max-height: 340px; overflow-y: auto; }
+.activity-item {
+    display: flex; justify-content: space-between;
+    align-items: center; gap: 12px;
+    padding: 12px 14px; border-radius: 10px;
+    cursor: pointer; transition: all 0.15s;
+}
+.activity-item:hover { background: #f1f8e9; }
+.activity-info { flex: 1; min-width: 0; }
+.activity-title {
+    font-weight: 700; font-size: 0.85rem;
+    color: #1a2b22;
+    overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.activity-detail {
+    font-size: 0.72rem; color: #7a8a82; margin-top: 3px;
+}
+.activity-status {
+    padding: 3px 10px; border-radius: 12px;
+    font-size: 0.65rem; font-weight: 800;
+    text-transform: uppercase; letter-spacing: 0.4px;
+}
+.activity-status.status-pending   { background: #fff3e0; color: #e65100; }
+.activity-status.status-approved  { background: #e8f5e9; color: #2e7d32; }
+.activity-status.status-unclaimed { background: #fff3e0; color: #ef6c00; }
+.activity-status.status-claimed   { background: #e3f2fd; color: #1565c0; }
+.activity-status.status-rejected  { background: #ffebee; color: #c62828; }
+/* ═══════════════════════════════════════════════════════════
+   ANNOUNCEMENTS — image background cards
+   ═══════════════════════════════════════════════════════════ */
+.annc-section { margin-bottom: 6px; }
+
+.annc-section-head {
+    display: flex; justify-content: space-between;
+    align-items: center; margin-bottom: 14px;
+}
+.annc-section-title {
+    font-size: 1rem; font-weight: 800; color: #1a472a;
+    display: flex; align-items: center; gap: 10px;
+}
+.annc-section-title i { color: #e65100; }
+.annc-add-btn {
+    display: inline-flex; align-items: center; gap: 7px;
+    padding: 9px 18px; border: none; border-radius: 22px;
+    background: linear-gradient(135deg, #2E7D32, #43a047);
+    color: #fff; font-size: 0.82rem; font-weight: 700;
+    cursor: pointer;
+    box-shadow: 0 4px 14px rgba(46,125,50,0.3);
+    transition: all 0.15s;
+}
+.annc-add-btn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 18px rgba(46,125,50,0.45);
+}
+
+.annc-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    gap: 18px;
+}
+
+.annc-card {
+    position: relative;
+    min-height: 260px;
+    border-radius: 18px;
+    overflow: hidden;
+    background: #1a1a1a;
+    cursor: pointer;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.12);
+    transition: all 0.28s ease;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+}
+.annc-card:hover {
+    transform: translateY(-5px);
+    box-shadow: 0 16px 40px rgba(0,0,0,0.25);
+}
+.annc-card::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+        180deg,
+        rgba(0,0,0,0.10) 0%,
+        rgba(0,0,0,0.35) 35%,
+        rgba(0,0,0,0.85) 100%
+    );
+    z-index: 1;
+    transition: background 0.25s;
+}
+.annc-card:hover::before {
+    background: linear-gradient(
+        180deg,
+        rgba(0,0,0,0.20) 0%,
+        rgba(0,0,0,0.50) 35%,
+        rgba(0,0,0,0.92) 100%
+    );
+}
+.annc-card-image {
+    position: absolute; inset: 0; z-index: 0;
+    background-size: cover;
+    background-position: center;
+    background-repeat: no-repeat;
+    transition: transform 0.5s ease;
+}
+.annc-card:hover .annc-card-image { transform: scale(1.06); }
+.annc-card-image.fallback {
+    background: linear-gradient(135deg, #1b5e20 0%, #2E7D32 40%, #66bb6a 100%);
+    display: flex; align-items: center; justify-content: center;
+}
+.annc-card-image.fallback::after {
+    content: '\f0a1';
+    font-family: 'Font Awesome 6 Free';
+    font-weight: 900;
+    font-size: 5rem;
+    color: rgba(255,255,255,0.2);
+}
+
+.annc-card-top {
+    position: absolute; top: 14px; left: 14px; right: 14px;
+    display: flex; gap: 8px; align-items: flex-start;
+    z-index: 3; flex-wrap: wrap;
+}
+.annc-badge {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 5px 12px; border-radius: 14px;
+    font-size: 0.68rem; font-weight: 800;
+    text-transform: uppercase; letter-spacing: 0.5px;
+    backdrop-filter: blur(10px);
+    background: rgba(255,255,255,0.25);
+    color: #fff;
+    border: 1px solid rgba(255,255,255,0.3);
+}
+.annc-badge.urgent   { background: #e53935; border-color: #e53935; }
+.annc-badge.event    { background: #7b1fa2; border-color: #7b1fa2; }
+.annc-badge.advisory { background: #f57c00; border-color: #f57c00; }
+.annc-badge.health   { background: #00897b; border-color: #00897b; }
+.annc-badge.safety   { background: #c62828; border-color: #c62828; }
+.annc-badge.pinned   { background: #ffb300; color: #4a2f00; border-color: #ffb300; }
+.annc-badge.draft    { background: #546e7a; border-color: #546e7a; }
+.annc-badge.expiry   {
+    background: rgba(0,0,0,0.55);
+    border-color: rgba(255,255,255,0.35);
+    color: #fff;
+    font-weight: 700;
+}
+.annc-badge.expiry.soon   { background: #f57c00; border-color: #f57c00; }
+.annc-badge.expiry.urgent { background: #e53935; border-color: #e53935; }
+
+.annc-card-actions {
+    position: absolute; top: 14px; right: 14px;
+    display: flex; gap: 6px; z-index: 4;
+    opacity: 0; transform: translateY(-4px);
+    transition: all 0.2s;
+}
+.annc-card:hover .annc-card-actions {
+    opacity: 1; transform: translateY(0);
+}
+.annc-icon-btn {
+    width: 32px; height: 32px; border-radius: 50%;
+    border: 1px solid rgba(255,255,255,0.3);
+    background: rgba(0,0,0,0.45); color: #fff;
+    cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.78rem;
+    backdrop-filter: blur(8px);
+    transition: all 0.15s;
+}
+.annc-icon-btn:hover {
+    background: rgba(255,255,255,0.95);
+    color: #1a1a1a;
+    transform: scale(1.08);
+}
+.annc-icon-btn.danger:hover { background: #c62828; color: #fff; }
+
+.annc-card-body {
+    position: relative; z-index: 2;
+    padding: 22px 20px 20px;
+    color: #fff;
+}
+.annc-card-title {
+    font-size: 1.18rem; font-weight: 800;
+    line-height: 1.3; margin: 0 0 8px;
+    text-shadow: 0 2px 8px rgba(0,0,0,0.5);
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+.annc-card-text {
+    font-size: 0.85rem; line-height: 1.55;
+    color: rgba(255,255,255,0.92);
+    margin: 0;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    text-shadow: 0 1px 4px rgba(0,0,0,0.4);
+}
+.annc-card-meta {
+    display: flex; gap: 14px;
+    font-size: 0.72rem;
+    color: rgba(255,255,255,0.85);
+    flex-wrap: wrap; margin-top: 12px;
+}
+.annc-card-meta span {
+    display: inline-flex; align-items: center; gap: 5px;
+}
+
+.annc-empty {
+    text-align: center;
+    padding: 50px 20px;
+    background: linear-gradient(135deg, #f1f8e9, #e8f5e9);
+    border: 2px dashed #a5d6a7;
+    border-radius: 18px;
+    color: #4a5f56;
+}
+.annc-empty i {
+    font-size: 3rem; color: #a5d6a7;
+    margin-bottom: 14px; display: block;
+}
+.annc-empty h4 { margin: 0 0 6px; color: #1a472a; font-size: 1rem; }
+.annc-empty p  { margin: 0; font-size: 0.85rem; }
+
+@media (max-width: 640px) {
+    .annc-grid { grid-template-columns: 1fr; }
+    .annc-card { min-height: 220px; }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   ANNOUNCEMENT MODAL
+   ═══════════════════════════════════════════════════════════ */
+.annc-modal { text-align: left; font-family: 'Segoe UI', Roboto, sans-serif; }
+.annc-modal-header {
+    background: linear-gradient(135deg, #1b5e20, #2E7D32 55%, #43a047);
+    color: #fff;
+    padding: 20px 26px;
+    display: flex; align-items: center; gap: 14px;
+    border-radius: 14px 14px 0 0;
+}
+.annc-modal-header i {
+    font-size: 1.5rem;
+    background: rgba(255,255,255,0.2);
+    width: 46px; height: 46px; border-radius: 12px;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+}
+.annc-modal-header h3 { margin: 0; font-size: 1.1rem; font-weight: 800; }
+.annc-modal-header p  { margin: 3px 0 0; font-size: 0.8rem; opacity: 0.9; }
+
+.annc-modal-body {
+    padding: 22px 26px;
+    background: #fff;
+    max-height: 72vh; overflow-y: auto;
+}
+.annc-field { margin-bottom: 16px; }
+.annc-field label {
+    display: block; font-weight: 700; font-size: 0.82rem;
+    color: #1a472a; margin-bottom: 6px;
+}
+.annc-field label .req { color: #c62828; }
+.annc-field label .opt { color: #999; font-weight: 400; font-size: 0.75rem; }
+.annc-input, .annc-textarea, .annc-select {
+    width: 100%; padding: 11px 13px;
+    border: 1.5px solid #cfd8dc; border-radius: 9px;
+    font-size: 0.9rem; font-family: inherit;
+    box-sizing: border-box; background: #fff;
+}
+.annc-input:focus, .annc-textarea:focus, .annc-select:focus {
+    outline: none; border-color: #2E7D32;
+    box-shadow: 0 0 0 3px rgba(46,125,50,0.12);
+}
+.annc-textarea { resize: vertical; min-height: 90px; }
+.annc-row-2 {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 14px;
+}
+@media (max-width: 600px) { .annc-row-2 { grid-template-columns: 1fr; } }
+
+.annc-img-drop {
+    border: 2px dashed #a5d6a7;
+    border-radius: 12px; padding: 24px;
+    text-align: center; cursor: pointer;
+    background: #f8faf8;
+    transition: all 0.15s;
+    position: relative; overflow: hidden;
+}
+.annc-img-drop:hover { border-color: #2E7D32; background: #f1f8e9; }
+.annc-img-drop.has-image {
+    padding: 0;
+    border-style: solid;
+    border-color: #2E7D32;
+    background: #000;
+}
+.annc-img-drop-icon {
+    font-size: 2.2rem; color: #a5d6a7;
+    margin-bottom: 8px;
+}
+.annc-img-drop-title { font-weight: 700; color: #1a472a; margin-bottom: 4px; }
+.annc-img-drop-sub   { font-size: 0.78rem; color: #7a8a82; }
+.annc-img-preview {
+    display: none;
+    position: relative;
+    width: 100%; aspect-ratio: 16 / 9;
+    background-size: cover;
+    background-position: center;
+    background-repeat: no-repeat;
+}
+.annc-img-drop.has-image .annc-img-preview { display: block; }
+.annc-img-drop.has-image .annc-img-placeholder { display: none; }
+.annc-img-remove {
+    position: absolute; top: 10px; right: 10px;
+    width: 34px; height: 34px; border-radius: 50%;
+    background: rgba(0,0,0,0.6); color: #fff;
+    border: none; cursor: pointer;
+    font-size: 0.9rem;
+    display: flex; align-items: center; justify-content: center;
+}
+.annc-img-remove:hover { background: #c62828; }
+
+.annc-toggle-row {
+    display: flex; gap: 24px; flex-wrap: wrap;
+    padding: 14px 16px;
+    background: #f8faf8; border-radius: 10px;
+    border: 1px solid #e2efe8;
+}
+.annc-toggle {
+    display: flex; align-items: center; gap: 10px;
+    cursor: pointer; font-size: 0.85rem;
+    font-weight: 600; color: #1a2b22;
+}
+.annc-switch {
+    position: relative;
+    width: 42px; height: 24px;
+    background: #cfd8dc; border-radius: 24px;
+    transition: background 0.2s; flex-shrink: 0;
+}
+.annc-switch::after {
+    content: ''; position: absolute;
+    top: 3px; left: 3px;
+    width: 18px; height: 18px;
+    background: #fff; border-radius: 50%;
+    transition: transform 0.2s;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+}
+.annc-toggle input { display: none; }
+.annc-toggle input:checked ~ .annc-switch { background: #2E7D32; }
+.annc-toggle input:checked ~ .annc-switch::after { transform: translateX(18px); }
+
+.annc-modal-footer {
+    display: flex; justify-content: space-between;
+    gap: 10px; padding: 16px 26px;
+    background: #f8faf8;
+    border-top: 1px solid #e2efe8;
+    border-radius: 0 0 14px 14px;
+    flex-wrap: wrap;
+}
+.annc-modal-footer .right { display: flex; gap: 10px; margin-left: auto; }
+.annc-btn {
+    padding: 11px 22px; border-radius: 9px;
+    border: none; cursor: pointer;
+    font-size: 0.88rem; font-weight: 700;
+    display: inline-flex; align-items: center; gap: 8px;
+    transition: all 0.15s;
+}
+.annc-btn:hover { transform: translateY(-1px); }
+.annc-btn.primary {
+    background: linear-gradient(135deg, #2E7D32, #43a047);
+    color: #fff;
+    box-shadow: 0 3px 10px rgba(46,125,50,0.3);
+}
+.annc-btn.danger { background: #c62828; color: #fff; }
+.annc-btn.ghost {
+    background: #fff; color: #555;
+    border: 1.5px solid #cfd8dc;
+}
+.annc-btn.ghost:hover { background: #f0f0f0; }
+
+/* Modal popup container for announcements */
+.annc-popup {
+    border-radius: 16px !important;
+    padding: 0 !important;
+    overflow: hidden;
+    max-width: 640px !important;
+    width: 95vw !important;
+}
+.annc-popup .swal2-html-container { margin: 0 !important; padding: 0 !important; }
+.annc-popup .swal2-actions { display: none !important; }
+.annc-popup .swal2-title { display: none !important; }
+/* ═══════════════════════════════════════════════════════════
+   ANNOUNCEMENT CAROUSEL
+   ═══════════════════════════════════════════════════════════ */
+.annc-carousel {
+    position: relative;
+    width: 100%;
+    overflow: hidden;
+    border-radius: 18px;
+}
+
+.annc-carousel-track {
+    display: flex;
+    width: 100%;
+    transition: transform 0.5s cubic-bezier(0.65, 0, 0.35, 1);
+    will-change: transform;
+}
+
+.annc-carousel-slide {
+    flex: 0 0 100%;
+    min-width: 0;
+    padding: 0;                     /* slide has no padding; card handles it */
+}
+
+.annc-carousel-slide .annc-card {
+    width: 100%;
+    min-height: 420px;              /* tall, matches stats column */
+    border-radius: 18px;
+    margin: 0;
+}
+
+/* Nav arrows */
+.annc-nav-btn {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, 0.55);
+    color: #fff;
+    border: 1px solid rgba(255,255,255,0.25);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1rem;
+    z-index: 10;
+    backdrop-filter: blur(8px);
+    transition: all 0.15s;
+    opacity: 0.85;
+}
+.annc-nav-btn:hover {
+    background: rgba(0, 0, 0, 0.85);
+    opacity: 1;
+    transform: translateY(-50%) scale(1.06);
+}
+.annc-nav-btn.prev { left: 14px; }
+.annc-nav-btn.next { right: 14px; }
+
+/* Dots */
+.annc-dots {
+    position: absolute;
+    bottom: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    gap: 8px;
+    padding: 8px 14px;
+    background: rgba(0, 0, 0, 0.45);
+    border-radius: 20px;
+    backdrop-filter: blur(8px);
+    z-index: 10;
+}
+.annc-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.4);
+    border: none;
+    cursor: pointer;
+    transition: all 0.25s ease;
+    padding: 0;
+}
+.annc-dot:hover {
+    background: rgba(255,255,255,0.75);
+}
+.annc-dot.active {
+    background: #fff;
+    width: 24px;
+    border-radius: 4px;
+}
+
+/* Left column: fill the space with a single, tall card */
+.dash-left .annc-grid {
+    grid-template-columns: 1fr;
+    gap: 18px;
+}
+.dash-left .annc-card {
+    min-height: 420px;
+}
+
+@media (max-width: 900px) {
+    .annc-carousel-slide .annc-card { min-height: 320px; }
+    .annc-nav-btn { width: 38px; height: 38px; font-size: 0.9rem; }
+    .annc-nav-btn.prev { left: 8px; }
+    .annc-nav-btn.next { right: 8px; }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   ANALYTICS DASHBOARD  (dx-*)
+   ═══════════════════════════════════════════════════════════ */
+.dx { display: flex; flex-direction: column; gap: 14px; }
+
+/* top bar */
+.dx-top {
+    display: flex; justify-content: space-between; align-items: center;
+    gap: 14px; flex-wrap: wrap;
+    background: linear-gradient(135deg, #1b5e20, #2E7D32 55%, #43a047);
+    color: #fff; border-radius: 16px; padding: 14px 20px;
+    box-shadow: 0 8px 22px rgba(46,125,50,0.22);
+    position: relative; overflow: hidden;
+}
+.dx-top::after {
+    content: ''; position: absolute; right: -60px; top: -90px;
+    width: 220px; height: 220px; border-radius: 50%;
+    background: rgba(255,255,255,0.08); pointer-events: none;
+}
+.dx-top-text { position: relative; z-index: 1; min-width: 0; }
+.dx-top-text h2 { margin: 0; font-size: 1.15rem; font-weight: 800; }
+.dx-top-text p  { margin: 3px 0 0; font-size: 0.8rem; opacity: 0.9; display: flex; align-items: center; gap: 6px; }
+.dx-top-actions { position: relative; z-index: 1; display: flex; gap: 8px; flex-wrap: wrap; }
+.dx-top-btn {
+    border: 1px solid rgba(255,255,255,0.35); background: rgba(255,255,255,0.15);
+    color: #fff; padding: 8px 14px; border-radius: 10px; cursor: pointer;
+    font-size: 0.78rem; font-weight: 700; display: inline-flex; align-items: center; gap: 7px;
+    transition: all .15s; backdrop-filter: blur(6px);
+}
+.dx-top-btn:hover { background: #fff; color: #1b5e20; transform: translateY(-1px); }
+
+/* KPI strip */
+.dx-kpis { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+.dx-kpi {
+    background: #fff; border: 1px solid #e2efe8; border-radius: 14px;
+    padding: 10px 12px; display: flex; align-items: center; gap: 10px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.04); transition: all .18s; min-width: 0;
+}
+.dx-kpi[data-go] { cursor: pointer; }
+.dx-kpi[data-go]:hover { transform: translateY(-2px); border-color: #a5d6a7; box-shadow: 0 8px 18px rgba(0,0,0,0.08); }
+.dx-kpi-ic {
+    width: 38px; height: 38px; border-radius: 11px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center; font-size: 1rem;
+}
+.dx-kpi-num { font-size: 1.35rem; font-weight: 800; color: #1a2b22; line-height: 1; letter-spacing: -0.4px; }
+.dx-kpi-lbl {
+    font-size: 0.64rem; font-weight: 700; color: #7a8a82; margin-top: 3px;
+    text-transform: uppercase; letter-spacing: 0.3px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.dx-kpi > div:last-child { min-width: 0; }
+
+/* grid + cards */
+.dx-grid { display: grid; grid-template-columns: 1fr; gap: 14px; }
+.dx-card {
+    background: #fff; border: 1px solid #e2efe8; border-radius: 16px;
+    padding: 14px 16px; display: flex; flex-direction: column;
+    min-height: 0; min-width: 0; box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+}
+.dx-card-h { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; flex-shrink: 0; }
+.dx-card-h h4 { margin: 0; font-size: 0.9rem; color: #1a472a; display: flex; align-items: center; gap: 8px; }
+.dx-card-h h4 i { color: #2E7D32; }
+.dx-chart { position: relative; height: 260px; min-height: 0; }
+.dx-chart canvas { max-width: 100%; }
+
+/* segmented toggle */
+.dx-seg { display: inline-flex; background: #f1f6f3; border-radius: 10px; padding: 3px; gap: 2px; }
+.dx-seg button {
+    border: none; background: transparent; padding: 5px 11px; border-radius: 8px;
+    font-size: 0.72rem; font-weight: 700; color: #5f7f6e; cursor: pointer; transition: all .15s;
+}
+.dx-seg button.active { background: #2E7D32; color: #fff; box-shadow: 0 2px 6px rgba(46,125,50,0.3); }
+
+.dx-delta {
+    display: inline-flex; align-items: center; gap: 5px; font-size: 0.7rem; font-weight: 800;
+    padding: 3px 9px; border-radius: 12px; background: #e8f5e9; color: #2e7d32;
+}
+.dx-delta.down { background: #ffebee; color: #c62828; }
+.dx-delta.flat { background: #eceff1; color: #546e7a; }
+
+/* calendar */
+.dx-cal-nav { display: flex; align-items: center; gap: 4px; }
+.dx-cal-nav button {
+    width: 28px; height: 28px; border-radius: 8px; border: 1px solid #e2efe8; background: #fff;
+    color: #2E7D32; cursor: pointer; font-size: 0.72rem; transition: all .15s;
+}
+.dx-cal-nav button:hover { background: #e8f5e9; }
+.dx-cal-nav button.today { width: auto; padding: 0 10px; font-weight: 700; font-size: 0.7rem; }
+.dx-cal-title { font-weight: 800; color: #1a472a; font-size: 0.86rem; min-width: 112px; text-align: center; }
+.dx-cal-wrap { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.dx-cal-dow { display: grid; grid-template-columns: repeat(7, 1fr); text-align: center; font-size: 0.64rem; font-weight: 800; color: #8a9a92; text-transform: uppercase; letter-spacing: .4px; padding-bottom: 4px; flex-shrink: 0; }
+.dx-cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; flex: 1; min-height: 190px; }
+.dx-day {
+    border: 1.5px solid transparent; background: #f8faf8; border-radius: 9px; cursor: pointer;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+    font-size: 0.76rem; font-weight: 700; color: #1a2b22; padding: 2px; min-height: 32px;
+    transition: all .12s; font-family: inherit;
+}
+.dx-day:hover { background: #e8f5e9; }
+.dx-day.blank { background: transparent; cursor: default; pointer-events: none; }
+.dx-day.today { background: #2E7D32; color: #fff; }
+.dx-day.today:hover { background: #1b5e20; }
+.dx-day.sel { border-color: #2E7D32; box-shadow: 0 0 0 2px rgba(46,125,50,0.15); }
+.dx-dots { display: flex; gap: 2px; height: 6px; align-items: center; }
+.dx-dot { width: 5px; height: 5px; border-radius: 50%; }
+.dx-dot.hearing { background: #8e24aa; }
+.dx-dot.pickup  { background: #43a047; }
+.dx-day.today .dx-dot { box-shadow: 0 0 0 1px #fff; }
+.dx-legend { display: flex; gap: 14px; font-size: 0.68rem; color: #6b7a72; margin: 8px 0 6px; flex-shrink: 0; flex-wrap: wrap; }
+.dx-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.dx-agenda { border-top: 1px dashed #d7e2dc; padding-top: 8px; max-height: 150px; overflow-y: auto; flex-shrink: 0; }
+.dx-agenda-h { font-size: 0.72rem; font-weight: 800; color: #1a472a; text-transform: uppercase; letter-spacing: .3px; margin-bottom: 6px; }
+.dx-ev {
+    display: flex; gap: 9px; align-items: center; padding: 6px 8px; border-radius: 9px;
+    cursor: pointer; border-left: 4px solid; margin-bottom: 5px; background: #fafbfa;
+}
+.dx-ev:hover { background: #f1f8e9; }
+.dx-ev.hearing { border-left-color: #8e24aa; }
+.dx-ev.pickup  { border-left-color: #43a047; }
+.dx-ev-time { font-size: 0.68rem; font-weight: 800; color: #5f7f6e; min-width: 54px; }
+.dx-ev-body { min-width: 0; flex: 1; }
+.dx-ev-title { font-size: 0.78rem; font-weight: 700; color: #1a2b22; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dx-ev-sub { font-size: 0.68rem; color: #7a8a82; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dx-empty { font-size: 0.78rem; color: #99a69f; text-align: center; padding: 8px 0; }
+
+/* announcements (compact) */
+.dx-annc-body { flex: 1; min-height: 240px; position: relative; }
+.dx-annc-body #anncGridWrap,
+.dx-annc-body .annc-carousel,
+.dx-annc-body .annc-carousel-track,
+.dx-annc-body .annc-carousel-slide { height: 100%; }
+.dx-annc-body .annc-carousel-slide .annc-card,
+.dx-annc-body > #anncGridWrap > .annc-carousel-slide > .annc-card { height: 100%; min-height: 0; border-radius: 14px; }
+.dx-annc-body .annc-card-body { padding: 14px 16px 34px; }
+.dx-annc-body .annc-card-title { font-size: 1rem; margin-bottom: 5px; }
+.dx-annc-body .annc-card-text { font-size: 0.78rem; -webkit-line-clamp: 2; }
+.dx-annc-body .annc-card-meta { margin-top: 8px; font-size: 0.68rem; }
+.dx-annc-body .annc-dots { bottom: 8px; padding: 5px 10px; }
+.dx-annc-body .annc-nav-btn { width: 32px; height: 32px; font-size: 0.8rem; }
+.dx-annc-body .annc-carousel { border-radius: 14px; }
+.dx-annc-body .annc-empty { padding: 24px 14px; height: 100%; display: flex; flex-direction: column; justify-content: center; box-sizing: border-box; }
+.dx-annc-body .annc-empty i { font-size: 2rem; margin-bottom: 8px; }
+.dx-add-btn {
+    border: none; background: linear-gradient(135deg, #2E7D32, #43a047); color: #fff;
+    padding: 6px 12px; border-radius: 16px; font-size: 0.72rem; font-weight: 700; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 6px; box-shadow: 0 3px 10px rgba(46,125,50,0.25);
+}
+.dx-add-btn:hover { transform: translateY(-1px); }
+@media (hover: none) {
+    .annc-card-actions { opacity: 1; transform: none; }
+}
+
+/* recent requests */
+.dx-recent-list { flex: 1; min-height: 0; overflow-y: auto; margin: 0 -6px; padding: 0 6px; }
+.dx-card .activity-item { padding: 9px 10px; }
+.dx-card .activity-list { max-height: none; padding: 0; }
+
+/* ── tablet ── */
+@media (min-width: 700px) {
+    .dx-kpis { grid-template-columns: repeat(4, 1fr); }
+    .dx-grid { grid-template-columns: repeat(2, 1fr); }
+    .dx-trend { grid-column: span 2; }
+    .dx-chart { height: 280px; }
+}
+/* ── desktop: fits one screen (no page scrolling) ── */
+@media (min-width: 1200px) {
+    .dx { height: calc(100dvh - 150px); min-height: 700px; }
+    .dx-kpis { grid-template-columns: repeat(8, 1fr); flex-shrink: 0; }
+    .dx-kpi { flex-direction: column; align-items: flex-start; gap: 8px; padding: 10px 12px; }
+    .dx-kpi-ic { width: 32px; height: 32px; font-size: 0.88rem; }
+    .dx-top { flex-shrink: 0; }
+    .dx-grid { flex: 1; min-height: 0; grid-template-columns: repeat(12, 1fr); grid-template-rows: 1fr 1fr; }
+    .dx-trend  { grid-column: span 5; }
+    .dx-status { grid-column: span 3; }
+    .dx-cal    { grid-column: span 4; grid-row: span 2; }
+    .dx-annc   { grid-column: span 4; }
+    .dx-recent { grid-column: span 4; }
+    .dx-chart { flex: 1; height: auto; }
+    .dx-annc-body { min-height: 0; }
+}
+@media (max-width: 480px) {
+    .dx-top-btn span { display: none; }
+    .dx-top-btn { padding: 9px 12px; }
+    .dx-cal-title { min-width: 96px; }
+}
+
+  </style>
 </head>
 <body>
 <button class="menu-toggle" id="menuToggle">
@@ -866,6 +1946,7 @@ const unverifiedAccountsData = <?php echo json_encode($unverifiedAccounts); ?>;
 const dashboardCounts = <?php echo json_encode($counts); ?>;
 const documentTypesData = <?php echo json_encode($documentTypes); ?>;
 const initialPendingCount = <?php echo $pendingCount; ?>;
+const DX = <?php echo $dxJson ?: '{}'; ?>;
 
 // Variables
 let pendingVerifyId = null;
@@ -1493,115 +2574,1288 @@ function renderManageDocuments() {
     return `<div class="content-card"><div class="section-title"><i class="fas fa-cog"></i> Manage Documents</div><div class="section-sub">Configure document types, fees, and availability</div><div style="margin-bottom:20px;"></div><div class="cards-grid">${cardsHtml}</div></div>`;
 }
 
+
+// ═══════════════════════════════════════════════════════════
+// ADMIN DASHBOARD — KPIs, charts, calendar, announcements
+// ═══════════════════════════════════════════════════════════
 function renderDashboardDefault() {
+    const kpi = (icon, bg, fg, num, label, go, id) => `
+        <div class="dx-kpi" ${go ? `data-go="${go}" onclick="dxGo('${go}')"` : ''}>
+            <div class="dx-kpi-ic" style="background:${bg};color:${fg};"><i class="fas ${icon}"></i></div>
+            <div><div class="dx-kpi-num" ${id ? `id="${id}"` : ''}>${num}</div><div class="dx-kpi-lbl">${label}</div></div>
+        </div>`;
+    const K = DX.kpi || {};
+
     return `
-    <div class="modern-dashboard">
-        <div class="welcome-card">
-            <div class="welcome-content">
-                <div class="welcome-text">
-                    <h2>Welcome back, Admin!</h2>
-                    <p>Here's what's happening with your barangay today.</p>
-                </div>
-                <div class="welcome-date">
-                    <i class="fas fa-calendar-alt"></i>
-                    <span id="currentDate"></span>
-                </div>
+    <div class="dx">
+
+        <!-- TOP BAR -->
+        <div class="dx-top">
+            <div class="dx-top-text">
+                <h2><span id="dxGreeting">Welcome</span>, Admin!</h2>
+                <p><i class="fas fa-calendar-alt"></i><span id="currentDate"></span></p>
+            </div>
+            <div class="dx-top-actions">
+                <button class="dx-top-btn" onclick="dxGo('verify')"><i class="fas fa-user-check"></i><span>Verify</span></button>
+                <button class="dx-top-btn" onclick="dxGo('requests')"><i class="fas fa-clipboard-list"></i><span>Requests</span></button>
+                <button class="dx-top-btn" onclick="dxGo('bookings')"><i class="fas fa-calendar-check"></i><span>Bookings</span></button>
+                <button class="dx-top-btn" onclick="openAnnouncementModal()"><i class="fas fa-bullhorn"></i><span>Announce</span></button>
             </div>
         </div>
-        
-        <div class="stats-grid-modern">
-            <div class="stat-card-modern">
-                <div class="stat-icon residents"><i class="fas fa-users"></i></div>
-                <div class="stat-info">
-                    <h3>${dashboardCounts.total}</h3>
-                    <p>Total Residents</p>
-                    <span class="stat-trend"><i class="fas fa-user-plus"></i> ${dashboardCounts.unverified} pending</span>
-                </div>
-            </div>
-            
-            <div class="stat-card-modern">
-                <div class="stat-icon verified"><i class="fas fa-check-circle"></i></div>
-                <div class="stat-info">
-                    <h3>${dashboardCounts.verified}</h3>
-                    <p>Verified Accounts</p>
-                    <span class="stat-trend positive"><i class="fas fa-chart-line"></i> ${dashboardCounts.total > 0 ? Math.round((dashboardCounts.verified/dashboardCounts.total)*100) : 0}% verified</span>
-                </div>
-            </div>
-            
-            <div class="stat-card-modern">
-                <div class="stat-icon documents"><i class="fas fa-file-alt"></i></div>
-                <div class="stat-info">
-                    <h3 id="docTotalCount">-</h3>
-                    <p>Document Requests</p>
-                    <span class="stat-trend" id="docPendingBadge"><i class="fas fa-clock"></i> Loading...</span>
-                </div>
-            </div>
-            
-            <div class="stat-card-modern">
-                <div class="stat-icon equipment"><i class="fas fa-tools"></i></div>
-                <div class="stat-info">
-                    <h3 id="equipTotalItems">-</h3>
-                    <p>Equipment Items</p>
-                    <span class="stat-trend" id="equipAvailableBadge"><i class="fas fa-check-circle"></i> Loading...</span>
-                </div>
-            </div>
+
+        <!-- KPI STRIP -->
+        <div class="dx-kpis">
+            ${kpi('fa-users',          '#e3f2fd', '#1565c0', dashboardCounts.total,      'Residents',        'residents')}
+            ${kpi('fa-user-clock',     '#e0f2f1', '#00897b', dashboardCounts.unverified, 'To Verify',        'verify')}
+            ${kpi('fa-clock',          '#fff3e0', '#e65100', K.pendingRequests || 0,     'Pending Requests', 'requests')}
+            ${kpi('fa-calendar-day',   '#f3e5f5', '#9c27b0', K.todayRequests || 0,       'Requests Today',   'requests')}
+            ${kpi('fa-hourglass-half', '#e8f5e9', '#2e7d32', '-',                        'Pending Bookings', 'bookings', 'dxKpiBookings')}
+            ${kpi('fa-tools',          '#fff8e1', '#f57c00', '-',                        'Equip. Available', 'equipment', 'dxKpiEquip')}
+            ${kpi('fa-clipboard-check','#fce4ec', '#ad1457', K.casesToReview || 0,       'Cases to Review', '')}
+            ${kpi('fa-exclamation-triangle','#ffebee','#c62828', K.escalated || 0,       'Escalated Cases',  '')}
         </div>
-        
-        <div class="stats-row-modern">
-            <div class="stat-card-secondary">
-                <div class="stat-header"><i class="fas fa-file-signature"></i><span>Document Status</span></div>
-                <div class="stat-values">
-                    <div class="value-item"><span class="value-label">Pending</span><span class="value-number" id="docPendingCount">-</span></div>
-<div class="value-item"><span class="value-label">Approved</span><span class="value-number" id="docApprovedCount">-</span></div>
-<div class="value-item"><span class="value-label">Unclaimed</span><span class="value-number" id="docUnclaimedCount">-</span></div>
-<div class="value-item"><span class="value-label">Claimed</span><span class="value-number" id="docClaimedCount">-</span></div>
-<div class="value-item"><span class="value-label">Rejected</span><span class="value-number" id="docRejectedCount">-</span></div>
+
+        <!-- MAIN GRID -->
+        <div class="dx-grid">
+
+            <!-- Trend / Top documents / New residents -->
+            <div class="dx-card dx-trend">
+                <div class="dx-card-h">
+                    <h4><i class="fas fa-chart-line"></i> <span id="dxTrendTitle">6-Month Trend</span></h4>
+                    <span id="dxDelta"></span>
+                    <div class="dx-seg">
+                        <button class="active" onclick="dxSetTrend('trend', this)">Trend</button>
+                        <button onclick="dxSetTrend('top', this)">Top Documents</button>
+                        <button onclick="dxSetTrend('residents', this)">Residents</button>
+                    </div>
+                </div>
+                <div class="dx-chart"><canvas id="dxTrendCanvas"></canvas></div>
+            </div>
+
+            <!-- Status doughnut: documents / cases / equipment -->
+            <div class="dx-card dx-status">
+                <div class="dx-card-h">
+                    <h4><i class="fas fa-chart-pie"></i> Status</h4>
+                    <div class="dx-seg">
+                        <button class="active" onclick="dxSetStatus('docs', this)">Docs</button>
+                        <button onclick="dxSetStatus('cases', this)">Cases</button>
+                        <button onclick="dxSetStatus('equip', this)">Equip.</button>
+                    </div>
+                </div>
+                <div class="dx-chart"><canvas id="dxStatusCanvas"></canvas></div>
+            </div>
+
+            <!-- Calendar -->
+            <div class="dx-card dx-cal">
+                <div class="dx-card-h">
+                    <h4><i class="fas fa-calendar-alt"></i> Calendar</h4>
+                    <div class="dx-cal-nav">
+                        <button onclick="dxCalMove(-1)" aria-label="Previous month"><i class="fas fa-chevron-left"></i></button>
+                        <div class="dx-cal-title" id="dxCalTitle"></div>
+                        <button onclick="dxCalMove(1)" aria-label="Next month"><i class="fas fa-chevron-right"></i></button>
+                        <button class="today" onclick="dxCalToday()">Today</button>
+                    </div>
+                </div>
+                <div class="dx-cal-wrap">
+                    <div class="dx-cal-dow"><div>Su</div><div>Mo</div><div>Tu</div><div>We</div><div>Th</div><div>Fr</div><div>Sa</div></div>
+                    <div class="dx-cal-grid" id="dxCalGrid"></div>
+                    <div class="dx-legend">
+                        <span><i class="dx-dot hearing"></i> Hearings</span>
+                        <span><i class="dx-dot pickup"></i> Document pickups</span>
+                    </div>
+                    <div class="dx-agenda" id="dxAgenda"></div>
                 </div>
             </div>
-            
-            <div class="stat-card-secondary">
-                <div class="stat-header"><i class="fas fa-tools"></i><span>Equipment Status</span></div>
-                <div class="stat-values">
-                    <div class="value-item"><span class="value-label">Available</span><span class="value-number success" id="equipAvailableCount">-</span></div>
-                    <div class="value-item"><span class="value-label">Borrowed</span><span class="value-number warning" id="equipBorrowedCount">-</span></div>
-                    <div class="value-item"><span class="value-label">Maintenance</span><span class="value-number danger" id="equipMaintenanceCount">-</span></div>
-                    <div class="value-item"><span class="value-label">Pending Bookings</span><span class="value-number info" id="equipPendingBookings">-</span></div>
+
+            <!-- Announcements (add / edit / pin / delete) -->
+            <div class="dx-card dx-annc">
+                <div class="dx-card-h">
+                    <h4><i class="fas fa-bullhorn" style="color:#e65100;"></i> Announcements</h4>
+                    <button class="dx-add-btn" onclick="openAnnouncementModal()"><i class="fas fa-plus"></i> New</button>
+                </div>
+                <div class="dx-annc-body">
+                    <div id="anncGridWrap">
+                        <div style="text-align:center;padding:30px;color:#999;"><i class="fas fa-spinner fa-spin fa-2x"></i></div>
+                    </div>
                 </div>
             </div>
-        </div>
-        
-        <div class="recent-activity-grid">
-            <div class="activity-card">
-                <div class="activity-header">
-                    <h4><i class="fas fa-file-alt"></i> Recent Document Requests</h4>
-                    <button class="view-all-btn" onclick="goToDocumentRequests()">View All <i class="fas fa-arrow-right"></i></button>
+
+            <!-- Recent: requests / bookings -->
+            <div class="dx-card dx-recent">
+                <div class="dx-card-h">
+                    <h4><i class="fas fa-file-alt"></i> <span id="dxRecentTitle">Recent Requests</span></h4>
+                    <div class="dx-seg">
+                        <button class="active" onclick="dxSetRecent('requests', this)">Requests</button>
+                        <button onclick="dxSetRecent('bookings', this)">Bookings</button>
+                    </div>
+                    <button class="view-all-btn" onclick="dxRecentViewAll()">View all <i class="fas fa-arrow-right"></i></button>
                 </div>
-                <div class="activity-list" id="recentDocumentsList">
+                <div class="dx-recent-list activity-list" id="dxRecentList">
                     <div class="loading-spinner-mini"><i class="fas fa-spinner fa-spin"></i> Loading...</div>
                 </div>
             </div>
-            
-            <div class="activity-card">
-                <div class="activity-header">
-                    <h4><i class="fas fa-calendar-alt"></i> Recent Booking Requests</h4>
-                    <button class="view-all-btn" onclick="goToEquipmentBookings()">View All <i class="fas fa-arrow-right"></i></button>
+
+        </div>
+    </div>`;
+}
+
+let __dxCharts = {};
+let __dxTrendTab = 'trend';
+let __dxStatusTab = 'docs';
+let __dxRecentTab = 'requests';
+const __dxToday = new Date();
+let __dxCal = { y: __dxToday.getFullYear(), m: __dxToday.getMonth(), sel: null };
+
+const DX_DOC_STATUS = [
+    { key: 'pending',   label: 'Pending',   color: '#f57c00' },
+    { key: 'approved',  label: 'Approved',  color: '#43a047' },
+    { key: 'unclaimed', label: 'Unclaimed', color: '#ffca28' },
+    { key: 'claimed',   label: 'Claimed',   color: '#1976d2' },
+    { key: 'rejected',  label: 'Rejected',  color: '#e53935' },
+];
+const DX_CASE_STAGES = [
+    { label: 'Under Review',       color: '#f57c00', st: ['pending_review', 'pending_captain_action'] },
+    { label: 'Mediation',          color: '#6a1b9a', st: ['summoned', 'for_mediation', 'mediation_scheduled', 'in_mediation'] },
+    { label: 'Pangkat',            color: '#00838f', st: ['failed_mediation', 'pangkat_constitution_scheduled', 'pangkat_constituted', 'pangkat_scheduled'] },
+    { label: 'Settlement Pending', color: '#66bb6a', st: ['settled_pending'] },
+    { label: 'Resolved',           color: '#1b5e20', st: ['settled', 'certificate_issued'] },
+    { label: 'Unresolved',         color: '#b71c1c', st: ['unresolved', 'failed_conciliation_final'] },
+    { label: 'Referred',           color: '#8e24aa', st: ['escalated', 'pending_captain_review', 'referred_dispatched', 'released', 'referred'] },
+    { label: 'Dismissed',          color: '#78909c', st: ['dismissed'] },
+];
+
+function dxPad(n) { return String(n).padStart(2, '0'); }
+function dxYmd(y, m, d) { return `${y}-${dxPad(m + 1)}-${dxPad(d)}`; }
+function dxDestroy(key) { if (__dxCharts[key]) { try { __dxCharts[key].destroy(); } catch (e) {} delete __dxCharts[key]; } }
+
+// Quick-links used by KPI cards, top buttons and "View all"
+function dxGo(target) {
+    switch (target) {
+        case 'verify':    goToUnverifiedAccounts(); break;
+        case 'requests':  goToDocumentRequests(); break;
+        case 'bookings':  goToEquipmentBookings(); break;
+        case 'equipment': goToEquipmentList(); break;
+        case 'residents': {
+            const p = document.getElementById('accountsParent');
+            const sub = document.getElementById('accountsSubmenu');
+            if (p && sub && !sub.classList.contains('open')) { sub.classList.add('open'); const ic = p.querySelector('.toggle-icon'); if (ic) ic.style.transform = 'rotate(180deg)'; }
+            const o = document.querySelector('#accountsSubmenu .sub-option[data-subview="verified"]');
+            if (o) o.click();
+            break;
+        }
+    }
+}
+
+function initAdminDashboard() {
+    displayCurrentDate();
+    loadAnnouncements();
+    initDashboardWidgets();
+    dxLoadRecent();
+    dxLoadEquipment();
+}
+
+function initDashboardWidgets() {
+    Object.keys(__dxCharts).forEach(dxDestroy);
+    __dxTrendTab = 'trend';
+    __dxStatusTab = 'docs';
+    __dxRecentTab = 'requests';
+    __dxCal = { y: __dxToday.getFullYear(), m: __dxToday.getMonth(),
+                sel: dxYmd(__dxToday.getFullYear(), __dxToday.getMonth(), __dxToday.getDate()) };
+
+    const g = document.getElementById('dxGreeting');
+    if (g) {
+        const h = new Date().getHours();
+        g.textContent = h < 12 ? 'Good morning' : (h < 18 ? 'Good afternoon' : 'Good evening');
+    }
+    if (typeof Chart === 'undefined') {
+        document.querySelectorAll('.dx-chart').forEach(el => {
+            el.innerHTML = '<div class="dx-empty">Charts could not load (Chart.js unavailable).</div>';
+        });
+    } else {
+        Chart.defaults.font.family = "'Segoe UI', Roboto, sans-serif";
+        Chart.defaults.color = '#5f6f66';
+        dxRenderTrend();
+        dxRenderStatus();
+    }
+    dxRenderCalendar();
+}
+
+function dxSetSeg(btn) {
+    if (!btn) return;
+    btn.parentElement.querySelectorAll('button').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+}
+function dxSetTrend(tab, btn)  { dxSetSeg(btn); __dxTrendTab = tab;  dxRenderTrend(); }
+function dxSetStatus(tab, btn) { dxSetSeg(btn); __dxStatusTab = tab; dxRenderStatus(); }
+
+function dxDeltaHtml(arr, noun) {
+    const cur = arr[arr.length - 1] || 0, prev = arr[arr.length - 2] || 0;
+    let cls = 'flat', txt = 'No change vs last month', ic = 'fa-minus';
+    if (prev > 0) {
+        const pct = Math.round(((cur - prev) / prev) * 100);
+        if (pct > 0)      { cls = '';     ic = 'fa-arrow-up';   txt = `${pct}% vs last month`; }
+        else if (pct < 0) { cls = 'down'; ic = 'fa-arrow-down'; txt = `${Math.abs(pct)}% vs last month`; }
+    } else if (cur > 0) { cls = ''; ic = 'fa-arrow-up'; txt = `${cur} new this month`; }
+    return `<span class="dx-delta ${cls}"><i class="fas ${ic}"></i> ${noun} ${txt}</span>`;
+}
+
+// ── Trend / Top documents / New residents ──
+function dxRenderTrend() {
+    const el = document.getElementById('dxTrendCanvas');
+    if (!el || typeof Chart === 'undefined') return;
+    dxDestroy('trend');
+
+    const title = document.getElementById('dxTrendTitle');
+    const deltaEl = document.getElementById('dxDelta');
+    const docs = DX.docMonthly || [], comps = DX.complaintMonthly || [], res = DX.residentMonthly || [];
+    const tip = { backgroundColor: '#1a2b22', padding: 10, cornerRadius: 8 };
+
+    if (__dxTrendTab === 'trend') {
+        if (title) title.textContent = '6-Month Trend';
+        if (deltaEl) deltaEl.innerHTML = dxDeltaHtml(docs, 'Requests');
+        const grad = (hex) => (ctx) => {
+            const a = ctx.chart.chartArea;
+            if (!a) return hex + '33';
+            const g = ctx.chart.ctx.createLinearGradient(0, a.top, 0, a.bottom);
+            g.addColorStop(0, hex + '55'); g.addColorStop(1, hex + '05');
+            return g;
+        };
+        const ds = (label, data, hex) => ({ label, data, borderColor: hex, backgroundColor: grad(hex), fill: true, tension: 0.4,
+            borderWidth: 3, pointRadius: 4, pointBackgroundColor: '#fff', pointBorderWidth: 2, pointHoverRadius: 6 });
+        __dxCharts.trend = new Chart(el, {
+            type: 'line',
+            data: { labels: DX.months || [], datasets: [
+                ds('Document requests', docs, '#2E7D32'),
+                ds('Complaints', comps, '#8e24aa'),
+                ds('New residents', res, '#1976d2'),
+            ] },
+            options: {
+                responsive: true, maintainAspectRatio: false,
+                interaction: { mode: 'index', intersect: false },
+                plugins: { legend: { position: 'bottom', labels: { usePointStyle: true, boxWidth: 8, font: { size: 11 } } }, tooltip: tip },
+                scales: { x: { grid: { display: false } },
+                          y: { beginAtZero: true, ticks: { precision: 0, maxTicksLimit: 5 }, grid: { color: '#eef2f0' }, border: { display: false } } }
+            }
+        });
+    } else if (__dxTrendTab === 'residents') {
+        if (title) title.textContent = 'New Residents';
+        if (deltaEl) deltaEl.innerHTML = dxDeltaHtml(res, 'Sign-ups');
+        __dxCharts.trend = new Chart(el, {
+            type: 'bar',
+            data: { labels: DX.months || [], datasets: [{ label: 'New residents', data: res, backgroundColor: '#1976d2',
+                    borderRadius: 8, borderSkipped: false, maxBarThickness: 36 }] },
+            options: {
+                responsive: true, maintainAspectRatio: false,
+                plugins: { legend: { display: false }, tooltip: tip },
+                scales: { x: { grid: { display: false } },
+                          y: { beginAtZero: true, ticks: { precision: 0, maxTicksLimit: 5 }, grid: { color: '#eef2f0' }, border: { display: false } } }
+            }
+        });
+    } else {
+        if (title) title.textContent = 'Most Requested Documents';
+        if (deltaEl) deltaEl.innerHTML = '';
+        const top = DX.topDocs || [];
+        const palette = ['#1b5e20', '#2E7D32', '#43a047', '#66bb6a', '#81c784', '#a5d6a7'];
+        __dxCharts.trend = new Chart(el, {
+            type: 'bar',
+            data: { labels: top.map(t => t.name), datasets: [{ label: 'Requests', data: top.map(t => t.count),
+                    backgroundColor: top.map((_, i) => palette[i % palette.length]), borderRadius: 8, borderSkipped: false,
+                    barThickness: 'flex', maxBarThickness: 26 }] },
+            options: {
+                indexAxis: 'y', responsive: true, maintainAspectRatio: false,
+                plugins: { legend: { display: false }, tooltip: tip },
+                scales: { x: { beginAtZero: true, ticks: { precision: 0, maxTicksLimit: 5 }, grid: { color: '#eef2f0' }, border: { display: false } },
+                          y: { grid: { display: false } } }
+            }
+        });
+    }
+}
+
+// ── Status doughnut ──
+const dxCenterPlugin = {
+    id: 'dxCenter',
+    afterDraw(chart) {
+        const meta = chart.getDatasetMeta(0);
+        if (!meta || !meta.data || !meta.data.length) return;
+        const total = (chart.data.datasets[0].data || []).reduce((a, b) => a + b, 0);
+        const { x, y } = meta.data[0];
+        const c = chart.ctx;
+        c.save();
+        c.textAlign = 'center'; c.textBaseline = 'middle';
+        c.fillStyle = '#1a2b22'; c.font = "800 26px 'Segoe UI', Roboto, sans-serif";
+        c.fillText(total, x, y - 6);
+        c.fillStyle = '#7a8a82'; c.font = "700 10px 'Segoe UI', Roboto, sans-serif";
+        c.fillText('TOTAL', x, y + 15);
+        c.restore();
+    }
+};
+
+function dxRenderStatus() {
+    const el = document.getElementById('dxStatusCanvas');
+    if (!el || typeof Chart === 'undefined') return;
+    dxDestroy('status');
+
+    let labels = [], data = [], colors = [];
+    if (__dxStatusTab === 'docs') {
+        DX_DOC_STATUS.forEach(s => { labels.push(s.label); data.push((DX.docStatus || {})[s.key] || 0); colors.push(s.color); });
+    } else if (__dxStatusTab === 'cases') {
+        const counts = {}; let other = 0;
+        Object.entries(DX.complaintStatus || {}).forEach(([st, n]) => {
+            const idx = DX_CASE_STAGES.findIndex(s => s.st.includes(st));
+            if (idx < 0) other += n; else counts[idx] = (counts[idx] || 0) + n;
+        });
+        DX_CASE_STAGES.forEach((s, i) => { if (counts[i]) { labels.push(s.label); data.push(counts[i]); colors.push(s.color); } });
+        if (other) { labels.push('Other'); data.push(other); colors.push('#b0bec5'); }
+    } else {
+        const e = DX.equip;
+        if (e) {
+            [['Available', e.available, '#43a047'], ['Borrowed', e.borrowed, '#1976d2'], ['Maintenance', e.maintenance, '#f57c00']]
+                .forEach(([l, v, c]) => { labels.push(l); data.push(Number(v) || 0); colors.push(c); });
+        }
+    }
+    const empty = data.reduce((a, b) => a + b, 0) === 0;
+    if (empty) { labels = ['No data']; data = [1]; colors = ['#e5ece8']; }
+
+    __dxCharts.status = new Chart(el, {
+        type: 'doughnut',
+        data: { labels, datasets: [{ data, backgroundColor: colors, borderColor: '#fff', borderWidth: 3, hoverOffset: 6 }] },
+        options: {
+            responsive: true, maintainAspectRatio: false, cutout: '68%',
+            plugins: {
+                legend: { position: 'bottom', labels: { usePointStyle: true, boxWidth: 8, padding: 10, font: { size: 11 } } },
+                tooltip: { enabled: !empty, backgroundColor: '#1a2b22', padding: 10, cornerRadius: 8 }
+            }
+        },
+        plugins: [dxCenterPlugin]
+    });
+}
+
+// ── Equipment numbers (KPI cards + Equip. doughnut) ──
+async function dxLoadEquipment() {
+    try {
+        const r = await fetch('equipment_ajax.php?action=get_counts');
+        const d = await r.json();
+        if (!d.success) return;
+        DX.equip = {
+            total: d.counts.total || 0, available: d.counts.available || 0,
+            borrowed: d.counts.borrowed || 0, maintenance: d.counts.maintenance || 0,
+            pendingBookings: d.pending_bookings || 0
+        };
+        const b = document.getElementById('dxKpiBookings'); if (b) b.textContent = DX.equip.pendingBookings;
+        const a = document.getElementById('dxKpiEquip');    if (a) a.textContent = DX.equip.available;
+        if (__dxStatusTab === 'equip') dxRenderStatus();
+    } catch (e) { console.error('Error loading equipment stats:', e); }
+}
+
+// ── Recent requests / bookings ──
+function dxSetRecent(tab, btn) { dxSetSeg(btn); __dxRecentTab = tab; dxLoadRecent(); }
+function dxRecentViewAll() { dxGo(__dxRecentTab === 'bookings' ? 'bookings' : 'requests'); }
+
+function dxAgo(dateString) {
+    const diff = Math.floor((new Date() - new Date(dateString)) / 86400000);
+    if (diff <= 0) return 'Today';
+    if (diff === 1) return 'Yesterday';
+    return `${diff} days ago`;
+}
+
+async function dxLoadRecent() {
+    const c = document.getElementById('dxRecentList');
+    const t = document.getElementById('dxRecentTitle');
+    if (!c) return;
+    const tab = __dxRecentTab;
+    if (t) t.textContent = tab === 'bookings' ? 'Recent Bookings' : 'Recent Requests';
+    c.innerHTML = '<div class="loading-spinner-mini"><i class="fas fa-spinner fa-spin"></i> Loading...</div>';
+    try {
+        if (tab === 'bookings') {
+            const r = await fetch('equipment_ajax.php?action=get_recent_bookings&limit=6');
+            const d = await r.json();
+            if (tab !== __dxRecentTab) return;
+            if (d.success && d.bookings && d.bookings.length) {
+                c.innerHTML = d.bookings.map(b => `
+                    <div class="activity-item" onclick="viewBookingDetails(${b.id})">
+                        <div class="activity-info">
+                            <div class="activity-title">${escapeHtml(b.equipment_name || b.item_name || '')}</div>
+                            <div class="activity-detail">${escapeHtml(b.first_name || '')} ${escapeHtml(b.last_name || '')} · ${b.duration_days || 1} day(s)</div>
+                        </div>
+                        <div class="activity-status status-${escapeHtml(b.status)}">${escapeHtml(b.status)}</div>
+                    </div>`).join('');
+            } else c.innerHTML = '<div class="empty-state-mini"><p>No recent bookings</p></div>';
+        } else {
+            const r = await fetch('?dashboard_action=get_recent_documents&limit=6');
+            const d = await r.json();
+            if (tab !== __dxRecentTab) return;
+            if (d.success && d.requests && d.requests.length) {
+                c.innerHTML = d.requests.map(q => `
+                    <div class="activity-item" onclick="viewRequestDetails(${q.id})">
+                        <div class="activity-info">
+                            <div class="activity-title">${escapeHtml(q.document_type)}</div>
+                            <div class="activity-detail">${escapeHtml(q.first_name)} ${escapeHtml(q.last_name)} · ${dxAgo(q.request_date)}</div>
+                        </div>
+                        <div class="activity-status status-${escapeHtml(q.status)}">${escapeHtml(q.status)}</div>
+                    </div>`).join('');
+            } else c.innerHTML = '<div class="empty-state-mini"><p>No recent requests</p></div>';
+        }
+    } catch (e) {
+        c.innerHTML = '<div class="empty-state-mini"><p>Unable to load data</p></div>';
+    }
+}
+
+// ── Calendar ──
+function dxEventsMap() {
+    const map = {};
+    (DX.events || []).forEach(e => { (map[e.date] = map[e.date] || []).push(e); });
+    return map;
+}
+function dxFmtTime(t) {
+    if (!t) return 'All day';
+    const m = String(t).match(/^(\d{1,2}):(\d{2})/);
+    if (!m) return escapeHtml(String(t));
+    let h = parseInt(m[1], 10); const ap = h >= 12 ? 'PM' : 'AM';
+    h = h % 12 || 12;
+    return `${h}:${m[2]} ${ap}`;
+}
+function dxCalMove(delta) {
+    let m = __dxCal.m + delta, y = __dxCal.y;
+    if (m < 0) { m = 11; y--; } else if (m > 11) { m = 0; y++; }
+    __dxCal.m = m; __dxCal.y = y;
+    dxRenderCalendar();
+}
+function dxCalToday() {
+    __dxCal = { y: __dxToday.getFullYear(), m: __dxToday.getMonth(),
+                sel: dxYmd(__dxToday.getFullYear(), __dxToday.getMonth(), __dxToday.getDate()) };
+    dxRenderCalendar();
+}
+function dxCalSelect(ds) { __dxCal.sel = ds; dxRenderCalendar(); }
+
+function dxRenderCalendar() {
+    const grid = document.getElementById('dxCalGrid');
+    const title = document.getElementById('dxCalTitle');
+    if (!grid) return;
+    const { y, m } = __dxCal;
+    const monthNames = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+    if (title) title.textContent = `${monthNames[m]} ${y}`;
+
+    const first = new Date(y, m, 1).getDay();
+    const days = new Date(y, m + 1, 0).getDate();
+    const rows = Math.ceil((first + days) / 7);
+    const map = dxEventsMap();
+    const todayStr = dxYmd(__dxToday.getFullYear(), __dxToday.getMonth(), __dxToday.getDate());
+
+    let html = '';
+    for (let i = 0; i < first; i++) html += '<div class="dx-day blank"></div>';
+    for (let d = 1; d <= days; d++) {
+        const ds = dxYmd(y, m, d);
+        const evs = map[ds] || [];
+        const dots = [...new Set(evs.map(e => e.kind))].map(k => `<i class="dx-dot ${k}"></i>`).join('');
+        html += `<button type="button" class="dx-day ${ds === todayStr ? 'today' : ''} ${ds === __dxCal.sel ? 'sel' : ''}"
+                    onclick="dxCalSelect('${ds}')" title="${evs.length ? evs.length + ' event(s)' : ''}">
+                    <span>${d}</span><span class="dx-dots">${dots}</span></button>`;
+    }
+    const trailing = rows * 7 - (first + days);
+    for (let i = 0; i < trailing; i++) html += '<div class="dx-day blank"></div>';
+    grid.style.gridTemplateRows = `repeat(${rows}, minmax(32px, 1fr))`;
+    grid.innerHTML = html;
+    dxRenderAgenda(map);
+}
+
+// Hearings have no detail screen in the admin panel, so show a small summary.
+function dxShowHearing(id) {
+    const e = (DX.events || []).find(x => x.kind === 'hearing' && Number(x.id) === Number(id));
+    if (!e) return;
+    Swal.fire({
+        icon: 'info', title: escapeHtml(e.title || 'Hearing'),
+        html: `<div style="text-align:left;font-size:0.9rem;line-height:1.7;">
+            <div><b>Reference:</b> ${escapeHtml(e.sub || '-')}</div>
+            <div><b>Date:</b> ${escapeHtml(new Date(e.date + 'T00:00:00').toLocaleDateString('en-US', { dateStyle: 'long' }))}</div>
+            <div><b>Time:</b> ${dxFmtTime(e.time)}</div>
+            <div><b>Status:</b> ${escapeHtml(String(e.status || '').replace(/_/g, ' '))}</div></div>`,
+        confirmButtonColor: '#2E7D32'
+    });
+}
+
+function dxEventHtml(e, showDate) {
+    const click = e.kind === 'hearing' ? `dxShowHearing(${e.id})` : `viewRequestDetails(${e.id})`;
+    const when = showDate
+        ? new Date(e.date + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+        : dxFmtTime(e.time);
+    const label = e.kind === 'hearing' ? 'Hearing' : 'Pickup';
+    return `<div class="dx-ev ${e.kind}" onclick="${click}">
+        <div class="dx-ev-time">${when}</div>
+        <div class="dx-ev-body">
+            <div class="dx-ev-title">${escapeHtml(label)}: ${escapeHtml(e.title || '')}</div>
+            <div class="dx-ev-sub">${escapeHtml(e.sub || '')}</div>
+        </div></div>`;
+}
+
+function dxRenderAgenda(map) {
+    const box = document.getElementById('dxAgenda');
+    if (!box) return;
+    const sel = __dxCal.sel;
+    const evs = (map[sel] || []).slice().sort((a, b) => String(a.time || '').localeCompare(String(b.time || '')));
+    const niceDate = sel ? new Date(sel + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' }) : '';
+
+    let html = `<div class="dx-agenda-h">${escapeHtml(niceDate)}</div>`;
+    if (evs.length) {
+        html += evs.map(e => dxEventHtml(e, false)).join('');
+    } else {
+        html += '<div class="dx-empty">Nothing scheduled on this day.</div>';
+        const upcoming = (DX.events || []).filter(e => e.date > sel)
+            .sort((a, b) => a.date.localeCompare(b.date) || String(a.time || '').localeCompare(String(b.time || '')))
+            .slice(0, 2);
+        if (upcoming.length) {
+            html += '<div class="dx-agenda-h" style="margin-top:6px;">Up next</div>' + upcoming.map(e => dxEventHtml(e, true)).join('');
+        }
+    }
+    box.innerHTML = html;
+}
+
+
+function timeAgo(dt) {
+    if (!dt) return '';
+    const then = new Date(dt.replace(' ', 'T'));
+    const secs = Math.floor((Date.now() - then.getTime()) / 1000);
+    if (secs < 60) return 'just now';
+    if (secs < 3600) return Math.floor(secs/60) + 'm ago';
+    if (secs < 86400) return Math.floor(secs/3600) + 'h ago';
+    if (secs < 604800) return Math.floor(secs/86400) + 'd ago';
+    return then.toLocaleDateString();
+}
+
+// ═══════════════════════════════════════════════════════════
+// ANNOUNCEMENTS MODULE
+// ═══════════════════════════════════════════════════════════
+const ANN_CATEGORIES = {
+    general:  { label: 'General',  icon: 'fa-bullhorn' },
+    urgent:   { label: 'Urgent',   icon: 'fa-exclamation-circle' },
+    event:    { label: 'Event',    icon: 'fa-calendar-check' },
+    advisory: { label: 'Advisory', icon: 'fa-info-circle' },
+    health:   { label: 'Health',   icon: 'fa-heartbeat' },
+    safety:   { label: 'Safety',   icon: 'fa-shield-alt' },
+};
+
+function renderAnnouncementsSection() {
+    return `
+        <div class="annc-section" id="anncSection">
+            <div class="annc-section-head">
+                <div class="annc-section-title">
+                    <i class="fas fa-bullhorn"></i> Announcements
                 </div>
-                <div class="activity-list" id="recentBookingsList">
-                    <div class="loading-spinner-mini"><i class="fas fa-spinner fa-spin"></i> Loading...</div>
+                <button class="annc-add-btn" onclick="openAnnouncementModal()">
+                    <i class="fas fa-plus"></i> New Announcement
+                </button>
+            </div>
+            <div id="anncGridWrap">
+                <div style="text-align:center;padding:40px;color:#999;">
+                    <i class="fas fa-spinner fa-spin fa-2x"></i>
+                    <p style="margin-top:10px;">Loading announcements…</p>
                 </div>
             </div>
         </div>
-        
-        <div class="quick-actions">
-            <h4><i class="fas fa-bolt"></i> Quick Actions</h4>
-            <div class="action-buttons">
-                <button class="quick-action-btn" onclick="goToUnverifiedAccounts()"><i class="fas fa-user-check"></i> Verify Residents</button>
-                <button class="quick-action-btn" onclick="goToDocumentRequests()"><i class="fas fa-file-signature"></i> Process Documents</button>
-                <button class="quick-action-btn" onclick="goToEquipmentList()"><i class="fas fa-plus-circle"></i> Add Equipment</button>
-                <button class="quick-action-btn" onclick="goToEquipmentBookings()"><i class="fas fa-calendar-check"></i> Manage Bookings</button>
+    `;
+}
+
+async function loadAnnouncements() {
+    const wrap = document.getElementById('anncGridWrap');
+    if (!wrap) return;
+    try {
+        const r = await fetch(`?ann_action=list`, { cache: 'no-store' });
+        const d = await r.json();
+        if (!d.success) {
+            wrap.innerHTML = `<div class="annc-empty">
+                <i class="fas fa-exclamation-triangle"></i>
+                <h4>Could not load announcements</h4>
+                <p>${escapeHtml(d.message || 'Try again later.')}</p>
+            </div>`;
+            return;
+        }
+        renderAnnouncementGrid(d.data);
+
+        if (d.auto_deactivated_count > 0) {
+            console.log(`[announcements] ${d.auto_deactivated_count} expired announcement(s) auto-deactivated.`);
+        }
+        scheduleNextExpiryRefresh(d.data);
+    } catch (e) {
+        wrap.innerHTML = `<div class="annc-empty">
+            <i class="fas fa-exclamation-triangle"></i>
+            <h4>Network error</h4>
+            <p>Could not reach the server.</p>
+        </div>`;
+    }
+}
+
+function renderAnnouncementGrid(items) {
+    const wrap = document.getElementById('anncGridWrap');
+    if (!wrap) return;
+
+    if (!items.length) {
+        wrap.innerHTML = `
+            <div class="annc-empty">
+                <i class="fas fa-bullhorn"></i>
+                <h4>No announcements yet</h4>
+                <p>Click <b>New Announcement</b> above to post the first one.</p>
+            </div>`;
+        return;
+    }
+
+    // ── Single announcement → plain card, no carousel chrome ──
+    if (items.length === 1) {
+        window.__anncItems = items;
+        window.__anncIndex = 0;
+        window.__anncFocusId = null;
+        wrap.innerHTML = renderAnnouncementCard(items[0]);
+        return;
+    }
+    // ── Multiple → carousel ──
+    window.__anncItems = items;
+    window.__anncIndex = 0;
+
+    wrap.innerHTML = `
+        <div class="annc-carousel">
+            <div class="annc-carousel-track" id="anncTrack">
+                ${items.map((it) => renderAnnouncementCard(it)).join('')}
+            </div>
+
+            <button type="button" class="annc-nav-btn prev" onclick="anncPrev()" aria-label="Previous">
+                <i class="fas fa-chevron-left"></i>
+            </button>
+            <button type="button" class="annc-nav-btn next" onclick="anncNext()" aria-label="Next">
+                <i class="fas fa-chevron-right"></i>
+            </button>
+
+            <div class="annc-dots" id="anncDots">
+                ${items.map((_, i) => `
+                    <button type="button" class="annc-dot ${i === 0 ? 'active' : ''}"
+                            onclick="anncGoTo(${i})" aria-label="Go to slide ${i+1}"></button>
+                `).join('')}
+            </div>
+        </div>`;
+
+    // Auto-advance every 6s
+    clearInterval(window.__anncAutoTimer);
+    window.__anncAutoTimer = setInterval(anncNext, 6000);
+
+    // Find the slide we should jump to (the one just toggled) — fall back to slide 0
+    let targetIndex = 0;
+    if (window.__anncFocusId != null) {
+        const idx = items.findIndex(x => Number(x.id) === Number(window.__anncFocusId));
+        if (idx >= 0) targetIndex = idx;
+        window.__anncFocusId = null;
+    }
+
+    const track = document.getElementById('anncTrack');
+    if (track) track.style.transform = `translateX(-${targetIndex * 100}%)`;
+    window.__anncIndex = targetIndex;
+    document.querySelectorAll('#anncDots .annc-dot').forEach((dot, i) => {
+        dot.classList.toggle('active', i === targetIndex);
+    });
+}
+function anncGoTo(index) {
+    const items = window.__anncItems || [];
+    if (!items.length) return;
+
+    // Wrap index
+    index = (index + items.length) % items.length;
+    window.__anncIndex = index;
+
+    const track = document.getElementById('anncTrack');
+    if (track) {
+        track.style.transform = `translateX(-${index * 100}%)`;
+    }
+
+    document.querySelectorAll('#anncDots .annc-dot').forEach((dot, i) => {
+        dot.classList.toggle('active', i === index);
+    });
+
+    // Reset the auto timer on manual navigation
+    clearInterval(window.__anncAutoTimer);
+    window.__anncAutoTimer = setInterval(anncNext, 6000);
+}
+
+function anncNext() {
+    const items = window.__anncItems || [];
+    if (items.length < 2) return;
+    anncGoTo((window.__anncIndex || 0) + 1);
+}
+
+function anncPrev() {
+    const items = window.__anncItems || [];
+    if (items.length < 2) return;
+    anncGoTo((window.__anncIndex || 0) - 1);
+}
+function renderAnnouncementCard(a) {
+    const catMeta = ANN_CATEGORIES[a.category] || ANN_CATEGORIES.general;
+
+    let expiryBadge = '';
+    if (a.is_expired) {
+        expiryBadge = `<span class="annc-badge expiry urgent"><i class="fas fa-clock"></i> Expired</span>`;
+    } else if (a.expires_at) {
+        const ts = new Date(a.expires_at.replace(' ', 'T')).getTime();
+        const msLeft = ts - Date.now();
+        const daysLeft = Math.floor(msLeft / 86400000);
+        const niceDate = new Date(ts).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+
+        if (daysLeft <= 0) {
+            expiryBadge = `<span class="annc-badge expiry urgent"><i class="fas fa-exclamation-triangle"></i> Expires today</span>`;
+        } else if (daysLeft <= 3) {
+            expiryBadge = `<span class="annc-badge expiry soon"><i class="fas fa-hourglass-half"></i> ${daysLeft}d left</span>`;
+        } else {
+            expiryBadge = `<span class="annc-badge expiry"><i class="fas fa-calendar-check"></i> Until ${escapeHtml(niceDate)}</span>`;
+        }
+    } else {
+        expiryBadge = `<span class="annc-badge expiry"><i class="fas fa-infinity"></i> No expiry</span>`;
+    }
+
+    const isExpired = !!a.is_expired;
+    const imageStyle = a.image_url
+        ? `background-image:url('../${escapeHtml(a.image_url)}')`
+        : '';
+
+    // .annc-carousel-slide is the outer 100%-width wrapper used by the carousel track
+    return `
+    <div class="annc-carousel-slide">
+        <div class="annc-card" style="${isExpired ? 'opacity:0.72;' : ''}">
+            <div class="annc-card-image ${a.image_url ? '' : 'fallback'}" style="${imageStyle}"></div>
+
+            <div class="annc-card-top">
+                <span class="annc-badge ${a.category}">
+                    <i class="fas ${catMeta.icon}"></i> ${catMeta.label}
+                </span>
+                ${a.is_pinned ? `<span class="annc-badge pinned"><i class="fas fa-thumbtack"></i> Pinned</span>` : ''}
+                ${!a.is_active ? `<span class="annc-badge draft"><i class="fas fa-eye-slash"></i> Inactive</span>` : ''}
+                ${a.event_date ? `
+                    <span class="annc-badge" style="background:#2E7D32;border-color:#2E7D32;">
+                        <i class="fas fa-calendar-check"></i>
+                        ${escapeHtml(new Date(a.event_date + 'T00:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric'}))}
+                        ${a.event_time ? ' · ' + escapeHtml((() => {
+                            const [h,m] = a.event_time.split(':');
+                            let hh = parseInt(h,10);
+                            const ap = hh >= 12 ? 'PM' : 'AM';
+                            hh = hh % 12 || 12;
+                            return hh + ':' + m + ' ' + ap;
+                        })()) : ''}
+                    </span>
+                ` : ''}
+                ${expiryBadge}
+            </div>
+
+            <div class="annc-card-actions" onclick="event.stopPropagation()">
+                <button class="annc-icon-btn" title="Edit" onclick="openAnnouncementModal(${a.id})">
+                    <i class="fas fa-pen"></i>
+                </button>
+                <button class="annc-icon-btn" title="${a.is_pinned ? 'Unpin' : 'Pin'}"
+                        onclick="toggleAnnouncement(${a.id}, 'is_pinned')">
+                    <i class="fas fa-thumbtack"></i>
+                </button>
+                <button class="annc-icon-btn" title="${a.is_active ? 'Deactivate' : 'Activate'}"
+                        onclick="toggleAnnouncement(${a.id}, 'is_active')">
+                    <i class="fas ${a.is_active ? 'fa-eye' : 'fa-eye-slash'}"></i>
+                </button>
+                <button class="annc-icon-btn danger" title="Delete"
+                        onclick="deleteAnnouncement(${a.id})">
+                    <i class="fas fa-trash"></i>
+                </button>
+            </div>
+
+            <div class="annc-card-body">
+                <h3 class="annc-card-title">${escapeHtml(a.title)}</h3>
+                <p class="annc-card-text">${escapeHtml(a.body)}</p>
+                <div class="annc-card-meta">
+                    <span><i class="fas fa-user-tie"></i> ${escapeHtml(a.author || 'Barangay')}</span>
+                    <span><i class="fas fa-clock"></i> ${timeAgo(a.created_at)}</span>
+                </div>
             </div>
         </div>
     </div>`;
+}
+
+function scheduleNextExpiryRefresh(items) {
+    clearTimeout(window.__anncExpiryTimer);
+    if (!Array.isArray(items)) return;
+    const now = Date.now();
+    const upcoming = items
+        .filter(a => a.expires_at && new Date(a.expires_at.replace(' ', 'T')).getTime() > now)
+        .map(a => new Date(a.expires_at.replace(' ', 'T')).getTime())
+        .sort((x, y) => x - y);
+    if (!upcoming.length) return;
+    const delay = Math.min(upcoming[0] - now + 2000, 3600000);
+    window.__anncExpiryTimer = setTimeout(() => loadAnnouncements(), Math.max(delay, 5000));
+}
+
+// ═══════════════════════════════════════════════════════════
+// MODAL — Add / Edit
+// ═══════════════════════════════════════════════════════════
+async function openAnnouncementModal(id = null) {
+    let a = {
+        id: 0, title: '', body: '', category: 'general',
+        image_url: null, is_pinned: 0, is_active: 1, expires_at: null,
+        event_date: null, event_time: null,
+    };
+    if (id) {
+        try {
+            const r = await fetch(`?ann_action=get&id=${id}`);
+            const d = await r.json();
+            if (d.success) a = d.data;
+        } catch (e) {}
+    }
+
+    const catOptions = Object.entries(ANN_CATEGORIES).map(([k, v]) =>
+        `<option value="${k}" ${a.category === k ? 'selected' : ''}>${v.label}</option>`
+    ).join('');
+
+    const expiresValue = a.expires_at ? a.expires_at.replace(' ', 'T').slice(0, 16) : '';
+
+    await Swal.fire({
+        title: '',
+        html: `
+            <div class="annc-modal">
+                <div class="annc-modal-header">
+                    <i class="fas fa-bullhorn"></i>
+                    <div>
+                        <h3>${id ? 'Edit Announcement' : 'New Announcement'}</h3>
+                        <p>Announcements appear on the Admin and Secretary dashboards until they expire.</p>
+                    </div>
+                </div>
+                <div class="annc-modal-body">
+                    <div class="annc-field">
+                        <label>Title <span class="req">*</span></label>
+                        <input type="text" id="anncTitle" class="annc-input"
+                               maxlength="255" value="${escapeHtml(a.title)}"
+                               placeholder="e.g. Barangay Assembly on October 20">
+                    </div>
+
+                    <div class="annc-field">
+                        <label>Message <span class="req">*</span></label>
+                        <textarea id="anncBody" class="annc-textarea" rows="5"
+                                  placeholder="Full announcement text…">${escapeHtml(a.body)}</textarea>
+                    </div>
+
+                    <div class="annc-row-2">
+                        <div class="annc-field">
+                            <label>Category</label>
+                            <select id="anncCategory" class="annc-select">${catOptions}</select>
+                        </div>
+                        <div class="annc-field">
+                            <label>Expiry date <span class="opt">(optional)</span></label>
+                            <input type="datetime-local" id="anncExpiresAt" class="annc-input"
+                                   value="${escapeHtml(expiresValue)}"
+                                   min="${new Date(Date.now() + 60000).toISOString().slice(0, 16)}"
+                                   onchange="validateExpiryLive()"
+                                   oninput="validateExpiryLive()">
+                            <div style="font-size:0.72rem;color:#888;margin-top:6px;">
+                                <i class="fas fa-info-circle"></i>
+                                The announcement will be auto-deactivated when this time passes.
+                                Leave blank for no expiry.
+                            </div>
+                            <div id="anncExpiryError"
+                                 style="display:none;margin-top:8px;padding:8px 12px;
+                                        background:#ffebee;border-left:3px solid #c62828;
+                                        border-radius:6px;font-size:0.75rem;color:#b71c1c;
+                                        align-items:flex-start;gap:6px;line-height:1.45;">
+                                <i class="fas fa-exclamation-triangle" style="margin-top:1px;flex-shrink:0;"></i>
+                                <span id="anncExpiryErrorText"></span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- ══════════ OPTIONAL EVENT SCHEDULE ══════════ -->
+                    <div class="annc-field" style="margin-top:16px;">
+                        <label style="display:flex;align-items:center;gap:8px;">
+                            <i class="fas fa-calendar-check" style="color:#2E7D32;"></i>
+                            Event Schedule <span class="opt">(optional)</span>
+                        </label>
+                        <div style="background:#e8f5e9;border-left:4px solid #2E7D32;border-radius:8px;
+                                    padding:10px 14px;font-size:0.78rem;color:#1b5e20;
+                                    margin-bottom:12px;line-height:1.5;">
+                            <i class="fas fa-lightbulb"></i>
+                            Fill this <b>only if the announcement has a specific date and time</b>
+                            (e.g. Relief Goods Distribution). Leave blank for a normal announcement.
+                        </div>
+                        <div class="annc-row-2">
+                            <div class="annc-field" style="margin-bottom:0;">
+                                <label style="font-size:0.78rem;">Event Date <span class="opt">(optional)</span></label>
+                                <input type="date" id="anncEventDate" class="annc-input"
+                                       value="${escapeHtml(a.event_date || '')}"
+                                       min="${new Date().toISOString().split('T')[0]}"
+                                       onchange="validateEventScheduleLive()"
+                                       oninput="validateEventScheduleLive()">
+                            </div>
+                            <div class="annc-field" style="margin-bottom:0;">
+                                <label style="font-size:0.78rem;">Event Time <span class="opt">(optional)</span></label>
+                                <input type="time" id="anncEventTime" class="annc-input"
+                                       value="${escapeHtml(a.event_time || '')}"
+                                       onchange="validateEventScheduleLive()"
+                                       oninput="validateEventScheduleLive()">
+                            </div>
+                        </div>
+                        <div id="anncEventError"
+                             style="display:none;margin-top:10px;padding:10px 14px;
+                                    background:#ffebee;border-left:4px solid #c62828;
+                                    border-radius:8px;font-size:0.78rem;color:#b71c1c;
+                                    align-items:flex-start;gap:8px;line-height:1.5;">
+                            <i class="fas fa-exclamation-triangle" style="margin-top:2px;flex-shrink:0;"></i>
+                            <span id="anncEventErrorText"></span>
+                        </div>
+                    </div>
+
+                    <div class="annc-field">
+                        <label>Background image <span class="opt">(optional)</span></label>
+                        <div class="annc-img-drop ${a.image_url ? 'has-image' : ''}" id="anncImgDrop"
+                             onclick="document.getElementById('anncImage').click()">
+                            <div class="annc-img-placeholder">
+                                <div class="annc-img-drop-icon"><i class="fas fa-image"></i></div>
+                                <div class="annc-img-drop-title">Click to upload an image</div>
+                                <div class="annc-img-drop-sub">JPG, PNG, GIF, WEBP — max 5 MB</div>
+                            </div>
+                            <div class="annc-img-preview" id="anncImgPreview"
+                                 style="${a.image_url ? `background-image:url('../${escapeHtml(a.image_url)}')` : ''}">
+                                ${a.image_url ? `
+                                <button type="button" class="annc-img-remove"
+                                        onclick="event.stopPropagation(); clearAnncImage();">
+                                    <i class="fas fa-times"></i>
+                                </button>` : ''}
+                            </div>
+                        </div>
+                        <input type="file" id="anncImage" accept="image/*"
+                               style="display:none" onchange="previewAnncImage(this)">
+                    </div>
+
+                    <div class="annc-toggle-row">
+                        <label class="annc-toggle">
+                            <input type="checkbox" id="anncPinned" ${a.is_pinned ? 'checked' : ''}>
+                            <span class="annc-switch"></span>
+                            <span><i class="fas fa-thumbtack" style="color:#f57c00;"></i> Pin to top</span>
+                        </label>
+                        <label class="annc-toggle">
+                            <input type="checkbox" id="anncActive" ${a.is_active ? 'checked' : ''}>
+                            <span class="annc-switch"></span>
+                            <span><i class="fas fa-eye" style="color:#2E7D32;"></i> Active</span>
+                        </label>
+                    </div>
+
+                    <input type="hidden" id="anncId" value="${a.id}">
+                    <input type="hidden" id="anncClearImg" value="0">
+                </div>
+                <div class="annc-modal-footer">
+                    <button type="button" class="annc-btn ghost" onclick="Swal.close()">
+                        <i class="fas fa-times"></i> Cancel
+                    </button>
+                    <div class="right">
+                        <button type="button" class="annc-btn primary" onclick="saveAnnouncement()">
+                            <i class="fas fa-save"></i> ${id ? 'Update' : 'Publish'}
+                        </button>
+                    </div>
+                </div>
+            </div>`,
+        width: 640,
+        showConfirmButton: false,
+        showCancelButton: false,
+        allowOutsideClick: false,
+        customClass: { popup: 'annc-popup' },
+        didOpen: () => {
+            // Attach real-time validation as soon as the modal is rendered
+            attachAnnouncementValidation();
+        }
+    });
+}
+
+// ═══════════════════════════════════════════════════════════
+// REAL-TIME VALIDATION — Expiry & Event Schedule
+// ═══════════════════════════════════════════════════════════
+function _anncNow() {
+    // Returns a Date object for "now" (local time)
+    return new Date();
+}
+
+function _anncFmtDateTime(d) {
+    return d.toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' });
+}
+
+/**
+ * EXPIRY: must be strictly in the future (with 1-minute grace).
+ */
+function validateExpiryLive() {
+    const el = document.getElementById('anncExpiresAt');
+    const errBox = document.getElementById('anncExpiryError');
+    const errTxt = document.getElementById('anncExpiryErrorText');
+    if (!el || !errBox || !errTxt) return true;
+
+    const val = el.value;
+    if (!val) {
+        errBox.style.display = 'none';
+        el.style.borderColor = '';
+        return true;
+    }
+
+    const chosen = new Date(val);
+    const now = _anncNow();
+    const diffMs = chosen.getTime() - now.getTime();
+
+    // Reject anything in the past OR within the next 60 seconds
+    if (isNaN(chosen.getTime())) {
+        errTxt.textContent = 'Invalid expiry date.';
+        errBox.style.display = 'flex';
+        el.style.borderColor = '#c62828';
+        return false;
+    }
+    if (diffMs <= 60000) {
+        errTxt.innerHTML =
+            `Expiry must be at least <b>1 minute in the future</b>. ` +
+            `Now is <b>${_anncFmtDateTime(now)}</b>.`;
+        errBox.style.display = 'flex';
+        el.style.borderColor = '#c62828';
+        return false;
+    }
+
+    errBox.style.display = 'none';
+    el.style.borderColor = '';
+    return true;
+}
+
+/**
+ * EVENT SCHEDULE:
+ *   - Event date must be today or future.
+ *   - If event date is today, event time must be strictly in the future.
+ *   - If event date is in the future, event time can be anything.
+ *   - If event time is provided but event date is not → error.
+ */
+function validateEventScheduleLive() {
+    const dEl = document.getElementById('anncEventDate');
+    const tEl = document.getElementById('anncEventTime');
+    const errBox = document.getElementById('anncEventError');
+    const errTxt = document.getElementById('anncEventErrorText');
+    if (!dEl || !tEl || !errBox || !errTxt) return true;
+
+    const dVal = dEl.value;
+    const tVal = tEl.value;
+
+    // Clear state
+    dEl.style.borderColor = '';
+    tEl.style.borderColor = '';
+    errBox.style.display = 'none';
+
+    // No date and no time → fine
+    if (!dVal && !tVal) return true;
+
+    // Time but no date → error
+    if (!dVal && tVal) {
+        errTxt.innerHTML = 'Please pick an <b>Event Date</b> first before setting an Event Time.';
+        errBox.style.display = 'flex';
+        tEl.style.borderColor = '#c62828';
+        return false;
+    }
+
+    // Date provided — build a Date object
+    const now = _anncNow();
+    const todayStr = now.toISOString().split('T')[0];
+
+    // Date in the past → error
+    if (dVal < todayStr) {
+        errTxt.innerHTML =
+            `Event date cannot be in the past. ` +
+            `Earliest allowed is <b>today (${todayStr})</b>.`;
+        errBox.style.display = 'flex';
+        dEl.style.borderColor = '#c62828';
+        return false;
+    }
+
+    // Date is today → check time
+    if (dVal === todayStr) {
+        if (!tVal) {
+            // If today but no time → not necessarily an error, but warn
+            // (user might want an all-day event today — we allow it)
+            return true;
+        }
+        const [hh, mm] = tVal.split(':').map(n => parseInt(n, 10));
+        const chosen = new Date(now);
+        chosen.setHours(hh, mm, 0, 0);
+
+        if (chosen.getTime() <= now.getTime()) {
+            errTxt.innerHTML =
+                `For an event <b>today</b>, the time must be in the future. ` +
+                `Current time is <b>${now.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}</b>.`;
+            errBox.style.display = 'flex';
+            tEl.style.borderColor = '#c62828';
+            return false;
+        }
+    }
+
+    // Future date — any time is fine
+    return true;
+}
+
+// Attach live validation to both expiry + event fields as soon as the modal opens
+function attachAnnouncementValidation() {
+    // These will be re-attached every time the modal opens (safe: uses onchange/oninput in HTML)
+    // But we also add a MutationObserver fallback in case the HTML attrs were stripped.
+    const exp = document.getElementById('anncExpiresAt');
+    const evD = document.getElementById('anncEventDate');
+    const evT = document.getElementById('anncEventTime');
+
+    if (exp && !exp.dataset.vBound) {
+        exp.dataset.vBound = '1';
+        exp.addEventListener('input',  validateExpiryLive);
+        exp.addEventListener('change', validateExpiryLive);
+    }
+    if (evD && !evD.dataset.vBound) {
+        evD.dataset.vBound = '1';
+        evD.addEventListener('input',  validateEventScheduleLive);
+        evD.addEventListener('change', validateEventScheduleLive);
+    }
+    if (evT && !evT.dataset.vBound) {
+        evT.dataset.vBound = '1';
+        evT.addEventListener('input',  validateEventScheduleLive);
+        evT.addEventListener('change', validateEventScheduleLive);
+    }
+
+    // Initial validation pass
+    validateExpiryLive();
+    validateEventScheduleLive();
+}
+
+function previewAnncImage(input) {
+    const drop = document.getElementById('anncImgDrop');
+    const prev = document.getElementById('anncImgPreview');
+    if (!input.files || !input.files[0]) return;
+    const url = URL.createObjectURL(input.files[0]);
+    prev.style.backgroundImage = `url('${url}')`;
+    drop.classList.add('has-image');
+    if (!prev.querySelector('.annc-img-remove')) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'annc-img-remove';
+        btn.innerHTML = '<i class="fas fa-times"></i>';
+        btn.onclick = (e) => { e.stopPropagation(); clearAnncImage(); };
+        prev.appendChild(btn);
+    }
+}
+
+function clearAnncImage() {
+    const drop = document.getElementById('anncImgDrop');
+    const prev = document.getElementById('anncImgPreview');
+    const file = document.getElementById('anncImage');
+    drop.classList.remove('has-image');
+    prev.style.backgroundImage = '';
+    prev.innerHTML = '';
+    if (file) file.value = '';
+    document.getElementById('anncClearImg').value = '1';
+}
+
+async function saveAnnouncement() {
+    const id       = document.getElementById('anncId').value;
+    const title    = document.getElementById('anncTitle').value.trim();
+    const body     = document.getElementById('anncBody').value.trim();
+    const category = document.getElementById('anncCategory').value;
+    const expires  = document.getElementById('anncExpiresAt').value;
+    const eventDate = document.getElementById('anncEventDate').value;
+    const eventTime = document.getElementById('anncEventTime').value;
+    const pinned   = document.getElementById('anncPinned').checked ? '1' : '0';
+    const active   = document.getElementById('anncActive').checked ? '1' : '0';
+    const imgFile  = document.getElementById('anncImage').files[0];
+
+    if (!title) { Swal.fire('Error', 'Title is required.', 'error'); return; }
+    if (!body)  { Swal.fire('Error', 'Message body is required.', 'error'); return; }
+
+    // Hard-block on any invalid field
+    const expiryOk = validateExpiryLive();
+    const eventOk  = validateEventScheduleLive();
+
+    if (!expiryOk) {
+        Swal.fire('Error', 'Please fix the expiry date before saving.', 'error');
+        return;
+    }
+    if (!eventOk) {
+        Swal.fire('Error', 'Please fix the event schedule before saving.', 'error');
+        return;
+    }
+
+    // Belt-and-braces: re-check expiry server-side-equivalent
+    if (expires) {
+        const ts = new Date(expires).getTime();
+        if (isNaN(ts) || ts <= Date.now() + 60000) {
+            Swal.fire('Error', 'Expiry date must be at least 1 minute in the future.', 'error');
+            return;
+        }
+    }
+
+    const fd = new FormData();
+    fd.append('ann_action', 'save');
+    fd.append('id', id);
+    fd.append('title', title);
+    fd.append('body', body);
+    fd.append('category', category);
+    fd.append('expires_at', expires);
+    fd.append('event_date', eventDate);
+    fd.append('event_time', eventTime);
+    fd.append('is_pinned', pinned);
+    fd.append('is_active', active);
+    if (imgFile) fd.append('image', imgFile);
+
+    Swal.fire({ title: 'Saving…', allowOutsideClick: false, didOpen: () => Swal.showLoading() });
+
+    try {
+        const r = await fetch('?', { method: 'POST', body: fd });
+        const d = await r.json();
+        Swal.close();
+        if (d.success) {
+            Swal.fire({ icon: 'success', title: 'Saved', timer: 1200, showConfirmButton: false });
+            loadAnnouncements();
+        } else {
+            Swal.fire('Error', d.message || 'Failed to save.', 'error');
+        }
+    } catch (e) {
+        Swal.close();
+        Swal.fire('Error', 'Network error.', 'error');
+    }
+}
+
+async function toggleAnnouncement(id, field) {
+    const fd = new FormData();
+    fd.append('ann_action', 'toggle');
+    fd.append('id', id);
+    fd.append('field', field);
+    try {
+        const r = await fetch('?', { method: 'POST', body: fd });
+        const d = await r.json();
+        if (d.success) {
+            // Remember which announcement we just toggled so the carousel
+            // can jump to its slide after reload — no confusing "wrong card" flash.
+            window.__anncFocusId = Number(id);
+            loadAnnouncements();
+        } else {
+            Swal.fire('Error', d.message || 'Failed.', 'error');
+        }
+    } catch (e) {
+        Swal.fire('Error', 'Network error.', 'error');
+    }
+}
+
+async function deleteAnnouncement(id) {
+    const c = await Swal.fire({
+        icon: 'warning',
+        title: 'Delete announcement?',
+        text: 'This cannot be undone.',
+        showCancelButton: true,
+        confirmButtonText: 'Delete',
+        confirmButtonColor: '#c62828',
+        cancelButtonColor: '#6c757d',
+    });
+    if (!c.isConfirmed) return;
+
+    const fd = new FormData();
+    fd.append('ann_action', 'delete');
+    fd.append('id', id);
+
+    try {
+        const r = await fetch('?', { method: 'POST', body: fd });
+        const d = await r.json();
+        if (d.success) {
+            Swal.fire({ icon: 'success', title: 'Deleted', timer: 1200, showConfirmButton: false });
+            window.__anncFocusId = null;
+            loadAnnouncements();
+        } else Swal.fire('Error', d.message || 'Failed.', 'error');
+    } catch (e) {
+        Swal.fire('Error', 'Network error.', 'error');
+    }
 }
 
 function goToUnverifiedAccounts() {
@@ -2214,13 +4468,7 @@ standaloneItems.forEach(item => {
         if (view === 'dashboard') {
             document.getElementById('dashboardBody').innerHTML = renderDashboardDefault();
             closeCertification();
-            setTimeout(() => {
-                displayCurrentDate();
-                loadDocumentStats();
-                loadDashboardEquipmentStats();
-                loadRecentDocuments();
-                loadRecentBookings();
-            }, 100);
+            setTimeout(initAdminDashboard, 50);
         } else if (view === 'reports') {
             document.getElementById('dashboardBody').innerHTML = renderReports();
             closeCertification();
@@ -2240,11 +4488,7 @@ standaloneItems.forEach(item => {
 // Load default dashboard with all stats
 document.querySelector('.nav-item.standalone[data-view="dashboard"]').classList.add('active');
 document.getElementById('dashboardBody').innerHTML = renderDashboardDefault();
-displayCurrentDate();
-loadDocumentStats();
-loadDashboardEquipmentStats();
-loadRecentDocuments();
-loadRecentBookings();
+initAdminDashboard();
 
 // Prevent back button after logout
 (function() { history.pushState(null, null, location.href); window.onpopstate = function() { history.go(1); }; })();

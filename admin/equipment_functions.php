@@ -705,7 +705,7 @@ function updateEquipmentQuantityWithStatus($conn, $equipmentId, $newQuantity, $d
 }
 // ============ BOOKING FUNCTIONS ============
 
-function getAllBookings($conn, $status = null, $type = null, $page = 1, $perPage = 10) {
+function getAllBookings($conn, $status = null, $type = null, $page = 1, $perPage = 10, $date = null) {
     $offset = ($page - 1) * $perPage;
     
     $sql = "SELECT r.*, 
@@ -760,6 +760,12 @@ function getAllBookings($conn, $status = null, $type = null, $page = 1, $perPage
     if ($type && $type !== 'all') {
         $whereConditions[] = "r.request_type = ?";
         $params[] = $type;
+        $types .= "s";
+    }
+
+    if ($date) {
+        $whereConditions[] = "DATE(COALESCE(r.start_datetime, r.request_date)) = ?";
+        $params[] = $date;
         $types .= "s";
     }
     

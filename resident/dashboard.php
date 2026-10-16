@@ -15,7 +15,7 @@ header("Expires: 0");
 $resident_id = $_SESSION['user_id'];
 $resident_name = $_SESSION['username'];
 
-$sql = "SELECT id, first_name, last_name, middle_name, email, phone, address, is_verified 
+$sql = "SELECT id, first_name, last_name, middle_name, email, phone_number, address, is_verified 
         FROM resident WHERE id = ? AND is_active = 1";
 $stmt = mysqli_prepare($conn, $sql);
 
@@ -51,9 +51,9 @@ if (isset($_SESSION['payment_error'])) {
 }
 
 if (isset($_GET['payment']) && $_GET['payment'] === 'success') {
-    $payment_message = 'Payment completed successfully! Your document will be processed.';
+    $payment_message = 'Payment confirmed! Your request has been added to your history.';
 } elseif (isset($_GET['payment']) && $_GET['payment'] === 'failed') {
-    $payment_error = 'Payment was not completed. Please try again.';
+    $payment_error = 'Payment was not completed. No request was created.';
 }
 
 ?>
@@ -763,7 +763,39 @@ if (isset($_GET['payment']) && $_GET['payment'] === 'success') {
 .push-confirm-btn.confirm.danger:hover {
     box-shadow: 0 4px 12px rgba(220, 53, 69, 0.3);
 }
+/* Notification KP Form button */
+.notif-view-doc-btn {
+    margin-top: 10px;
+    padding: 7px 14px;
+    background: linear-gradient(135deg, #c62828, #e53935);
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    font-size: 11px;
+    font-weight: 700;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    letter-spacing: 0.3px;
+    box-shadow: 0 2px 6px rgba(198, 40, 40, 0.25);
+    transition: all 0.15s ease;
+}
+.notif-view-doc-btn:hover {
+    background: linear-gradient(135deg, #b71c1c, #c62828);
+    transform: translateY(-1px);
+    box-shadow: 0 4px 10px rgba(198, 40, 40, 0.35);
+}
+.notif-view-doc-btn:active {
+    transform: translateY(0);
+    box-shadow: 0 2px 6px rgba(198, 40, 40, 0.25);
+}
+.notif-view-doc-btn i {
+    font-size: 12px;
+}
     </style>
+
+    <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
 </head>
 <body>
     <button class="menu-toggle" id="menuToggle"><i class="fas fa-bars"></i></button>
@@ -1141,180 +1173,9 @@ if (isset($_GET['payment']) && $_GET['payment'] === 'success') {
         </div>
     </div>
 
-    <!-- Payment Options Modal -->
-    <div id="paymentOptionsModal" class="request-modal">
-        <div class="request-modal-content" style="max-width: 500px;">
-            <div class="request-modal-header" style="background: linear-gradient(135deg, #28a745, #1e7e34);">
-                <h3><i class="fas fa-credit-card"></i> Payment Options</h3>
-                <button class="close-modal" onclick="closePaymentOptionsModal()">&times;</button>
-            </div>
-            <div class="request-modal-body">
-                <div id="paymentOptionsInfo" style="margin-bottom: 20px;">
-                    <div class="selected-doc-info" style="background: #e8f5e9;">
-                        <div>
-                            <strong>Document:</strong> <span id="paymentDocName"></span><br>
-                            <strong>Total Amount:</strong> <span id="paymentTotalAmount" style="color: #28a745; font-size: 1.3rem; font-weight: bold;"></span>
-                        </div>
-                    </div>
-                </div>
-                <h4 style="margin-bottom: 15px;"><i class="fas fa-credit-card"></i> Choose Payment Method</h4>
-                <div class="payment-methods-grid" style="display: grid; gap: 15px; margin-bottom: 20px;">
-                    <div class="payment-option-card" onclick="processPayment('gcash')" style="border: 2px solid #ddd; border-radius: 16px; padding: 20px; cursor: pointer; transition: all 0.3s; background: white;">
-                        <div style="display: flex; align-items: center; gap: 15px;">
-                            <div style="background: linear-gradient(135deg, #0066B3, #00B4D8); width: 60px; height: 60px; border-radius: 50%; display: flex; align-items: center; justify-content: center;">
-                                <i class="fas fa-mobile-alt" style="font-size: 28px; color: white;"></i>
-                            </div>
-                            <div style="flex: 1;">
-                                <h3 style="margin: 0 0 5px 0; color: #0066B3;">GCash</h3>
-                                <p style="margin: 0; color: #666; font-size: 14px;">Pay using GCash (Instant confirmation)</p>
-                            </div>
-                            <div><i class="fas fa-chevron-right" style="color: #0066B3;"></i></div>
-                        </div>
-                    </div>
-                    <div class="payment-option-card" onclick="processPayment('maya')" style="border: 2px solid #ddd; border-radius: 16px; padding: 20px; cursor: pointer; transition: all 0.3s; background: white;">
-                        <div style="display: flex; align-items: center; gap: 15px;">
-                            <div style="background: linear-gradient(135deg, #00A86B, #00C853); width: 60px; height: 60px; border-radius: 50%; display: flex; align-items: center; justify-content: center;">
-                                <i class="fas fa-mobile-alt" style="font-size: 28px; color: white;"></i>
-                            </div>
-                            <div style="flex: 1;">
-                                <h3 style="margin: 0 0 5px 0; color: #00A86B;">Maya</h3>
-                                <p style="margin: 0; color: #666; font-size: 14px;">Pay using Maya (Instant confirmation)</p>
-                            </div>
-                            <div><i class="fas fa-chevron-right" style="color: #00A86B;"></i></div>
-                        </div>
-                    </div>
-                    <div class="payment-option-card" onclick="processPayAtClaim()" style="border: 2px solid #ddd; border-radius: 16px; padding: 20px; cursor: pointer; transition: all 0.3s; background: white;">
-                        <div style="display: flex; align-items: center; gap: 15px;">
-                            <div style="background: linear-gradient(135deg, #ff9800, #f57c00); width: 60px; height: 60px; border-radius: 50%; display: flex; align-items: center; justify-content: center;">
-                                <i class="fas fa-building" style="font-size: 28px; color: white;"></i>
-                            </div>
-                            <div style="flex: 1;">
-                                <h3 style="margin: 0 0 5px 0; color: #ff9800;">Pay at Claim</h3>
-                                <p style="margin: 0; color: #666; font-size: 14px;">Pay when you claim the document at Barangay Hall</p>
-                            </div>
-                            <div><i class="fas fa-chevron-right" style="color: #ff9800;"></i></div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
 
-    <!-- Pay at Claim Confirmation Modal -->
-    <div id="payAtClaimModal" class="request-modal">
-        <div class="request-modal-content" style="max-width: 450px;">
-            <div class="request-modal-header" style="background: linear-gradient(135deg, #ff9800, #f57c00);">
-                <h3><i class="fas fa-hand-holding-usd"></i> Pay at Claim</h3>
-                <button class="close-modal" onclick="closePayAtClaimModal()">&times;</button>
-            </div>
-            <div class="request-modal-body">
-                <div style="text-align: center; margin-bottom: 20px;">
-                    <i class="fas fa-building" style="font-size: 60px; color: #ff9800;"></i>
-                </div>
-                <div class="selected-doc-info" style="background: #fff3e0; margin-bottom: 20px;">
-                    <div>
-                        <strong>Document:</strong> <span id="claimDocName"></span><br>
-                        <strong>Amount to Pay:</strong> <span id="claimAmount" style="color: #ff9800; font-size: 1.3rem; font-weight: bold;"></span>
-                    </div>
-                </div>
-                <div style="background: #fff3cd; padding: 15px; border-radius: 12px; margin-bottom: 20px;">
-                    <h5><i class="fas fa-info-circle"></i> Important Information</h5>
-                    <ul style="margin-top: 10px; padding-left: 20px;">
-                        <li>Bring <strong>exact amount</strong> to Barangay Hall</li>
-                        <li>Bring your <strong>valid ID</strong> for verification</li>
-                        <li>Payment must be made at the time of claiming</li>
-                        <li>Visit during office hours: <strong>Monday-Friday, 8:00 AM - 5:00 PM</strong></li>
-                        <li>Address: <strong>San Bartolome, Sto Tomas, Pampanga</strong></li>
-                    </ul>
-                </div>
-                <button onclick="confirmPayAtClaim()" class="submit-btn" style="background: linear-gradient(135deg, #ff9800, #f57c00);">
-                    <i class="fas fa-check-circle"></i> Confirm Pay at Claim
-                </button>
-                <button onclick="closePayAtClaimModal()" class="submit-btn" style="background: #6c757d; margin-top: 10px;">
-                    <i class="fas fa-arrow-left"></i> Go Back
-                </button>
-            </div>
-        </div>
-    </div>
 
-    <!-- Payment Confirmation Modal -->
-    <div id="paymentConfirmModal" class="request-modal">
-        <div class="request-modal-content" style="max-width: 400px;">
-            <div class="request-modal-header" style="background: linear-gradient(135deg, #28a745, #1e7e34);">
-                <h3><i class="fas fa-check-circle"></i> Confirm Payment</h3>
-                <button class="close-modal" onclick="closePaymentConfirmModal()">&times;</button>
-            </div>
-            <div class="request-modal-body" style="text-align: center;">
-                <div style="margin-bottom: 20px;">
-                    <i class="fas fa-credit-card" style="font-size: 60px; color: #28a745;"></i>
-                </div>
-                <div class="selected-doc-info" style="background: #e8f5e9; margin-bottom: 20px;">
-                    <div>
-                        <strong>Document:</strong> <span id="confirmDocName"></span><br>
-                        <strong>Amount to Pay:</strong>
-                        <span id="confirmAmount" style="color: #28a745; font-size: 1.8rem; font-weight: bold; display: block;"></span>
-                    </div>
-                </div>
-                <div style="background: #fff3cd; padding: 15px; border-radius: 12px; margin-bottom: 20px;">
-                    <p><i class="fas fa-info-circle"></i> <strong>Payment Method:</strong> <span id="confirmMethod"></span></p>
-                    <p>Click "Confirm Payment" to complete your transaction.</p>
-                </div>
-                <button onclick="confirmPayment()" class="submit-btn" style="background: linear-gradient(135deg, #28a745, #1e7e34);">
-                    <i class="fas fa-check-circle"></i> Confirm Payment
-                </button>
-                <button onclick="closePaymentConfirmModal()" class="submit-btn" style="background: #6c757d; margin-top: 10px;">
-                    <i class="fas fa-times"></i> Cancel
-                </button>
-            </div>
-        </div>
-    </div>
 
-    <!-- Online Payment Modal -->
-    <div id="onlinePaymentModal" class="request-modal">
-        <div class="request-modal-content" style="max-width: 500px;">
-            <div class="request-modal-header" style="background: linear-gradient(135deg, #00b4d8, #0077b6);">
-                <h3><i class="fas fa-qrcode"></i> Complete Your Payment</h3>
-                <button class="close-modal" onclick="closeOnlinePaymentModal()">&times;</button>
-            </div>
-            <div class="request-modal-body" style="text-align: center;">
-                <div class="selected-doc-info" style="background: #e0f7fa; margin-bottom: 20px;">
-                    <div>
-                        <strong>Document:</strong> <span id="onlineDocName"></span><br>
-                        <strong>Amount to Pay:</strong> <span id="onlineAmount" style="color: #0077b6; font-size: 1.5rem; font-weight: bold;"></span>
-                    </div>
-                </div>
-                <div style="background: white; padding: 20px; border-radius: 16px; margin-bottom: 20px;">
-                    <img id="qrCodeImage" src="" alt="QR Code" style="width: 200px; height: 200px; margin: 0 auto;">
-                    <p style="margin-top: 10px; color: #666;">
-                        <i class="fas fa-mobile-alt"></i> Scan with GCash or Maya
-                    </p>
-                </div>
-                <div style="background: #f8f9fa; padding: 15px; border-radius: 12px; margin-bottom: 20px;">
-                    <h4><i class="fas fa-info-circle"></i> Send payment to:</h4>
-                    <p style="font-size: 1.2rem; font-weight: bold; color: #0077b6;" id="paymentNumberDisplay">09949293657</p>
-                    <p><strong>Account Name:</strong> Barangay San Bartolome</p>
-                    <p><strong>Reference:</strong> <span id="paymentRefDisplay"></span></p>
-                    <p class="warning-text" style="color: #ff9800; margin-top: 10px;">
-                        <i class="fas fa-exclamation-triangle"></i>
-                        After payment, upload your screenshot below
-                    </p>
-                </div>
-                <form id="onlinePaymentForm" enctype="multipart/form-data">
-                    <input type="hidden" name="action" value="upload_payment_proof">
-                    <input type="hidden" name="payment_id" id="onlinePaymentId">
-                    <input type="hidden" name="reference_number" id="autoReference" value="">
-                    <div class="form-group">
-                        <label class="required">Upload Payment Screenshot</label>
-                        <input type="file" name="payment_proof" id="paymentProof" required accept=".jpg,.jpeg,.png,.pdf">
-                        <small>Upload a screenshot of your successful payment</small>
-                    </div>
-                    <button type="submit" class="submit-btn" style="background: linear-gradient(135deg, #00b4d8, #0077b6);">
-                        <i class="fas fa-upload"></i> Submit Payment Proof
-                    </button>
-                </form>
-            </div>
-        </div>
-    </div>
 
     <!-- Booking Details Modal -->
     <div id="bookingDetailsModal" class="request-modal">
@@ -1397,7 +1258,7 @@ if (isset($_GET['payment']) && $_GET['payment'] === 'success') {
         firstName: <?php echo json_encode($resident['first_name']); ?>,
         lastName: <?php echo json_encode($resident['last_name']); ?>,
         email: <?php echo json_encode($resident['email']); ?>,
-        phone: <?php echo json_encode($resident['phone'] ?: 'Not provided'); ?>,
+        phone: <?php echo json_encode($resident['phone_number'] ?: ' '); ?>,
         address: <?php echo json_encode($resident['address'] ?: 'Not specified'); ?>,
         isVerified: <?php echo $resident['is_verified'] == 1 ? 'true' : 'false'; ?>
     };
@@ -1877,64 +1738,122 @@ async function refreshNotificationUI() {
         }
     }
 
-    function renderNotificationsList(notifications) {
-        const list = document.getElementById('notificationsList');
-        if (!list) return;
-        if (!notifications || notifications.length === 0) {
-            list.innerHTML = `<div class="empty-notifications"><i class="fas fa-bell-slash"></i><p>No notifications</p></div>`;
-            selectedNotificationIds.clear();
-            updateSelectionUI();
-            return;
+function renderNotificationsList(notifications) {
+    const list = document.getElementById('notificationsList');
+    if (!list) return;
+    if (!notifications || notifications.length === 0) {
+        list.innerHTML = `<div class="empty-notifications"><i class="fas fa-bell-slash"></i><p>No notifications</p></div>`;
+        selectedNotificationIds.clear();
+        updateSelectionUI();
+        return;
+    }
+    let html = '';
+    notifications.forEach(function(notif) {
+        const isRead = notif.is_read ? 'read' : 'unread';
+        const timeAgo = formatTimeAgo(notif.created_at);
+        let icon = 'fa-bell', iconColor = '#2e7d32', iconBg = '#e8f5e9', typeLabel = '';
+        switch(notif.type) {
+            case 'document_pickup_today': icon = 'fa-calendar-check'; iconColor = '#ff9800'; iconBg = '#fff3cd'; typeLabel = 'Pickup Today'; break;
+            case 'document_ready': icon = 'fa-file-check'; iconColor = '#28a745'; iconBg = '#d4edda'; typeLabel = 'Ready'; break;
+            case 'document_pending': icon = 'fa-file-signature'; iconColor = '#ffc107'; iconBg = '#fff3cd'; typeLabel = 'Pending'; break;
+            case 'document_approved': icon = 'fa-file-signature'; iconColor = '#28a745'; iconBg = '#d4edda'; typeLabel = 'Approved'; break;
+            case 'document_rejected': icon = 'fa-file-excel'; iconColor = '#dc3545'; iconBg = '#f8d7da'; typeLabel = 'Rejected'; break;
+            case 'document_completed': icon = 'fa-file-alt'; iconColor = '#17a2b8'; iconBg = '#d1ecf1'; typeLabel = 'Completed'; break;
+            case 'return_reminder': icon = 'fa-clock'; iconColor = '#ffc107'; iconBg = '#fff3cd'; typeLabel = 'Return Reminder'; break;
+            case 'equipment_overdue': icon = 'fa-exclamation-triangle'; iconColor = '#dc3545'; iconBg = '#f8d7da'; typeLabel = 'Overdue'; break;
+            case 'equipment_borrowed': icon = 'fa-hand-holding'; iconColor = '#17a2b8'; iconBg = '#d1ecf1'; typeLabel = 'Borrowed'; break;
+            case 'equipment_returned': icon = 'fa-check-double'; iconColor = '#28a745'; iconBg = '#d4edda'; typeLabel = 'Returned'; break;
+            case 'booking_approved': icon = 'fa-calendar-check'; iconColor = '#28a745'; iconBg = '#d4edda'; typeLabel = 'Approved'; break;
+            case 'booking_rejected': icon = 'fa-calendar-times'; iconColor = '#dc3545'; iconBg = '#f8d7da'; typeLabel = 'Rejected'; break;
+            case 'payment_completed': icon = 'fa-credit-card'; iconColor = '#28a745'; iconBg = '#d4edda'; typeLabel = 'Payment'; break;
+            case 'document_unclaimed': icon = 'fa-inbox'; iconColor = '#ff9800'; iconBg = '#fff3cd'; typeLabel = 'Unclaimed'; break;
+            case 'document_claimed':   icon = 'fa-check-circle'; iconColor = '#28a745'; iconBg = '#d4edda'; typeLabel = 'Claimed'; break;
+            case 'warning':            icon = 'fa-exclamation-triangle'; iconColor = '#e65100'; iconBg = '#fff3e0'; typeLabel = 'Notice'; break;
+            case 'hearing':            icon = 'fa-gavel'; iconColor = '#6a1b9a'; iconBg = '#f3e5f5'; typeLabel = 'Hearing'; break;
+            case 'info':               icon = 'fa-info-circle'; iconColor = '#1565c0'; iconBg = '#e3f2fd'; typeLabel = 'Info'; break;
+            case 'success':            icon = 'fa-check-circle'; iconColor = '#2e7d32'; iconBg = '#e8f5e9'; typeLabel = 'Success'; break;
+            case 'error':              icon = 'fa-times-circle'; iconColor = '#c62828'; iconBg = '#ffebee'; typeLabel = 'Alert'; break;
+            case 'assignment':         icon = 'fa-user-check'; iconColor = '#1565c0'; iconBg = '#e3f2fd'; typeLabel = 'Assignment'; break;
         }
-        let html = '';
-        notifications.forEach(function(notif) {
-            const isRead = notif.is_read ? 'read' : 'unread';
-            const timeAgo = formatTimeAgo(notif.created_at);
-            let icon = 'fa-bell', iconColor = '#2e7d32', iconBg = '#e8f5e9', typeLabel = '';
-            switch(notif.type) {
-                case 'document_pickup_today': icon = 'fa-calendar-check'; iconColor = '#ff9800'; iconBg = '#fff3cd'; typeLabel = 'Pickup Today'; break;
-                case 'document_ready': icon = 'fa-file-check'; iconColor = '#28a745'; iconBg = '#d4edda'; typeLabel = 'Ready'; break;
-                case 'document_pending': icon = 'fa-file-signature'; iconColor = '#ffc107'; iconBg = '#fff3cd'; typeLabel = 'Pending'; break;
-                case 'document_approved': icon = 'fa-file-signature'; iconColor = '#28a745'; iconBg = '#d4edda'; typeLabel = 'Approved'; break;
-                case 'document_rejected': icon = 'fa-file-excel'; iconColor = '#dc3545'; iconBg = '#f8d7da'; typeLabel = 'Rejected'; break;
-                case 'document_completed': icon = 'fa-file-alt'; iconColor = '#17a2b8'; iconBg = '#d1ecf1'; typeLabel = 'Completed'; break;
-                case 'return_reminder': icon = 'fa-clock'; iconColor = '#ffc107'; iconBg = '#fff3cd'; typeLabel = 'Return Reminder'; break;
-                case 'equipment_overdue': icon = 'fa-exclamation-triangle'; iconColor = '#dc3545'; iconBg = '#f8d7da'; typeLabel = 'Overdue'; break;
-                case 'equipment_borrowed': icon = 'fa-hand-holding'; iconColor = '#17a2b8'; iconBg = '#d1ecf1'; typeLabel = 'Borrowed'; break;
-                case 'equipment_returned': icon = 'fa-check-double'; iconColor = '#28a745'; iconBg = '#d4edda'; typeLabel = 'Returned'; break;
-                case 'booking_approved': icon = 'fa-calendar-check'; iconColor = '#28a745'; iconBg = '#d4edda'; typeLabel = 'Approved'; break;
-                case 'booking_rejected': icon = 'fa-calendar-times'; iconColor = '#dc3545'; iconBg = '#f8d7da'; typeLabel = 'Rejected'; break;
-                               case 'payment_completed': icon = 'fa-credit-card'; iconColor = '#28a745'; iconBg = '#d4edda'; typeLabel = 'Payment'; break;
-                case 'document_unclaimed': icon = 'fa-inbox'; iconColor = '#ff9800'; iconBg = '#fff3cd'; typeLabel = 'Unclaimed'; break;
-                case 'document_claimed':   icon = 'fa-check-circle'; iconColor = '#28a745'; iconBg = '#d4edda'; typeLabel = 'Claimed'; break;
-            }
-            
-            const isSelected = selectedNotificationIds.has(String(notif.id));
-            html += `
-                <div class="notification-item ${isRead} ${isSelected ? 'selected' : ''}" data-id="${notif.id}">
-                    <input type="checkbox" class="notification-checkbox ${isSelectionMode ? 'visible' : ''}" data-id="${notif.id}" ${isSelected ? 'checked' : ''}
-                        onclick="event.stopPropagation(); toggleNotificationSelection('${notif.id}', this.checked)">
-                    <div class="notification-content" onclick="handleNotificationItemClick('${notif.id}', '${notif.type}')">
-                        <div style="display: flex; gap: 12px;">
-                            <div style="flex-shrink: 0; width: 40px; height: 40px; border-radius: 50%; background: ${iconBg}; display: flex; align-items: center; justify-content: center;">
-                                <i class="fas ${icon}" style="color: ${iconColor}; font-size: 18px;"></i>
+
+        const isSelected = selectedNotificationIds.has(String(notif.id));
+        const hasDoc = !!(notif.document_path && String(notif.document_path).trim());
+
+        // "View KP Form" button — only when a document is attached
+        const docBtn = hasDoc ? `
+            <button type="button"
+                    class="notif-view-doc-btn"
+                    onclick="event.stopPropagation(); openNotifDocument('${escapeHtml(notif.document_path)}', ${notif.id});"
+                    title="Open the attached document (KP Form)">
+                <i class="fas fa-file-pdf"></i> View KP Form
+            </button>` : '';
+
+        html += `
+            <div class="notification-item ${isRead} ${isSelected ? 'selected' : ''}" data-id="${notif.id}">
+                <input type="checkbox" class="notification-checkbox ${isSelectionMode ? 'visible' : ''}" data-id="${notif.id}" ${isSelected ? 'checked' : ''}
+                    onclick="event.stopPropagation(); toggleNotificationSelection('${notif.id}', this.checked)">
+                <div class="notification-content" onclick="handleNotificationItemClick('${notif.id}', '${notif.type}', '${notif.document_path ? escapeHtml(notif.document_path) : ''}')">
+                    <div style="display: flex; gap: 12px;">
+                        <div style="flex-shrink: 0; width: 40px; height: 40px; border-radius: 50%; background: ${iconBg}; display: flex; align-items: center; justify-content: center;">
+                            <i class="fas ${icon}" style="color: ${iconColor}; font-size: 18px;"></i>
+                        </div>
+                        <div style="flex: 1; min-width: 0;">
+                            <div class="notif-title" style="font-weight: 600; font-size: 13px; color: #333; margin-bottom: 4px;">${escapeHtml(notif.title)}</div>
+                            <div class="notif-message" style="font-size: 12px; color: #666; line-height: 1.4; word-break: break-word;">${escapeHtml(notif.message)}</div>
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 8px; gap: 8px; flex-wrap: wrap;">
+                                <span class="notif-time" style="font-size: 10px; color: #bbb;"><i class="far fa-clock"></i> ${timeAgo}</span>
+                                ${typeLabel ? `<span class="notif-type" style="background: ${iconBg}; color: ${iconColor}; font-size: 9px; padding: 2px 8px; border-radius: 10px; font-weight: 500;">${typeLabel}</span>` : ''}
                             </div>
-                            <div style="flex: 1; min-width: 0;">
-                                <div class="notif-title" style="font-weight: 600; font-size: 13px; color: #333; margin-bottom: 4px;">${escapeHtml(notif.title)}</div>
-                                <div class="notif-message" style="font-size: 12px; color: #666; line-height: 1.4; word-break: break-word;">${escapeHtml(notif.message)}</div>
-                                <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 8px;">
-                                    <span class="notif-time" style="font-size: 10px; color: #bbb;"><i class="far fa-clock"></i> ${timeAgo}</span>
-                                    ${typeLabel ? `<span class="notif-type" style="background: ${iconBg}; color: ${iconColor}; font-size: 9px; padding: 2px 8px; border-radius: 10px; font-weight: 500;">${typeLabel}</span>` : ''}
-                                </div>
-                            </div>
+                            ${docBtn}
                         </div>
                     </div>
                 </div>
-            `;
-        });
-        list.innerHTML = html;
-        updateSelectionUI();
+            </div>
+        `;
+    });
+    list.innerHTML = html;
+    updateSelectionUI();
+}
+
+/**
+ * Open the KP form (or any document) attached to a notification.
+ * Marks the notification as read, then opens the PDF in a new tab.
+ */
+function openNotifDocument(documentPath, notificationId) {
+    if (!documentPath || !String(documentPath).trim()) {
+        alert('No document attached to this notification.');
+        return;
     }
+
+    // Build the URL relative to /resident/
+    // documentPath is stored like: uploads/kp_notices/complainant/xxx.pdf
+    const url = '../' + String(documentPath).replace(/^\/+/, '');
+
+    // Mark as read (fire-and-forget)
+    try {
+        const fd = new FormData();
+        fd.append('action', 'mark_notification_read');
+        fd.append('notification_id', notificationId);
+        fetch('ajax_handler.php', { method: 'POST', body: fd })
+            .then(() => {
+                const item = document.querySelector(`.notification-item[data-id="${notificationId}"]`);
+                if (item) {
+                    item.classList.remove('unread');
+                    item.classList.add('read');
+                }
+                if (typeof updateNotificationBadgeFromServer === 'function') {
+                    updateNotificationBadgeFromServer();
+                }
+            })
+            .catch(() => {});
+    } catch (e) { /* silent */ }
+
+    // Open the PDF in a new tab
+    const win = window.open(url, '_blank', 'noopener');
+    if (!win) {
+    
+    }
+}
 
     function formatTimeAgo(dateString) {
         const date = new Date(dateString);
@@ -1947,25 +1866,39 @@ async function refreshNotificationUI() {
         return date.toLocaleDateString();
     }
 
-    async function handleNotificationItemClick(notificationId, type) {
-        if (isSelectionMode) {
-            const cb = document.querySelector(`.notification-checkbox[data-id="${notificationId}"]`);
-            if (cb) { cb.checked = !cb.checked; toggleNotificationSelection(notificationId, cb.checked); }
-            return;
-        }
-        try {
-            const formData = new FormData();
-            formData.append('action', 'mark_notification_read');
-            formData.append('notification_id', notificationId);
-            await fetch('ajax_handler.php', { method: 'POST', body: formData });
-            const item = document.querySelector(`.notification-item[data-id="${notificationId}"]`);
-            if (item) { item.classList.remove('unread'); item.classList.add('read'); }
-            updateNotificationBadgeFromServer();
-            handleNotificationNavigation(type);
-            document.getElementById('notificationsDropdown').classList.remove('show');
-            if (typeof hideDropdownBackdrop === 'function') hideDropdownBackdrop();
-        } catch (error) { console.error('Error handling notification click:', error); }
+async function handleNotificationItemClick(notificationId, type, documentPath) {
+    if (isSelectionMode) {
+        const cb = document.querySelector(`.notification-checkbox[data-id="${notificationId}"]`);
+        if (cb) { cb.checked = !cb.checked; toggleNotificationSelection(notificationId, cb.checked); }
+        return;
     }
+
+    // Mark as read (fire-and-forget)
+    try {
+        const formData = new FormData();
+        formData.append('action', 'mark_notification_read');
+        formData.append('notification_id', notificationId);
+        await fetch('ajax_handler.php', { method: 'POST', body: formData });
+        const item = document.querySelector(`.notification-item[data-id="${notificationId}"]`);
+        if (item) { item.classList.remove('unread'); item.classList.add('read'); }
+        if (typeof updateNotificationBadgeFromServer === 'function') {
+            updateNotificationBadgeFromServer();
+        }
+    } catch (error) {
+        console.error('Error handling notification click:', error);
+    }
+
+    // ── If a KP form is attached, open it directly ──
+    if (documentPath && String(documentPath).trim()) {
+        openNotifDocument(documentPath, notificationId);
+        return;
+    }
+
+    // ── Otherwise, use the existing type-based navigation ──
+    handleNotificationNavigation(type);
+    document.getElementById('notificationsDropdown').classList.remove('show');
+    if (typeof hideDropdownBackdrop === 'function') hideDropdownBackdrop();
+}
 
     function enterSelectionMode() {
         isSelectionMode = true;

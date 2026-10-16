@@ -7147,3 +7147,822 @@ textarea.invalid-field {
     from { transform: rotate(0deg); }
     to { transform: rotate(360deg); }
 }
+.submenu {
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height 0.3s ease;
+    margin-left: 20px;
+}
+.submenu.open { max-height: 300px; }
+.sub-option {
+    padding: 9px 16px 9px 36px;
+    font-size: 0.84rem;
+    color: #cfe8d3;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    border-left: 3px solid transparent;
+    transition: all 0.15s;
+}
+.sub-option:hover { background: rgba(255,255,255,0.08); color: #fff; }
+.sub-option.active-sub {
+    background: rgba(255,255,255,0.12);
+    color: #fff;
+    font-weight: 600;
+    border-left-color: #a5d6a7;
+}
+.nav-item.active-parent { background: rgba(255,255,255,0.12); font-weight: 600; }
+/* ============================================================
+   COMPACT CARD VIEW — Booking Requests + Equipment Items
+   Applied to: admin / captain / secretary dashboards
+   ============================================================ */
+
+/* ── Booking Request Cards (denser grid, smaller cards) ── */
+.cards-grid {
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)) !important;
+    gap: 16px !important;
+    margin-top: 16px !important;
+}
+
+.data-card {
+    border-radius: 16px !important;
+}
+
+.card-header-gradient {
+    padding: 12px 14px !important;
+    min-height: 44px !important;
+}
+
+.card-title-large {
+    font-size: 0.95rem !important;
+    gap: 8px !important;
+}
+
+.card-title-large .type-badge {
+    padding: 3px 9px !important;
+    font-size: 0.62rem !important;
+}
+
+.status-chip {
+    padding: 3px 10px !important;
+    font-size: 0.65rem !important;
+}
+
+.card-content {
+    padding: 12px 14px !important;
+}
+
+.info-row-card {
+    padding: 6px 0 !important;
+}
+
+.info-icon {
+    width: 24px !important;
+    font-size: 0.85rem !important;
+}
+
+.info-label-card {
+    width: 82px !important;
+    font-size: 0.75rem !important;
+}
+
+.info-value-card {
+    font-size: 0.78rem !important;
+}
+
+.click-hint {
+    padding: 8px 14px !important;
+    font-size: 0.68rem !important;
+}
+
+/* ── Equipment Item Cards (denser grid, smaller cards) ── */
+.items-grid {
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)) !important;
+    gap: 12px !important;
+}
+
+.item-card {
+    padding: 12px !important;
+    border-radius: 10px !important;
+}
+
+.item-card strong {
+    font-size: 0.95rem !important;
+}
+
+/* ── Responsive fine-tuning (mobile) ── */
+@media (max-width: 768px) {
+    .cards-grid,
+    .items-grid {
+        grid-template-columns: 1fr !important;
+        gap: 12px !important;
+    }
+
+    .info-label-card {
+        width: 72px !important;
+        font-size: 0.7rem !important;
+    }
+
+    .info-value-card {
+        font-size: 0.74rem !important;
+    }
+
+    .card-title-large {
+        font-size: 0.85rem !important;
+    }
+}
+
+@media (max-width: 480px) {
+    .card-content,
+    .item-card {
+        padding: 10px !important;
+    }
+
+    .info-icon {
+        width: 20px !important;
+        font-size: 0.75rem !important;
+    }
+}
+/* ============================================================
+   COMPACT SHOPEE CARDS — Equipment Type List
+   Applied to: admin / captain / secretary dashboards
+   ============================================================ */
+
+.shopee-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)) !important;
+    gap: 14px !important;
+    margin-top: 16px !important;
+}
+
+.shopee-card {
+    border-radius: 10px !important;
+    box-shadow: 0 1px 6px rgba(0,0,0,0.06) !important;
+}
+
+.shopee-card:hover {
+    transform: translateY(-3px) !important;
+    box-shadow: 0 8px 18px rgba(0,0,0,0.12) !important;
+}
+
+.shopee-info {
+    padding: 10px 10px 6px 10px !important;
+}
+
+.shopee-title {
+    font-size: 0.82rem !important;
+    line-height: 1.3 !important;
+    min-height: 2.4em !important;
+    margin-bottom: 2px !important;
+}
+
+.shopee-category {
+    font-size: 0.62rem !important;
+    margin-bottom: 6px !important;
+    letter-spacing: 0.4px !important;
+}
+
+.shopee-status {
+    margin: 6px 0 !important;
+}
+
+.shopee-status .status-badge {
+    font-size: 0.62rem !important;
+    padding: 3px 8px !important;
+}
+
+.shopee-description {
+    font-size: 0.68rem !important;
+    line-height: 1.35 !important;
+    margin-top: 6px !important;
+    -webkit-line-clamp: 2 !important;
+}
+
+.shopee-footer {
+    padding: 8px 10px !important;
+    font-size: 0.65rem !important;
+}
+
+.shopee-footer .stats-row {
+    font-size: 0.6rem !important;
+    gap: 6px !important;
+}
+
+.shopee-action {
+    font-size: 0.65rem !important;
+}
+
+.shopee-action i {
+    font-size: 0.62rem !important;
+}
+
+.shopee-card .kebab-menu {
+    width: 24px !important;
+    height: 24px !important;
+    font-size: 0.75rem !important;
+}
+
+.image-fallback i {
+    font-size: 44px !important;
+}
+
+/* ── Responsive ── */
+@media (max-width: 768px) {
+    .shopee-grid {
+        grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)) !important;
+        gap: 10px !important;
+    }
+
+    .shopee-title {
+        font-size: 0.75rem !important;
+        min-height: 2.2em !important;
+    }
+
+    .shopee-category {
+        font-size: 0.58rem !important;
+    }
+
+    .shopee-status .status-badge {
+        font-size: 0.58rem !important;
+        padding: 2px 6px !important;
+    }
+
+    .shopee-action {
+        font-size: 0.6rem !important;
+    }
+}
+
+@media (max-width: 480px) {
+    .shopee-grid {
+        grid-template-columns: repeat(2, 1fr) !important;
+        gap: 8px !important;
+    }
+
+    .shopee-info {
+        padding: 8px !important;
+    }
+
+    .shopee-title {
+        font-size: 0.7rem !important;
+    }
+
+    .shopee-description {
+        display: none !important;
+    }
+
+    .shopee-footer {
+        padding: 6px 8px !important;
+    }
+
+    .shopee-footer .stats-row {
+        font-size: 0.55rem !important;
+    }
+}
+/* ============================================================
+   BOOKING CALENDAR — shared by admin / captain / secretary
+   ============================================================ */
+
+.booking-calendar {
+    background: white;
+    border-radius: 16px;
+    overflow-x: auto;
+    margin-top: 15px;
+    border: 1px solid #e2efe8;
+}
+
+.booking-calendar .calendar-table {
+    min-width: 800px;
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+}
+
+.booking-calendar .calendar-table td {
+    width: 14.28%;
+    position: relative;
+}
+
+.booking-calendar .calendar-table th {
+    padding: 14px 8px;
+    background: #f8f9fa;
+    border: 1px solid #e2efe8;
+    font-weight: 600;
+    color: #1a472a;
+    text-align: center;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+}
+
+.booking-calendar .calendar-table td {
+    border: 1px solid #eef2ef;
+    vertical-align: top;
+    padding: 0;
+    position: relative;
+}
+
+.booking-calendar .day-cell {
+    position: relative;
+    padding-top: 28px;
+    min-height: 80px;
+    cursor: pointer;
+    background: white;
+}
+
+.booking-calendar .day-cell.today { background: #fff8e1; }
+.booking-calendar .day-cell:hover { background: #f8faf8; }
+
+.booking-calendar .day-number {
+    position: absolute;
+    top: 5px;
+    right: 8px;
+    font-size: 12px;
+    font-weight: 600;
+    color: #2c5e3c;
+    background: rgba(255,255,255,0.95);
+    padding: 2px 6px;
+    border-radius: 12px;
+    z-index: 25;
+    pointer-events: none;
+}
+
+.booking-calendar .booking-row {
+    position: relative;
+    height: 28px;
+    margin: 2px 0;
+    width: 100%;
+    z-index: 1;
+}
+
+.booking-calendar .booking-bar {
+    position: absolute;
+    top: 2px;
+    left: 0;
+    height: 24px;
+    border-radius: 4px;
+    padding: 4px 6px;
+    font-size: 11px;
+    cursor: pointer;
+    transition: all 0.2s;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    color: white;
+    font-weight: 500;
+    z-index: 20;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.1);
+    pointer-events: auto;
+    line-height: 16px;
+    box-sizing: border-box;
+}
+
+.booking-calendar .booking-bar:hover {
+    transform: scaleY(1.05);
+    z-index: 30;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+    white-space: normal;
+    overflow: visible;
+    height: auto;
+    min-height: 24px;
+}
+
+.booking-calendar .booking-bar.pending  { background: #ff9800; }
+.booking-calendar .booking-bar.approved { background: #4caf50; }
+.booking-calendar .booking-bar.borrowed { background: #2196f3; }
+.booking-calendar .booking-bar.returned { background: #9c27b0; }
+.booking-calendar .booking-bar.rejected { background: #f44336; }
+
+.booking-calendar .booking-bar i { margin-right: 4px; font-size: 9px; }
+.booking-calendar .booking-name  { font-weight: 600; font-size: 10px; }
+.booking-calendar .booking-duration { font-size: 8px; opacity: 0.8; margin-left: 5px; }
+
+@media (max-width: 768px) {
+    .booking-calendar .calendar-table { min-width: 600px; }
+    .booking-calendar .calendar-table th { padding: 8px 4px; font-size: 11px; }
+    .booking-calendar .day-cell { min-height: 60px; }
+    .booking-calendar .day-number { font-size: 10px; top: 3px; right: 4px; }
+    .booking-calendar .booking-row { height: 24px; }
+    .booking-calendar .booking-bar { font-size: 9px; padding: 3px 5px; height: 20px; line-height: 14px; }
+}
+
+/* ============================================================
+   EQUIPMENT DETAILS MODAL (captain / secretary card click)
+   ============================================================ */
+
+.eq-details-wrap { text-align: left; font-family: 'Segoe UI', Roboto, sans-serif; }
+
+.eq-details-header {
+    padding: 16px 20px;
+    background: linear-gradient(135deg, #1a472a, #2e7d32);
+    color: #fff;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    border-radius: 12px 12px 0 0;
+}
+
+.eq-details-header .eq-title {
+    font-size: 1.05rem;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.eq-details-header .eq-cat-badge {
+    font-size: 0.65rem;
+    padding: 3px 10px;
+    border-radius: 20px;
+    background: rgba(255,255,255,0.22);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-weight: 700;
+}
+
+.eq-details-body {
+    padding: 18px 20px;
+    background: #fff;
+}
+
+.eq-details-image {
+    width: 100%;
+    max-height: 220px;
+    object-fit: cover;
+    border-radius: 12px;
+    margin-bottom: 14px;
+    background: #f5f5f5;
+}
+
+.eq-details-image-fallback {
+    width: 100%;
+    height: 160px;
+    border-radius: 12px;
+    background: linear-gradient(135deg, #e8f5e9, #c8e6c9);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 56px;
+    color: #43e97b;
+    margin-bottom: 14px;
+}
+
+.eq-details-stats {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+    margin: 14px 0;
+}
+
+.eq-details-stats .eq-stat {
+    background: #f8faf8;
+    border-radius: 10px;
+    padding: 10px;
+    text-align: center;
+    border-top: 3px solid #ccc;
+}
+.eq-details-stats .eq-stat.available   { border-top-color: #4caf50; }
+.eq-details-stats .eq-stat.borrowed    { border-top-color: #2196f3; }
+.eq-details-stats .eq-stat.maintenance { border-top-color: #ff9800; }
+.eq-details-stats .eq-stat.lost        { border-top-color: #f44336; }
+
+.eq-details-stats .eq-stat .num {
+    font-size: 1.4rem;
+    font-weight: 700;
+    line-height: 1.1;
+}
+.eq-details-stats .eq-stat.available   .num { color: #2e7d32; }
+.eq-details-stats .eq-stat.borrowed    .num { color: #1565c0; }
+.eq-details-stats .eq-stat.maintenance .num { color: #e65100; }
+.eq-details-stats .eq-stat.lost        .num { color: #c62828; }
+
+.eq-details-stats .eq-stat .lbl {
+    font-size: 0.68rem;
+    color: #666;
+    margin-top: 3px;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+}
+
+.eq-details-desc {
+    font-size: 0.85rem;
+    color: #333;
+    line-height: 1.55;
+    margin-bottom: 12px;
+    padding: 10px 12px;
+    background: #fafbfa;
+    border-left: 3px solid #43e97b;
+    border-radius: 6px;
+}
+
+.eq-details-meta {
+    display: flex;
+    gap: 20px;
+    flex-wrap: wrap;
+    font-size: 0.72rem;
+    color: #888;
+    margin-bottom: 16px;
+}
+.eq-details-meta span i { margin-right: 4px; color: #43e97b; }
+
+.eq-details-actions {
+    display: flex;
+    gap: 10px;
+    justify-content: flex-end;
+    padding: 12px 20px;
+    background: #f8faf8;
+    border-top: 1px solid #e2efe8;
+    border-radius: 0 0 12px 12px;
+    flex-wrap: wrap;
+}
+
+@media (max-width: 600px) {
+    .eq-details-stats { grid-template-columns: repeat(2, 1fr); }
+    .eq-details-actions { flex-direction: column-reverse; }
+    .eq-details-actions button { width: 100%; }
+}
+/* ══════════════════════════════════════════════════════════
+   FILTER BAR — STACKED (Type on top, Status below)
+   ══════════════════════════════════════════════════════════ */
+.filter-bar.filter-bar-stacked {
+    display: flex !important;
+    flex-direction: column !important;
+    flex-wrap: nowrap !important;
+    align-items: stretch !important;
+    gap: 10px !important;
+    padding: 12px 14px !important;
+    background: #f8faf8 !important;
+    border: 1px solid #e2efe8 !important;
+    border-radius: 12px !important;
+    overflow: visible !important;
+}
+.filter-bar.filter-bar-stacked .filter-row {
+    display: flex !important;
+    flex-wrap: wrap !important;
+    align-items: center !important;
+    gap: 8px !important;
+    width: 100% !important;
+}
+.filter-bar.filter-bar-stacked .filter-row-type {
+    padding-bottom: 10px !important;
+    border-bottom: 1px dashed #d7e2dc !important;
+}
+.filter-bar.filter-bar-stacked .filter-row-label {
+    display: inline-flex !important;
+    align-items: center !important;
+    gap: 6px !important;
+    font-size: 0.72rem !important;
+    font-weight: 800 !important;
+    color: #6b7a72 !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.5px !important;
+    padding-right: 6px !important;
+    margin-right: 4px !important;
+    border-right: 1px solid #d7e2dc !important;
+    height: 22px !important;
+    flex-shrink: 0 !important;
+}
+.filter-bar.filter-bar-stacked .filter-row-actions {
+    margin-left: auto !important;
+    display: inline-flex !important;
+    gap: 8px !important;
+    flex-wrap: wrap !important;
+    align-items: center !important;
+}
+.filter-bar.filter-bar-stacked .filter-row .filter-chip,
+.filter-bar.filter-bar-stacked .filter-row .btn-verify {
+    flex-shrink: 0 !important;
+}
+@media (max-width: 720px) {
+    .filter-bar.filter-bar-stacked .filter-row-actions {
+        margin-left: 0 !important;
+        width: 100% !important;
+    }
+    .filter-bar.filter-bar-stacked .filter-row-actions .btn-verify {
+        flex: 1 !important;
+        justify-content: center !important;
+    }
+    .filter-bar.filter-bar-stacked .filter-row-label {
+        width: 100% !important;
+        border-right: none !important;
+        margin-bottom: -2px !important;
+    }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   CANCELLED STATUS BADGE
+   ═══════════════════════════════════════════════════════════ */
+.badge-cancelled {
+    background: #eceff1;
+    color: #455a64;
+    padding: 4px 10px;
+    border-radius: 40px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+}
+.status-cancelled { background: #eceff1; color: #455a64; }
+
+.card-header-gradient.cancelled {
+    background: linear-gradient(135deg, #546e7a, #78909c);
+}
+
+.booking-bar.cancelled {
+    background: #eceff1;
+    color: #455a64;
+    border-left-color: #455a64;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   VEHICLE CALENDAR BARS (grouped by vehicle per day)
+   ═══════════════════════════════════════════════════════════ */
+.booking-bar.vehicle-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    font-size: 10px;
+    border-radius: 4px;
+    border-left: 3px solid #1b5e20;
+    background: #e8f5e9;
+    color: #1b5e20;
+    font-weight: 700;
+    transition: all 0.15s ease;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+.booking-bar.vehicle-bar:hover {
+    transform: translateX(2px);
+    box-shadow: 0 2px 6px rgba(27,94,32,0.25);
+}
+.booking-bar.vehicle-bar i.fa-truck {
+    color: #1b5e20;
+    flex-shrink: 0;
+}
+.booking-bar.vehicle-bar .vehicle-trip-count {
+    margin-left: auto;
+    background: #1b5e20;
+    color: #fff;
+    padding: 1px 7px;
+    border-radius: 10px;
+    font-size: 9px;
+    font-weight: 800;
+    flex-shrink: 0;
+}
+.booking-bar.vehicle-bar .vehicle-status-icon {
+    font-size: 9px;
+    opacity: 0.75;
+    flex-shrink: 0;
+}
+
+.booking-bar.vehicle-bar.pending   { background:#fff3e0; color:#e65100; border-left-color:#e65100; }
+.booking-bar.vehicle-bar.pending   .vehicle-trip-count { background:#e65100; }
+.booking-bar.vehicle-bar.pending   i.fa-truck { color:#e65100; }
+
+.booking-bar.vehicle-bar.approved  { background:#e8f5e9; color:#1b5e20; border-left-color:#1b5e20; }
+.booking-bar.vehicle-bar.approved  .vehicle-trip-count { background:#1b5e20; }
+.booking-bar.vehicle-bar.approved  i.fa-truck { color:#1b5e20; }
+
+.booking-bar.vehicle-bar.borrowed  { background:#e3f2fd; color:#0d47a1; border-left-color:#0d47a1; }
+.booking-bar.vehicle-bar.borrowed  .vehicle-trip-count { background:#0d47a1; }
+.booking-bar.vehicle-bar.borrowed  i.fa-truck { color:#0d47a1; }
+
+.booking-bar.vehicle-bar.returned  { background:#eceff1; color:#455a64; border-left-color:#455a64; }
+.booking-bar.vehicle-bar.returned  .vehicle-trip-count { background:#455a64; }
+.booking-bar.vehicle-bar.returned  i.fa-truck { color:#455a64; }
+
+.booking-bar.vehicle-bar.rejected  { background:#ffebee; color:#b71c1c; border-left-color:#b71c1c; }
+.booking-bar.vehicle-bar.rejected  .vehicle-trip-count { background:#b71c1c; }
+.booking-bar.vehicle-bar.rejected  i.fa-truck { color:#b71c1c; }
+
+.booking-bar.vehicle-bar.cancelled { background:#eceff1; color:#455a64; border-left-color:#455a64; }
+.booking-bar.vehicle-bar.cancelled .vehicle-trip-count { background:#455a64; }
+.booking-bar.vehicle-bar.cancelled i.fa-truck { color:#455a64; }
+
+.booking-row.vehicle-row { margin-top: 3px; }
+
+/* ═══════════════════════════════════════════════════════════
+   CASE TOOLBAR (used by booking filter search + date)
+   ═══════════════════════════════════════════════════════════ */
+.case-toolbar {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    align-items: center;
+    margin-top: 16px;
+    padding: 12px 14px;
+    background: #f8faf8;
+    border: 1px solid #e2efe8;
+    border-radius: 12px;
+}
+.case-search {
+    position: relative;
+    flex: 1 1 240px;
+    min-width: 200px;
+}
+.case-search > i {
+    position: absolute;
+    left: 12px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: #999;
+    font-size: 0.85rem;
+    pointer-events: none;
+}
+.case-search > input {
+    width: 100%;
+    padding: 9px 12px 9px 34px;
+    border: 1.5px solid #cfd8dc;
+    border-radius: 8px;
+    font-size: 0.85rem;
+    box-sizing: border-box;
+}
+.case-search > input:focus {
+    outline: none;
+    border-color: #2E7D32;
+    box-shadow: 0 0 0 3px rgba(46,125,50,0.12);
+}
+.case-date-select, .case-date-input {
+    padding: 9px 12px;
+    border: 1.5px solid #cfd8dc;
+    border-radius: 8px;
+    font-size: 0.85rem;
+    background: #fff;
+}
+.case-reset-btn {
+    padding: 9px 14px;
+    border: 1px solid #cfd8dc;
+    background: #fff;
+    border-radius: 8px;
+    color: #555;
+    font-size: 0.82rem;
+    font-weight: 600;
+    cursor: pointer;
+}
+.case-reset-btn:hover { background: #f0f0f0; }
+.case-result-count {
+    font-size: 0.78rem;
+    color: #666;
+    margin-left: auto;
+    font-weight: 600;
+}
+/* Household table responsive wrapper */
+.household-module .table-responsive {
+    width: 100%;
+    overflow-x: auto;
+    overflow-y: visible;
+    -webkit-overflow-scrolling: touch; /* smooth scrolling on iOS */
+    border: 1px solid #eef2ef;
+    border-radius: 10px;
+    background: #fff;
+}
+
+/* Force the table to keep its natural (wide) width */
+.household-module .table-responsive > .household-table {
+    width: max-content;      /* grow beyond container */
+    min-width: 100%;
+    border-collapse: collapse;
+    white-space: nowrap;     /* keep cells on one line */
+}
+
+/* Cells shouldn't wrap */
+.household-module .household-table th,
+.household-module .household-table td {
+    white-space: nowrap;
+    padding: 8px 10px;
+    vertical-align: middle;
+    font-size: 13px;
+}
+
+/* The modal member table too */
+#householdModal .table-responsive {
+    width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    border: 1px solid #eef2ef;
+    border-radius: 10px;
+}
+#householdModal .table-responsive > table {
+    width: max-content;
+    min-width: 100%;
+    white-space: nowrap;
+}
+
+/* Nice scrollbar (optional) */
+.household-module .table-responsive::-webkit-scrollbar,
+#householdModal .table-responsive::-webkit-scrollbar {
+    height: 8px;
+}
+.household-module .table-responsive::-webkit-scrollbar-thumb,
+#householdModal .table-responsive::-webkit-scrollbar-thumb {
+    background: #c8d3cc;
+    border-radius: 8px;
+}
+.household-module .table-responsive::-webkit-scrollbar-thumb:hover,
+#householdModal .table-responsive::-webkit-scrollbar-thumb:hover {
+    background: #9daf a4;
+}

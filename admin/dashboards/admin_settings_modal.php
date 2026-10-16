@@ -158,6 +158,18 @@
     'use strict';
 
     const AJAX = '../admin_settings_ajax.php';
+
+    // Defensive: kill any stray form submission inside SweetAlert
+    // (prevents the "saves but shows error" issue)
+    document.addEventListener('submit', function(e) {
+        const t = e.target;
+        if (!t || t.tagName !== 'FORM') return;
+        if (t.closest && t.closest('.swal2-container')) {
+            e.preventDefault();
+            e.stopPropagation();
+        }
+    }, true);
+
     let PS = {
         profile: null,
         signatureUrl: null,
@@ -182,6 +194,19 @@
             showConfirmButton: false, timer: 2200,
             didOpen: (t) => t.addEventListener('click', e => e.stopPropagation())
         });
+    }
+
+    // Safe JSON parse — surfaces the real server response instead of "Network error"
+    async function safeJson(resp) {
+        const raw = await resp.text();
+        try { return JSON.parse(raw); }
+        catch (e) {
+            console.error('[settings] non-JSON response:', raw.slice(0, 400));
+            const isHtml = raw.trim().startsWith('<');
+            throw new Error(isHtml
+                ? 'Server returned HTML instead of JSON. Check that admin_settings_ajax.php has no PHP warnings/notices printing before the JSON.'
+                : 'Server returned an invalid response.');
+        }
     }
 
     /* -------------------------------------------------------- */
@@ -272,7 +297,7 @@
     async function loadProfile() {
         try {
             const r = await fetch(`${AJAX}?action=get_profile`);
-            const d = await r.json();
+   const d = await safeJson(r);
             if (!d.success) throw new Error(d.message || 'Failed');
             PS.profile = d.profile || {};
             PS.signatureUrl = d.signature_url || null;
@@ -305,7 +330,7 @@
     function tplInfo() {
         const p = PS.profile || {};
         return `
-        <form id="psInfoForm" autocomplete="off">
+        <div id="psInfoForm">
             <div class="ps-grid-2">
                 <div class="ps-field">
                     <label>Full Name <span class="req">*</span></label>
@@ -362,19 +387,22 @@
             </div>
 
             <div class="ps-btn-row">
-                <button type="submit" class="ps-btn primary" id="psInfoSave">
+                <button type="button" class="ps-btn primary" id="psInfoSave">
                     <i class="fas fa-save"></i> Save Changes
                 </button>
             </div>
-        </form>`;
+        </div>`;
     }
 
     function bindInfo() {
         const form = document.getElementById('psInfoForm');
-        if (!form) return;
-        form.addEventListener('submit', async (e) => {
+        const btn  = document.getElementById('psInfoSave');
+        if (!form || !btn) return;
+
+        btn.addEventListener('click', async (e) => {
             e.preventDefault();
-            const btn = document.getElementById('psInfoSave');
+            e.stopPropagation();
+
             btn.disabled = true;
             btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Saving…';
 
@@ -393,7 +421,7 @@
 
             try {
                 const r = await fetch(AJAX, { method: 'POST', body: fd });
-                const d = await r.json();
+                const d = await safeJson(r);
                 if (d.success) {
                     toast('success', d.message || 'Profile updated.');
                     // Refresh the top-bar name without reloading the page
@@ -404,7 +432,7 @@
                     toast('error', d.message || 'Update failed.');
                 }
             } catch (err) {
-                toast('error', 'Network error.');
+                toast('error', err.message || 'Network error.');
             }
             btn.disabled = false;
             btn.innerHTML = '<i class="fas fa-save"></i> Save Changes';
@@ -416,7 +444,7 @@
     /* ============================================================ */
     function tplPassword() {
         return `
-        <form id="psPasswordForm" autocomplete="off">
+        <div id="psPasswordForm">
             <div class="ps-field">
                 <label>Current Password <span class="req">*</span></label>
                 <input type="password" id="psCurrentPass" required>
@@ -433,16 +461,17 @@
             </div>
 
             <div class="ps-btn-row">
-                <button type="submit" class="ps-btn primary" id="psPassSave">
+                <button type="button" class="ps-btn primary" id="psPassSave">
                     <i class="fas fa-key"></i> Update Password
                 </button>
             </div>
-        </form>`;
+        </div>`;
     }
 
     function bindPassword() {
         const form = document.getElementById('psPasswordForm');
-        if (!form) return;
+        const btn  = document.getElementById('psPassSave');
+        if (!form || !btn) return;
 
         const nEl = document.getElementById('psNewPass');
         const cEl = document.getElementById('psConfirmPass');
@@ -459,9 +488,9 @@
         nEl.addEventListener('input', checkMatch);
         cEl.addEventListener('input', checkMatch);
 
-        form.addEventListener('submit', async (e) => {
+        btn.addEventListener('click', async (e) => {
             e.preventDefault();
-            const btn = document.getElementById('psPassSave');
+            e.stopPropagation();
 
             const cur = document.getElementById('psCurrentPass').value;
             const nw  = nEl.value;
@@ -487,10 +516,13 @@
 
             try {
                 const r = await fetch(AJAX, { method: 'POST', body: fd });
-                const d = await r.json();
+               const d = await safeJson(r);
                 if (d.success) {
                     toast('success', d.message || 'Password updated.');
-                    form.reset();
+                    // Manually clear the inputs (no form.reset needed)
+                    document.getElementById('psCurrentPass').value = '';
+                    document.getElementById('psNewPass').value = '';
+                    document.getElementById('psConfirmPass').value = '';
                     hint.textContent = '';
                 } else {
                     toast('error', d.message || 'Update failed.');
@@ -681,7 +713,7 @@
 
             try {
                 const r = await fetch(AJAX, { method: 'POST', body: fd });
-                const d = await r.json();
+              const d = await safeJson(r);
                 if (d.success) {
                     toast('success', d.message || 'Signature uploaded.');
                     PS.signatureUrl = d.signature_url;
@@ -716,7 +748,7 @@
                 fd.append('action', 'remove_signature');
                 try {
                     const r = await fetch(AJAX, { method: 'POST', body: fd });
-                    const d = await r.json();
+                    const d = await safeJson(r);
                     if (d.success) {
                         toast('success', d.message || 'Signature removed.');
                         PS.signatureUrl = null;
@@ -783,7 +815,7 @@
 
             try {
                 const r = await fetch(AJAX, { method: 'POST', body: fd });
-                const d = await r.json();
+              const d = await safeJson(r);  
                 if (d.success) {
                     toast('success', d.message || 'Photo uploaded.');
                     PS.photoUrl = d.photo_url;
@@ -822,7 +854,7 @@
                 fd.append('action', 'remove_profile_photo');
                 try {
                     const r = await fetch(AJAX, { method: 'POST', body: fd });
-                    const d = await r.json();
+                  const d = await safeJson(r);
                     if (d.success) {
                         toast('success', d.message || 'Photo removed.');
                         PS.photoUrl = null;

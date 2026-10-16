@@ -1,10 +1,13 @@
 <?php
+error_reporting(E_ALL);
+ini_set('display_errors', 1);
 session_start();
 
 require_once __DIR__ . '/../config/database.php';
 require_once __DIR__ . '/../includes/document_generators/DocumentGenerator.php';
 require_once __DIR__ . '/../includes/email_helper.php';
 require_once __DIR__ . '/../admin/push_send.php';
+require_once __DIR__ . '/../includes/XenditService.php';
 
 header('Content-Type: application/json');
 
@@ -577,6 +580,155 @@ function getRequests($conn, $resident_id) {
     echo json_encode(['success' => true, 'requests' => $requests]);
 }
 
+// ============ DRAFT-FIRST HELPERS ============
+
+function saveDraftRequest($conn, $resident_id) {
+    $profileData = getResidentProfileData($conn, $resident_id);
+    if (!$profileData) {
+        echo json_encode(['success' => false, 'message' => 'Resident profile not found']);
+        return;
+    }
+
+    $document_type    = $_POST['document_type'] ?? '';
+    $document_type_id = intval($_POST['document_id'] ?? 0);
+    $fee              = floatval($_POST['fee'] ?? 0);
+    $fee_type         = $_POST['fee_type'] ?? 'regular';
+    $quantity         = intval($_POST['quantity'] ?? 1);
+    $notes            = $_POST['notes'] ?? '';
+    $pickup_date      = $_POST['pickup_date'] ?? '';
+    $pickup_time      = $_POST['pickup_time'] ?? '';
+    $payment_channel  = strtoupper(trim($_POST['payment_channel'] ?? ''));
+    $purpose          = $_POST['purpose'] ?? "Request for {$document_type}";
+
+    if (empty($document_type) || $document_type_id == 0) {
+        echo json_encode(['success' => false, 'message' => 'Invalid document']);
+        return;
+    }
+
+    $custom_fields = $_POST['custom_fields'] ?? [];
+    $draft_token = bin2hex(random_bytes(16));
+
+    $_SESSION['pending_document_draft'] = [
+        'token'            => $draft_token,
+        'resident_id'      => $resident_id,
+        'document_type'    => $document_type,
+        'document_type_id' => $document_type_id,
+        'fee'              => $fee,
+        'fee_type'         => $fee_type,
+        'quantity'         => $quantity,
+        'notes'            => $notes,
+        'pickup_date'      => $pickup_date,
+        'pickup_time'      => $pickup_time,
+        'purpose'          => $purpose,
+        'payment_channel'  => $payment_channel,
+        'custom_fields'    => $custom_fields,
+        'profile_snapshot' => $profileData,
+        'created_at'       => time(),
+    ];
+
+    echo json_encode([
+        'success'     => true,
+        'draft_token' => $draft_token,
+    ]);
+}
+
+function commitDraftToDatabase($conn, $draft, $payment_status, $payment_method) {
+    $resident_id      = $draft['resident_id'];
+    $document_type    = $draft['document_type'];
+    $document_type_id = $draft['document_type_id'];
+    $fee              = $draft['fee'];
+    $fee_type         = $draft['fee_type'];
+    $quantity         = $draft['quantity'];
+    $notes            = $draft['notes'];
+    $pickup_date      = $draft['pickup_date'];
+    $pickup_time      = $draft['pickup_time'];
+    $purpose          = $draft['purpose'];
+    $custom_fields    = $draft['custom_fields'];
+    $profileData      = $draft['profile_snapshot'];
+
+    mysqli_begin_transaction($conn);
+    try {
+        $sql = "INSERT INTO document_requests (
+                    resident_id, document_type_id, document_type, purpose, notes,
+                    fee_type, fee, quantity, id_document_path,
+                    pickup_date, pickup_time,
+                    status, payment_status, request_date, processed_date
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, 'approved', ?, NOW(), NOW())";
+        $stmt = mysqli_prepare($conn, $sql);
+        mysqli_stmt_bind_param($stmt, "iissssdisss",
+            $resident_id, $document_type_id, $document_type, $purpose, $notes,
+            $fee_type, $fee, $quantity, $pickup_date, $pickup_time,
+            $payment_status
+        );
+        if (!mysqli_stmt_execute($stmt)) throw new Exception(mysqli_stmt_error($stmt));
+        $request_id = mysqli_insert_id($conn);
+        mysqli_stmt_close($stmt);
+
+        if (!empty($custom_fields) && is_array($custom_fields)) {
+            $csql = "INSERT INTO document_requests_custom_data (request_id, field_name, field_value) VALUES (?, ?, ?)";
+            $cstmt = mysqli_prepare($conn, $csql);
+            foreach ($custom_fields as $name => $value) {
+                $val = is_array($value) ? json_encode($value) : $value;
+                mysqli_stmt_bind_param($cstmt, "iss", $request_id, $name, $val);
+                mysqli_stmt_execute($cstmt);
+            }
+            mysqli_stmt_close($cstmt);
+        }
+
+        $profileFlat = [
+            'full_name'    => trim(($profileData['first_name'] ?? '') . ' ' .
+                                    ($profileData['middle_name'] ?? '') . ' ' .
+                                    ($profileData['last_name'] ?? '')),
+            'first_name'   => $profileData['first_name'] ?? '',
+            'last_name'    => $profileData['last_name'] ?? '',
+            'middle_name'  => $profileData['middle_name'] ?? '',
+            'date_of_birth'=> $profileData['date_of_birth'] ?? '',
+            'age'          => $profileData['age'] ?? '',
+            'sex'          => $profileData['sex'] ?? '',
+            'civil_status' => $profileData['civil_status'] ?? '',
+            'citizenship'  => $profileData['citizenship'] ?? 'Filipino',
+            'address'      => $profileData['household_address'] ?? '',
+            'purok'        => $profileData['household_purok'] ?? '',
+        ];
+        $csql2 = "INSERT INTO document_requests_custom_data (request_id, field_name, field_value) VALUES (?, ?, ?)";
+        $cstmt2 = mysqli_prepare($conn, $csql2);
+        foreach ($profileFlat as $name => $value) {
+            if ($value !== null && $value !== '') {
+                mysqli_stmt_bind_param($cstmt2, "iss", $request_id, $name, $value);
+                mysqli_stmt_execute($cstmt2);
+            }
+        }
+        mysqli_stmt_close($cstmt2);
+
+        $total = $fee * $quantity;
+        $xenditId = $draft['xendit_id'] ?? null;
+        $psql = "INSERT INTO document_payments
+                 (request_id, resident_id, amount, payment_method, payment_status, xendit_invoice_id, payment_date)
+                 VALUES (?, ?, ?, ?, ?, ?, NOW())";
+        $pstmt = mysqli_prepare($conn, $psql);
+        mysqli_stmt_bind_param($pstmt, "iidsss",
+            $request_id, $resident_id, $total,
+            $payment_method, $payment_status, $xenditId
+        );
+        mysqli_stmt_execute($pstmt);
+        $payment_id = mysqli_insert_id($conn);
+        mysqli_stmt_close($pstmt);
+
+        $upd = mysqli_prepare($conn, "UPDATE document_requests SET payment_id = ? WHERE id = ?");
+        mysqli_stmt_bind_param($upd, "ii", $payment_id, $request_id);
+        mysqli_stmt_execute($upd);
+        mysqli_stmt_close($upd);
+
+        mysqli_commit($conn);
+        return $request_id;
+
+    } catch (Exception $e) {
+        mysqli_rollback($conn);
+        error_log("commitDraftToDatabase failed: " . $e->getMessage());
+        return null;
+    }
+}
+
 function submitRequest($conn, $resident_id) {
     $profileData = getResidentProfileData($conn, $resident_id);
     
@@ -600,9 +752,15 @@ function submitRequest($conn, $resident_id) {
     $fee_type = mysqli_real_escape_string($conn, $_POST['fee_type'] ?? 'regular');
     $fee = floatval($_POST['fee'] ?? 0);
     $quantity = intval($_POST['quantity'] ?? 1);
-    $payment_method = mysqli_real_escape_string($conn, $_POST['payment_method'] ?? 'online');
+    $payment_method = mysqli_real_escape_string($conn, $_POST['payment_method'] ?? 'pay_at_claim');
     $pickup_date = mysqli_real_escape_string($conn, $_POST['pickup_date'] ?? '');
     $pickup_time = mysqli_real_escape_string($conn, $_POST['pickup_time'] ?? '');
+    
+    // Online payments MUST use the draft flow (save_draft_request → create_xendit_checkout)
+    if ($payment_method === 'online') {
+        echo json_encode(['success' => false, 'message' => 'Online payments must use the draft flow.']);
+        return;
+    }
     
     if (empty($document_type) || $document_type_id == 0) {
         echo json_encode(['success' => false, 'message' => 'Invalid document type selected']);
@@ -663,7 +821,7 @@ function submitRequest($conn, $resident_id) {
                     pickup_time,
                     status, 
                     request_date
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NOW())";
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved', NOW())";
         
         $stmt = mysqli_prepare($conn, $sql);
         if (!$stmt) {
@@ -734,6 +892,7 @@ function submitRequest($conn, $resident_id) {
         
         $isFree = ($fee_type === 'student' || $fee_type === 'senior' || $fee == 0);
         $totalAmount = $fee * $quantity;
+        $awaitingOnlinePayment = (!$isFree && $payment_method !== 'pay_at_claim');
         
         if ($isFree) {
             $shouldAutoApprove = true;
@@ -797,12 +956,11 @@ function submitRequest($conn, $resident_id) {
         
         if ($shouldAutoApprove) {
             $updateSql = "UPDATE document_requests SET 
-                          status = ?, 
                           processed_date = NOW(),
                           payment_status = ?
                           WHERE id = ?";
             $updateStmt = mysqli_prepare($conn, $updateSql);
-            mysqli_stmt_bind_param($updateStmt, "ssi", $autoApproveStatus, $payment_status, $request_id);
+            mysqli_stmt_bind_param($updateStmt, "si", $payment_status, $request_id);
             mysqli_stmt_execute($updateStmt);
             mysqli_stmt_close($updateStmt);
         } else {
@@ -848,7 +1006,7 @@ function submitRequest($conn, $resident_id) {
         
          
         
-        if (!$shouldAutoApprove) {
+        if (!$shouldAutoApprove && !$awaitingOnlinePayment) {
             $notifTitle = "📋 Document Request Received";
             $notifMessage = "Your request for {$document_type} has been received and is pending review. Reference: #{$request_id}";
             createNotification($conn, $resident_id, 'document_pending', $notifTitle, $notifMessage, $request_id, 'document');
@@ -883,37 +1041,38 @@ function submitRequest($conn, $resident_id) {
                     . ($isFree ? " (FREE)" : "")
                     . " Please review it in the Document Requests list.";
         $adminType  = 'info';
+        $awaitingOnlinePayment = (!$isFree && $payment_method !== 'pay_at_claim');
+                                        if (!$awaitingOnlinePayment) {
+                                                $secQ = mysqli_query($conn, "SELECT id FROM admin WHERE admin_role = 'secretary' AND is_active = 1");
+                                                if ($secQ) {
+                                                    while ($sec = mysqli_fetch_assoc($secQ)) {
+                                                        $sec_id = (int)$sec['id'];
 
-        $secQ = mysqli_query($conn, "SELECT id FROM admin WHERE admin_role = 'secretary' AND is_active = 1");
-        if ($secQ) {
-            while ($sec = mysqli_fetch_assoc($secQ)) {
-                $sec_id = (int)$sec['id'];
+                                                        // 1) Bell notification row (drives the secretary's dropdown)
+                                                        $nSql = "INSERT INTO notifications
+                                                                    (user_type, user_id, resident_id, type, title, message, reference_id, reference_type)
+                                                                VALUES ('admin', ?, NULL, ?, ?, ?, ?, 'document_request')";
+                                                        $nStmt = @mysqli_prepare($conn, $nSql);
+                                                        if ($nStmt) {
+                                                            mysqli_stmt_bind_param($nStmt, "isssi",
+                                                                $sec_id, $adminType, $adminTitle, $adminMsg, $request_id);
+                                                            mysqli_stmt_execute($nStmt);
+                                                            mysqli_stmt_close($nStmt);
+                                                        }
 
-                // 1) Bell notification row (drives the secretary's dropdown)
-                $nSql = "INSERT INTO notifications
-                            (user_type, user_id, resident_id, type, title, message, reference_id, reference_type)
-                         VALUES ('admin', ?, NULL, ?, ?, ?, ?, 'document_request')";
-                $nStmt = @mysqli_prepare($conn, $nSql);
-                if ($nStmt) {
-                    mysqli_stmt_bind_param($nStmt, "isssi",
-                        $sec_id, $adminType, $adminTitle, $adminMsg, $request_id);
-                    mysqli_stmt_execute($nStmt);
-                    mysqli_stmt_close($nStmt);
-                }
-
-                // 2) Real desktop push via FCM
-                if (function_exists('pushToUser')) {
-                    pushToUser(
-                        $conn,
-                        $sec_id,
-                        $adminTitle,
-                        $adminMsg,
-                        '/BRITE/admin/dashboards/secretary_dashboard.php'
-                    );
-                }
-            }
-        }
-        
+                                                        // 2) Real desktop push via FCM
+                                                        if (function_exists('pushToUser')) {
+                                                            pushToUser(
+                                                                $conn,
+                                                                $sec_id,
+                                                                $adminTitle,
+                                                                $adminMsg,
+                                                                '/BRITE/admin/dashboards/secretary_dashboard.php'
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                        }
         mysqli_commit($conn);
         
         $message = 'Document request submitted successfully!';
@@ -945,7 +1104,6 @@ function submitRequest($conn, $resident_id) {
         echo json_encode(['success' => false, 'message' => $e->getMessage()]);
     }
 }
-
 function getRequestDetails($conn, $resident_id) {
     $request_id = intval($_GET['request_id'] ?? 0);
     
@@ -1028,8 +1186,8 @@ function updateRequest($conn, $resident_id) {
         return;
     }
     
-    if ($request['status'] !== 'pending') {
-        echo json_encode(['success' => false, 'message' => 'Only pending requests can be edited']);
+    if (!in_array($request['status'], ['approved', 'unclaimed'], true)) {
+        echo json_encode(['success' => false, 'message' => 'This request can no longer be edited.']);
         return;
     }
     
@@ -1134,8 +1292,8 @@ function cancelRequest($conn, $resident_id) {
         return;
     }
     
-    if ($request['status'] !== 'pending') {
-        echo json_encode(['success' => false, 'message' => 'Only pending requests can be cancelled']);
+    if (!in_array($request['status'], ['approved', 'unclaimed'], true)) {
+        echo json_encode(['success' => false, 'message' => 'This request can no longer be cancelled.']);
         return;
     }
     
@@ -1175,7 +1333,6 @@ function getStats($conn, $resident_id) {
     $sql = "SELECT 
                 COUNT(*) as total,
                 SUM(CASE WHEN status = 'approved'  THEN 1 ELSE 0 END) as approved,
-                SUM(CASE WHEN status = 'pending'   THEN 1 ELSE 0 END) as pending,
                 SUM(CASE WHEN status = 'rejected'  THEN 1 ELSE 0 END) as rejected,
                 SUM(CASE WHEN status = 'unclaimed' THEN 1 ELSE 0 END) as unclaimed,
                 SUM(CASE WHEN status = 'claimed'   THEN 1 ELSE 0 END) as claimed
@@ -1194,7 +1351,7 @@ function getStats($conn, $resident_id) {
         'stats' => [
             'total'     => intval($stats['total']),
             'approved'  => intval($stats['approved']),
-            'pending'   => intval($stats['pending']),
+            'pending'   => 0,
             'rejected'  => intval($stats['rejected']),
             'unclaimed' => intval($stats['unclaimed']),
             'claimed'   => intval($stats['claimed'])
@@ -1754,63 +1911,412 @@ function confirmPayAtClaim($conn, $resident_id) {
     mysqli_stmt_close($stmt);
 }
 
-// ============ NOTIFICATION FUNCTIONS ============
+
 
 /**
+ * Create Xendit direct payment for a specific channel
+ */
+function createXenditCheckout($conn, $resident_id) {
+    $draft = $_SESSION['pending_document_draft'] ?? null;
+    if (!$draft || $draft['resident_id'] !== $resident_id) {
+        echo json_encode(['success' => false, 'message' => 'No pending draft found. Please re-submit.']);
+        return;
+    }
+
+    $channel = strtoupper(trim($_POST['channel'] ?? $draft['payment_channel'] ?? ''));
+
+    $validChannels = ['GCASH', 'PAYMAYA', 'QRPH', 'BANK_TRANSFER'];
+    if (!in_array($channel, $validChannels, true)) {
+        echo json_encode(['success' => false, 'message' => 'Invalid payment channel']);
+        return;
+    }
+
+    $displayChannel = $channel;
+    $apiChannel = $channel;
+
+    $sql = "SELECT first_name, last_name, email FROM resident WHERE id = ?";
+    $stmt = mysqli_prepare($conn, $sql);
+    mysqli_stmt_bind_param($stmt, "i", $resident_id);
+    mysqli_stmt_execute($stmt);
+    $request = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
+    mysqli_stmt_close($stmt);
+
+    $amount = floatval($draft['fee']);   // fee is already the TOTAL
+    error_log("createXenditCheckout: draft={$draft['token']} channel=$channel api=$apiChannel fee={$draft['fee']} qty={$draft['quantity']} amount=$amount");
+
+    if ($amount <= 0) {
+        echo json_encode(['success' => false, 'message' => 'Invalid payment amount']);
+        return;
+    }
+
+    $externalId = 'DRAFT-' . $draft['token'];
+
+    try {
+        $service = new XenditService($conn);
+
+        $result = $service->createDirectPayment([
+            'reference_id'     => $externalId,
+            'channel_code'     => $apiChannel,
+            'request_amount'   => $amount,
+            'description'      => "Barangay Document: {$draft['document_type']}",
+            'customer_name'    => $request['first_name'] ?? 'Barangay',
+            'customer_surname' => $request['last_name'] ?? 'Resident',
+            'customer_email'   => $request['email'] ?? null,
+            'metadata'         => [
+                'draft_token' => $draft['token'],
+                'resident_id' => $resident_id,
+                'channel'     => $displayChannel,
+            ],
+        ]);
+
+        // Extract QR string or redirect URL
+        $qrString    = null;
+        $redirectUrl = null;
+
+        if (!empty($result['actions']) && is_array($result['actions'])) {
+            foreach ($result['actions'] as $action) {
+                $type    = strtoupper($action['action'] ?? $action['type'] ?? '');
+                $urlType = strtoupper($action['url_type'] ?? '');
+                $value   = $action['url'] ?? $action['value'] ?? $action['qr_code'] ?? null;
+
+                if ($type === 'PRESENT_TO_CUSTOMER') {
+                    $qrString = $value ?? $qrString;
+                } elseif ($type === 'AUTH' || $type === 'REDIRECT_CUSTOMER') {
+                    // prefer the WEB link over a MOBILE deeplink
+                    if ($urlType !== 'MOBILE' || !$redirectUrl) {
+                        $redirectUrl = $value ?? $redirectUrl;
+                    }
+                }
+            }
+        }
+
+        // If the "QR string" is really a URL, it is the checkout link
+        if ($qrString && !$redirectUrl && preg_match('#^https?://#i', $qrString)) {
+            $redirectUrl = $qrString;
+        }
+
+        // GCash / Maya: use the redirect page, not a QR
+        if (in_array($channel, ['GCASH', 'PAYMAYA'], true) && $redirectUrl) {
+            $qrString = null;
+        }
+
+        // Fallback: QR string can sit inside the payment method object
+        if (!$qrString) {
+            $qrString = $result['payment_method']['qr_code']['channel_properties']['qr_string'] ?? null;
+        }
+
+        if (!$qrString && !$redirectUrl) {
+            error_log("Xendit: no QR/redirect found. Full response: " . json_encode($result));
+        }
+
+        // Save Xendit ID + channel into the session draft
+        $_SESSION['pending_document_draft']['xendit_id'] =
+            $result['payment_request_id'] ?? $result['id'] ?? null;
+        $_SESSION['pending_document_draft']['xendit_channel'] = $channel;
+
+        $qrImageUrl = null;
+        if ($qrString) {
+            $qrImageUrl = generateXenditQRImage($draft['token'], $qrString);
+        }
+
+        echo json_encode([
+            'success'            => true,
+            'draft_token'        => $draft['token'],
+            'channel'            => $displayChannel,
+            'amount'             => $amount,
+            'qr_code_url'        => $qrImageUrl,
+            'qr_string'          => $qrString,
+            'redirect_url'       => $redirectUrl,
+            'payment_request_id' =>
+    $result['payment_request_id'] ?? $result['id'] ?? null,
+            'reference_id'       => $externalId,
+            'expires_at'         => date('c', time() + 15 * 60),
+        ]);
+
+    } catch (Exception $e) {
+        echo json_encode(['success' => false, 'message' => $e->getMessage()]);
+    }
+}
+
+/**
+ * Convert QR string to PNG image
+ */
+function generateXenditQRImage($idOrToken, $qrString) {
+    $qrDir = __DIR__ . '/../generated_qrcodes/';
+    if (!file_exists($qrDir)) @mkdir($qrDir, 0777, true);
+
+    $qrLibPath = __DIR__ . '/qrcode/phpqrcode.php';
+    if (!file_exists($qrLibPath)) {
+        $qrLibPath = __DIR__ . '/../admin/qrcode/phpqrcode.php';
+    }
+    if (!file_exists($qrLibPath)) {
+        error_log("QR library not found at $qrLibPath");
+        return null;
+    }
+    require_once $qrLibPath;
+
+    $safeId = preg_replace('/[^A-Za-z0-9_-]/', '', (string)$idOrToken);
+    $filename = 'xendit_qr_' . $safeId . '_' . time() . '.png';
+    $fullPath = $qrDir . $filename;
+
+    QRcode::png($qrString, $fullPath, QR_ECLEVEL_M, 10, 2);
+
+    return '../generated_qrcodes/' . $filename;
+}
+
+/**
+ * Check payment status (polling)
+ */
+/**
+ * JSON the browser needs once a payment has been saved as a request.
+ */
+function buildPaidPaymentResponse($conn, $done, $qrResult = null) {
+    $request_id = (int)$done['request_id'];
+
+    // SELECT * so a missing column can never crash the status check
+    $docRow = [];
+    try {
+        $stmt = mysqli_prepare($conn, "SELECT * FROM document_requests WHERE id = ?");
+        mysqli_stmt_bind_param($stmt, "i", $request_id);
+        mysqli_stmt_execute($stmt);
+        $docRow = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt)) ?: [];
+        mysqli_stmt_close($stmt);
+    } catch (Throwable $e) {
+        error_log("buildPaidPaymentResponse read failed for request #$request_id: " . $e->getMessage());
+    }
+
+    // Always return the DOCUMENT QR (not the payment QR); regenerate if missing
+    $qrPath = $docRow['qr_code_path'] ?? null;
+    if (!$qrPath || !file_exists(__DIR__ . '/../' . $qrPath)) {
+        try {
+            $qr = generateQRCode($conn, $request_id);
+        } catch (Throwable $e) {
+            $qr = ['success' => false, 'message' => $e->getMessage()];
+        }
+        $qrPath = !empty($qr['success']) ? $qr['qr_path'] : null;
+        if (!$qrPath) {
+            error_log("Document QR still missing for request #$request_id: " . ($qr['message'] ?? 'unknown'));
+        }
+    }
+
+    return [
+        'success'        => true,
+        'payment_status' => 'paid',
+        'request_status' => $docRow['status'] ?? 'approved',
+        'request_id'     => $request_id,
+        'amount'         => floatval($done['amount']),
+        'payment_method' => $done['channel'] ?? null,
+        'paid_at'        => $done['paid_at'] ?? date('c'),
+        'document_type'  => $docRow['document_type'] ?? ($done['document_type'] ?? ''),
+        'qr_code_path'   => $qrPath,
+        'document_path'  => $docRow['document_path'] ?? $docRow['file_path'] ?? null,
+    ];
+}
+
+/**
+ * Check payment status (polling).
+ * Output is buffered so PHP warnings/notices (for example from the QR or
+ * document libraries) can never corrupt the JSON the browser is waiting for.
+ */
+function checkXenditPaymentStatus($conn, $resident_id) {
+    ob_start();
+    ini_set('display_errors', '0');
+
+    try {
+        runXenditPaymentStatusCheck($conn, $resident_id);
+    } catch (Throwable $e) {
+        error_log("checkXenditPaymentStatus crashed: " . get_class($e) . ': ' . $e->getMessage()
+                  . ' @ ' . basename($e->getFile()) . ':' . $e->getLine());
+        ob_clean();
+        echo json_encode(['success' => false, 'message' => 'Status check failed. Please try again.']);
+    }
+
+    $out   = ob_get_clean();
+    $first = strpos($out, '{"success"');
+    $last  = strrpos($out, '}');
+    if ($first !== false && $last !== false && $last >= $first) {
+        $out = substr($out, $first, $last - $first + 1);
+    }
+    echo $out;
+}
+
+function runXenditPaymentStatusCheck($conn, $resident_id) {
+    $draft_token = $_GET['draft_token'] ?? '';
+
+    // Already paid and saved earlier (for example the browser missed the first
+    // reply): answer again from the database instead of "draft not found".
+    $done = $_SESSION['completed_payment_drafts'][$draft_token] ?? null;
+    if ($done) {
+        echo json_encode(buildPaidPaymentResponse($conn, $done));
+        return;
+    }
+
+    $draft = $_SESSION['pending_document_draft'] ?? null;
+
+    if (!$draft || $draft['token'] !== $draft_token) {
+        echo json_encode(['success' => false, 'message' => 'Draft not found or expired']);
+        return;
+    }
+
+    $xenditId = $draft['xendit_id'] ?? null;
+    if (!$xenditId) {
+        echo json_encode(['success' => false, 'message' => 'No payment initiated']);
+        return;
+    }
+
+    $service = new XenditService($conn);
+    try {
+        $result = $service->getPaymentRequest($xenditId);
+    } catch (Throwable $e) {
+        error_log("getPaymentRequest failed for $xenditId: " . $e->getMessage());
+        echo json_encode(['success' => true, 'payment_status' => 'pending']);
+        return;
+    }
+
+    if (!$result || empty($result['status'])) {
+        echo json_encode(['success' => true, 'payment_status' => 'pending']);
+        return;
+    }
+
+    $xenditStatus = strtoupper($result['status']);
+    if (!in_array($xenditStatus, ['PENDING', 'REQUIRES_ACTION'], true)) {
+        error_log("checkXenditPaymentStatus: draft={$draft_token} xendit_status={$xenditStatus}");
+    }
+
+    // Failed / cancelled / expired -> tell the browser so it can show the failure screen
+    if (in_array($xenditStatus, ['FAILED', 'CANCELED', 'CANCELLED', 'EXPIRED'], true)) {
+        $mapped = $xenditStatus === 'EXPIRED' ? 'expired'
+                : (in_array($xenditStatus, ['CANCELED', 'CANCELLED'], true) ? 'cancelled' : 'failed');
+        echo json_encode([
+            'success'        => true,
+            'payment_status' => $mapped,
+            'failure_code'   => $result['failure_code'] ?? null,
+        ]);
+        return;
+    }
+
+    if (!in_array($xenditStatus, ['SUCCEEDED', 'PAID'], true)) {
+        echo json_encode(['success' => true, 'payment_status' => 'pending']);
+        return;
+    }
+
+    // ── PAYMENT SUCCEEDED → commit the draft to the database ──
+
+    // document_payments.payment_method uses lowercase values (same map as XenditService::savePaymentInfo)
+    $channelRaw    = strtoupper($draft['xendit_channel'] ?? $draft['payment_channel'] ?? '');
+    $methodMap     = ['GCASH' => 'gcash', 'PAYMAYA' => 'maya', 'QRPH' => 'qrph', 'BANK_TRANSFER' => 'bank_transfer'];
+    $paymentMethod = $methodMap[$channelRaw] ?? 'online';
+
+    $request_id = commitDraftToDatabase($conn, $draft, 'paid', $paymentMethod);
+
+    if (!$request_id) {
+        echo json_encode(['success' => false, 'message' => 'Failed to save request after payment']);
+        return;
+    }
+
+    // Remember the result and clear the draft RIGHT AWAY, so a retry or a second
+    // poll can never create a duplicate request, and can still get this answer.
+    $_SESSION['completed_payment_drafts'][$draft_token] = [
+        'request_id'    => $request_id,
+        'amount'        => floatval($draft['fee']),
+        'channel'       => $draft['xendit_channel'] ?? null,
+        'document_type' => $draft['document_type'] ?? '',
+        'paid_at'       => date('c'),
+    ];
+    unset($_SESSION['pending_document_draft']);
+
+    // Extras: a failure here must not lose the paid request.
+    try {
+        require_once __DIR__ . '/../includes/document_generators/DocumentGenerator.php';
+        $generator = new DocumentGenerator($conn);
+        $generator->generateDocument($request_id);
+    } catch (Throwable $e) {
+        error_log("Doc generation failed for paid request #$request_id: " . $e->getMessage());
+    }
+
+    $qrResult = null;
+    try {
+        $qrResult = generateQRCode($conn, $request_id);
+    } catch (Throwable $e) {
+        error_log("QR generation failed for paid request #$request_id: " . $e->getMessage());
+    }
+
+    try {
+        $service->notifySecretariesPaid($request_id);
+    } catch (Throwable $e) {
+        error_log("Secretary notification failed for paid request #$request_id: " . $e->getMessage());
+    }
+
+    echo json_encode(buildPaidPaymentResponse($conn, $_SESSION['completed_payment_drafts'][$draft_token], $qrResult));
+}
+
+// ============ NOTIFICATION FUNCTIONS ============
+/**
  * Get all notifications for a resident (from notifications table)
+ * Now includes document_path so the resident can open the KP form PDF.
  */
 function getAllNotifications($conn, $resident_id) {
-    $limit = intval($_GET['limit'] ?? 50);
+    $limit  = intval($_GET['limit']  ?? 50);
     $offset = intval($_GET['offset'] ?? 0);
-    
-    $sql = "SELECT * FROM notifications 
-            WHERE resident_id = ? 
-            ORDER BY created_at DESC 
-            LIMIT ? OFFSET ?";
-    
+
+    // Clamp values
+    if ($limit  < 1)   $limit  = 50;
+    if ($limit  > 100) $limit  = 100;
+    if ($offset < 0)   $offset = 0;
+
+    $sql = "SELECT id, resident_id, user_type, user_id,
+                   type, title, message,
+                   reference_id, reference_type,
+                   document_path,
+                   is_read, created_at, read_at
+              FROM notifications
+             WHERE resident_id = ?
+             ORDER BY created_at DESC
+             LIMIT ? OFFSET ?";
+
     $stmt = mysqli_prepare($conn, $sql);
     if (!$stmt) {
         echo json_encode(['success' => false, 'message' => 'Database error: ' . mysqli_error($conn)]);
         return;
     }
-    
+
     mysqli_stmt_bind_param($stmt, "iii", $resident_id, $limit, $offset);
     mysqli_stmt_execute($stmt);
     $result = mysqli_stmt_get_result($stmt);
-    
+
     $notifications = [];
     while ($row = mysqli_fetch_assoc($result)) {
         $notifications[] = [
-            'id' => $row['id'],
-            'type' => $row['type'],
-            'title' => $row['title'],
-            'message' => $row['message'],
-            'reference_id' => $row['reference_id'],
+            'id'             => (int)$row['id'],
+            'type'           => $row['type'],
+            'title'          => $row['title'],
+            'message'        => $row['message'],
+            'reference_id'   => $row['reference_id'] !== null ? (int)$row['reference_id'] : null,
             'reference_type' => $row['reference_type'],
-            'is_read' => (bool)$row['is_read'],
-            'created_at' => $row['created_at'],
-            'read_at' => $row['read_at'] ?? null
+            'document_path'  => $row['document_path'],   // ← NEW: KP form PDF path (nullable)
+            'is_read'        => (bool)$row['is_read'],
+            'created_at'     => $row['created_at'],
+            'read_at'        => $row['read_at'] ?? null,
         ];
     }
     mysqli_stmt_close($stmt);
-    
-    // Get unread count
-    $countSql = "SELECT COUNT(*) as unread FROM notifications WHERE resident_id = ? AND is_read = 0";
+
+    // Unread count
+    $countSql = "SELECT COUNT(*) AS unread FROM notifications WHERE resident_id = ? AND is_read = 0";
     $countStmt = mysqli_prepare($conn, $countSql);
     mysqli_stmt_bind_param($countStmt, "i", $resident_id);
     mysqli_stmt_execute($countStmt);
     $countResult = mysqli_stmt_get_result($countStmt);
     $countRow = mysqli_fetch_assoc($countResult);
     mysqli_stmt_close($countStmt);
-    
+
     echo json_encode([
-        'success' => true,
+        'success'       => true,
         'notifications' => $notifications,
-        'unread_count' => (int)$countRow['unread'],
-        'total' => count($notifications)
+        'unread_count'  => (int)$countRow['unread'],
+        'total'         => count($notifications),
     ]);
 }
-
 
 function markNotificationRead($conn, $resident_id) {
     $notification_id = intval($_POST['notification_id'] ?? 0);
@@ -2265,7 +2771,7 @@ function checkNewNotes($conn, $resident_id) {
                 THEN 1 ELSE 0 
             END as has_unread_notes
             FROM document_requests 
-            WHERE resident_id = ? AND status IN ('approved', 'rejected', 'completed')
+            WHERE resident_id = ? AND status IN ('approved', 'rejected', 'claimed', 'unclaimed')
             AND admin_notes IS NOT NULL AND admin_notes != ''";
     
     $stmt = mysqli_prepare($conn, $sql);
@@ -2296,6 +2802,16 @@ function checkNewNotes($conn, $resident_id) {
 
 // ============ SWITCH STATEMENT ============
 switch($action) {
+    case 'save_draft_request':
+        saveDraftRequest($conn, $resident_id);
+        break;
+
+    case 'discard_unpaid_request':
+        // Legacy no-op — drafts are cleared automatically on page unload
+        unset($_SESSION['pending_document_draft']);
+        echo json_encode(['success' => true]);
+        break;
+
     case 'get_documents':
         getDocuments($conn);
         break;
@@ -2416,6 +2932,13 @@ switch($action) {
         $ok = mysqli_stmt_execute($s);
         mysqli_stmt_close($s);
         echo json_encode(['success' => $ok]);
+        break;
+            case 'create_xendit_checkout':
+        createXenditCheckout($conn, $resident_id);
+        break;
+
+    case 'check_payment_status':
+        checkXenditPaymentStatus($conn, $resident_id);
         break;
 
     default:

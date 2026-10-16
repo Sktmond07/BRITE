@@ -1,38 +1,368 @@
-// household.js - Excel-like Editable Household Table with Validation
+// household.js - Household Management with Modal (Inline Table Editing Inside Modal)
 
-// Global state
+// ============ LOAD CHART.JS ONCE ============
+(function loadChartJsOnce() {
+    if (window.Chart) return;
+    var s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js';
+    document.head.appendChild(s);
+})();
+
+// ============ GLOBAL STATE ============
 let currentHouseholdPurok = 'all';
 let currentHouseholdPage = 1;
 let currentHouseholdTotalPages = 1;
 let currentHouseholdData = [];
 let currentHouseholdSearch = '';
 
-// ============ RENDER HOUSEHOLD VIEW ============
+// Modal state
+let currentModalHouseholdId = null;
+let currentModalMode = 'add';
+let confirmationCallback = null;
 
+// In-modal member draft list
+let modalMembers = [];
+
+// Resident detail chart handles
+var rdCharts = { docs: null, equipment: null, complaints: null };
+
+// Data holder for the complaints pie (set by buildComplaintsBlock, read by drawResidentCharts)
+var rdComplaintsPieData = { labels: [], values: [], colors: [] };
+
+// ============ RENDER HOUSEHOLD VIEW ============
 function renderHouseholdView() {
     return `
         <div class="household-module">
+            <style>
+                /* ===== AUTO-FIT TABLE (ZOOM OUT ON SMALL SCREENS) ===== */
+                .table-fit-wrapper {
+                    width: 100%;
+                    overflow: hidden;
+                    position: relative;
+                }
+                .table-fit-inner {
+                    width: 100%;
+                    transform-origin: top left;
+                    transition: transform 0.15s ease-out;
+                    will-change: transform;
+                }
+                .table-fit-inner > table {
+                    width: max-content;
+                    min-width: 100%;
+                    white-space: nowrap;
+                    border-collapse: collapse;
+                }
+                .table-fit-inner > table th,
+                .table-fit-inner > table td {
+                    white-space: nowrap;
+                }
+
+                /* ===== FORMAT HINTS IN MODAL MEMBER TABLE ===== */
+                #modalMemberTable thead th .col-hint {
+                    display: block;
+                    font-size: 10px;
+                    font-weight: 400;
+                    color: #8a9a91;
+                    margin-top: 2px;
+                    letter-spacing: 0.2px;
+                }
+                #modalMemberTable .editable-cell {
+                    position: relative;
+                    min-width: 60px;
+                }
+                #modalMemberTable .editable-cell:empty::before {
+                    content: attr(data-placeholder);
+                    color: #b8c4bd;
+                    font-style: italic;
+                    pointer-events: none;
+                }
+                #modalMemberTable .editable-cell.invalid-cell {
+                    background: #fdecec;
+                    box-shadow: inset 0 0 0 2px #f5a5a5;
+                }
+                #modalMemberTable .editable-cell.valid-cell {
+                    background: #eaf7ef;
+                }
+                .format-legend {
+                    margin-top: 10px;
+                    padding: 10px 14px;
+                    background: #f4f8f6;
+                    border-left: 4px solid #17a2b8;
+                    border-radius: 8px;
+                    font-size: 12px;
+                    color: #4a5d55;
+                    line-height: 1.7;
+                }
+                .format-legend .legend-item {
+                    display: inline-block;
+                    margin-right: 18px;
+                    white-space: nowrap;
+                }
+                .format-legend .legend-item i {
+                    color: #17a2b8;
+                    margin-right: 5px;
+                }
+                .format-legend code {
+                    background: #e6efeb;
+                    padding: 1px 6px;
+                    border-radius: 4px;
+                    color: #1a472a;
+                    font-size: 11px;
+                }
+
+                /* ===== REGISTERED RESIDENT HIGHLIGHT (soft glass green) ===== */
+                #householdTable tr.member-has-account > td {
+                    background: linear-gradient(180deg, #e8f7ee 0%, #ddf2e6 100%);
+                    box-shadow: inset 0 0 0 1px rgba(46, 160, 90, 0.08);
+                }
+                #householdTable tr.member-has-account:hover > td {
+                    background: linear-gradient(180deg, #dcf1e3 0%, #d1ebd9 100%);
+                }
+                #householdTable tr.member-has-account td:first-child {
+                    box-shadow: inset 0 0 0 1px rgba(46, 160, 90, 0.08), inset 4px 0 0 #2ea05a;
+                }
+                #householdTable tr.member-has-account .account-badge {
+                    display: inline-flex;
+                    align-items: center;
+                    gap: 4px;
+                    background: #2ea05a;
+                    color: #fff;
+                    font-size: 10px;
+                    font-weight: 600;
+                    padding: 1px 6px;
+                    border-radius: 10px;
+                    margin-left: 6px;
+                    vertical-align: middle;
+                    letter-spacing: 0.2px;
+                }
+                #householdTable tr.member-has-account .account-badge i {
+                    font-size: 9px;
+                }
+                .registered-legend {
+                    display: inline-flex;
+                    align-items: center;
+                    gap: 6px;
+                    font-size: 12px;
+                    color: #5f7f6e;
+                    margin-bottom: 8px;
+                }
+                .registered-legend .swatch {
+                    display: inline-block;
+                    width: 14px;
+                    height: 14px;
+                    border-radius: 4px;
+                    background: #e2f3e9;
+                    border-left: 4px solid #2ea05a;
+                }
+
+                /* ===== RESIDENT DETAIL MODAL ===== */
+                .rd-section {
+                    background: #fff;
+                    border: 1px solid #e6efe9;
+                    border-radius: 12px;
+                    padding: 16px 18px;
+                    margin-bottom: 16px;
+                }
+                .rd-section h4 {
+                    margin: 0 0 12px 0;
+                    font-size: 14px;
+                    color: #1a472a;
+                    display: flex;
+                    align-items: center;
+                    gap: 8px;
+                    font-weight: 700;
+                    letter-spacing: 0.2px;
+                }
+                .rd-section h4 i { color: #2ea05a; }
+                .rd-header {
+                    display: flex;
+                    gap: 16px;
+                    align-items: center;
+                    margin-bottom: 18px;
+                    padding-bottom: 16px;
+                    border-bottom: 1px solid #eef2ef;
+                }
+                .rd-avatar {
+                    width: 64px; height: 64px;
+                    border-radius: 50%;
+                    background: linear-gradient(135deg,#2ea05a,#1e7e6c);
+                    display: flex; align-items: center; justify-content: center;
+                    color: #fff; font-size: 26px; font-weight: 700;
+                    flex-shrink: 0;
+                }
+                .rd-name {
+                    font-size: 18px; font-weight: 700; color: #1a472a;
+                    margin-bottom: 3px;
+                }
+                .rd-sub { font-size: 12px; color: #6c757d; }
+                .rd-badge {
+                    display: inline-flex; align-items: center; gap: 4px;
+                    background: #e8f7ee; color: #1e7e6c;
+                    font-size: 11px; font-weight: 600;
+                    padding: 2px 10px; border-radius: 20px;
+                    margin-left: 8px;
+                    border: 1px solid #c6e6d5;
+                }
+                .rd-stats {
+                    display: grid;
+                    grid-template-columns: repeat(3, 1fr);
+                    gap: 12px;
+                    margin-bottom: 18px;
+                }
+                @media (max-width: 640px) {
+                    .rd-stats { grid-template-columns: 1fr; }
+                }
+                .rd-stat {
+                    background: linear-gradient(135deg,#f6fbf8,#eff8f3);
+                    border-radius: 12px;
+                    padding: 14px;
+                    border-left: 4px solid #2ea05a;
+                }
+                .rd-stat.blue { background: linear-gradient(135deg,#f3f8fd,#eaf2fb); border-left-color:#2196f3; }
+                .rd-stat.orange { background: linear-gradient(135deg,#fff8ee,#fff3e0); border-left-color:#ff9800; }
+                .rd-stat .label {
+                    font-size: 11px; color: #6c757d; font-weight: 600;
+                    text-transform: uppercase; letter-spacing: 0.4px;
+                }
+                .rd-stat .value {
+                    font-size: 26px; font-weight: 800; color: #1a472a;
+                    line-height: 1.2; margin-top: 4px;
+                }
+                .rd-stat.blue .value { color: #1565c0; }
+                .rd-stat.orange .value { color: #e65100; }
+                .rd-stat .hint { font-size: 11px; color: #8896a0; margin-top: 3px; }
+                .rd-charts {
+                    display: grid;
+                    grid-template-columns: 1fr 1fr;
+                    gap: 16px;
+                }
+                @media (max-width: 720px) {
+                    .rd-charts { grid-template-columns: 1fr; }
+                }
+                .rd-chart-box {
+                    background: #fbfdfc;
+                    border: 1px solid #eef2ef;
+                    border-radius: 12px;
+                    padding: 12px;
+                }
+                .rd-chart-box h5 {
+                    margin: 0 0 8px 0;
+                    font-size: 12px;
+                    color: #4a5d55;
+                    font-weight: 700;
+                    text-transform: uppercase;
+                    letter-spacing: 0.4px;
+                }
+                .rd-chart-wrap {
+                    position: relative;
+                    height: 200px;
+                }
+                .rd-list {
+                    list-style: none;
+                    padding: 0; margin: 0;
+                    font-size: 13px;
+                }
+                .rd-list li {
+                    display: flex; justify-content: space-between;
+                    padding: 6px 0;
+                    border-bottom: 1px dashed #eef2ef;
+                }
+                .rd-list li:last-child { border-bottom: none; }
+                .rd-list .pill {
+                    background: #e8f7ee; color: #1e7e6c;
+                    font-size: 11px; font-weight: 700;
+                    padding: 1px 8px; border-radius: 10px;
+                }
+                .rd-empty {
+                    text-align: center; color: #8896a0;
+                    font-size: 12px; padding: 20px 0;
+                }
+
+                /* ===== COMPLAINT CARDS / LISTS ===== */
+                .rd-recent {
+                    border-radius: 12px;
+                    padding: 12px 14px;
+                    margin-bottom: 14px;
+                    border-left: 5px solid #2ea05a;
+                    background: #f6fbf8;
+                }
+                .rd-recent.recent-unresolved { background: #fff5f5; border-left-color: #dc3545; }
+                .rd-recent.recent-pending    { background: #fffaf0; border-left-color: #ff9800; }
+                .rd-recent.recent-resolved   { background: #f2fbf5; border-left-color: #2ea05a; }
+                .rd-recent-label {
+                    font-size: 11px; font-weight: 700; color: #4a5d55;
+                    text-transform: uppercase; letter-spacing: 0.4px;
+                    margin-bottom: 6px;
+                    display: flex; align-items: center; gap: 8px;
+                }
+                .rd-recent-role {
+                    margin-left: auto;
+                    font-size: 10px; color: #fff;
+                    padding: 2px 8px; border-radius: 10px;
+                    text-transform: none; letter-spacing: 0.2px;
+                    font-weight: 600;
+                }
+                .rd-recent-title {
+                    font-size: 14px; font-weight: 700; color: #1a472a;
+                    margin-bottom: 4px;
+                }
+                .rd-recent-meta {
+                    display: flex; flex-wrap: wrap; gap: 14px;
+                    font-size: 11px; color: #6c757d;
+                }
+                .rd-recent-meta i { margin-right: 3px; }
+
+                .rd-complist {
+                    list-style: none; padding: 0; margin: 0;
+                    max-height: 240px; overflow-y: auto;
+                }
+                .rd-complist li {
+                    border-left: 3px solid #dc3545;
+                    background: #fff;
+                    border-radius: 6px;
+                    padding: 8px 10px;
+                    margin-bottom: 6px;
+                }
+                .rd-complist li.rc-resolved   { border-left-color: #2ea05a; }
+                .rd-complist li.rc-pending    { border-left-color: #ff9800; }
+                .rd-complist li.rc-unresolved { border-left-color: #dc3545; }
+                .rd-complist .rc-ref {
+                    font-size: 10px; color: #8896a0; font-weight: 600;
+                    letter-spacing: 0.3px;
+                }
+                .rd-complist .rc-title {
+                    font-size: 12px; color: #1a472a; font-weight: 600;
+                    margin: 2px 0 4px;
+                    line-height: 1.3;
+                }
+                .rd-complist .rc-meta {
+                    display: flex; justify-content: space-between;
+                    font-size: 10px; color: #8896a0;
+                }
+                .rd-complist .rc-status {
+                    font-weight: 700;
+                    color: #b26a00;
+                }
+                .rd-complist li.rc-resolved .rc-status   { color: #2e7d32; }
+                .rd-complist li.rc-unresolved .rc-status { color: #c62828; }
+            </style>
             <div class="content-card">
                 <div class="section-title">
                     <div>
                         <i class="fas fa-home"></i> Household Management
-                        <span style="font-size:12px; color:#6c757d; margin-left:10px;">Click cells to edit, press Enter to save</span>
+                        <span style="font-size:12px; color:#6c757d; margin-left:10px;">Click a row to edit, or use the buttons to add</span>
                     </div>
                     <div style="display:flex; gap:10px; flex-wrap:wrap;">
-                        <button class="btn-add-household" onclick="addNewHouseholdRow()" style="background:#17a2b8;">
+                        <button class="btn-add-household" onclick="openAddHouseholdModal()" style="background:#17a2b8;">
                             <i class="fas fa-plus"></i> Add Household
                         </button>
-                        <button class="btn-add-household" onclick="saveAllRows()" style="background:#28a745;">
-                            <i class="fas fa-save"></i> Save All
-                        </button>
-                        <button class="btn-add-household" onclick="validateAllRows()" style="background:#ff9800;">
-                            <i class="fas fa-check-double"></i> Validate
+                        <button class="btn-add-household" onclick="loadHouseholds(currentHouseholdPurok, currentHouseholdPage, currentHouseholdSearch)" style="background:#6c757d;">
+                            <i class="fas fa-sync"></i> Refresh
                         </button>
                     </div>
                 </div>
-                <div class="section-sub">Click any cell to edit. Press Enter to save, Escape to cancel. Add new rows at the bottom.</div>
-                
-                <!-- Filter Bar -->
+                <div class="section-sub">Click any household row to edit its details and manage members.</div>
+
                 <div class="household-filter-bar">
                     <div class="filter-group">
                         <label><i class="fas fa-map-marker-alt"></i> Purok:</label>
@@ -44,12 +374,8 @@ function renderHouseholdView() {
                         <input type="text" id="householdSearchInput" placeholder="Search..." oninput="searchHouseholds()">
                         <i class="fas fa-search"></i>
                     </div>
-                    <button onclick="loadHouseholds(currentHouseholdPurok, 1, currentHouseholdSearch)" style="padding:6px 16px; border-radius:8px; border:1px solid #dee2e6; background:white; cursor:pointer;">
-                        <i class="fas fa-sync"></i> Refresh
-                    </button>
                 </div>
-                
-                <!-- Stats -->
+
                 <div class="household-stats" id="householdStats">
                     <div class="stat-item">
                         <span class="stat-label">Total Households</span>
@@ -64,133 +390,167 @@ function renderHouseholdView() {
                         <span class="stat-number" id="totalPuroks">-</span>
                     </div>
                 </div>
-                
-                <!-- Excel-Style Editable Table with Address Merged -->
-                <div class="table-responsive">
-                    <table class="household-table" id="householdTable">
-                        <thead>
-                            <tr>
-                                <th style="min-width:50px; width:50px;">#</th>
-                                <th style="min-width:70px; width:80px;">Purok</th>
-                                <th style="min-width:120px; width:140px;">Household Address</th>
-                                <th style="min-width:70px; width:80px;">Members</th>
-                                <th style="min-width:100px;">Last Name</th>
-                                <th style="min-width:90px;">First Name</th>
-                                <th style="min-width:90px;">Middle Name</th>
-                                <th style="min-width:50px;">Ext</th>
-                                <th style="min-width:120px;">Place of Birth</th>
-                                <th style="min-width:110px;">Date of Birth</th>
-                                <th style="min-width:40px;">Age</th>
-                                <th style="min-width:40px;">Sex</th>
-                                <th style="min-width:90px;">Civil Status</th>
-                                <th style="min-width:100px;">Citizenship</th>
-                                <th style="min-width:120px;">Occupation</th>
-                                <th style="min-width:130px;">Employment Status</th>
-                                <th style="min-width:70px;">Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody id="householdTableBody">
-                            <tr>
-                                <td colspan="17" class="text-center">
-                                    <div class="loading-spinner-mini"><i class="fas fa-spinner fa-spin"></i> Loading...</div>
-                                </td>
-                            </tr>
-                        </tbody>
-                    </table>
+
+                <div class="registered-legend">
+                    <span class="swatch"></span>
+                    Resident with a registered account — click the last name to view analytics
                 </div>
-                
-                <!-- Pagination -->
+
+                <div class="table-fit-wrapper" id="householdTableFitWrapper">
+                    <div class="table-fit-inner" id="householdTableFitInner">
+                        <table class="household-table" id="householdTable">
+                            <thead>
+                                <tr>
+                                    <th style="min-width:50px; width:50px;">#</th>
+                                    <th style="min-width:70px; width:80px;">Purok</th>
+                                    <th style="min-width:120px; width:140px;">Household Address</th>
+                                    <th style="min-width:70px; width:80px;">Members</th>
+                                    <th style="min-width:100px;">Last Name</th>
+                                    <th style="min-width:90px;">First Name</th>
+                                    <th style="min-width:90px;">Middle Name</th>
+                                    <th style="min-width:50px;">Ext</th>
+                                    <th style="min-width:120px;">Place of Birth</th>
+                                    <th style="min-width:110px;">Date of Birth</th>
+                                    <th style="min-width:40px;">Age</th>
+                                    <th style="min-width:40px;">Sex</th>
+                                    <th style="min-width:90px;">Civil Status</th>
+                                    <th style="min-width:100px;">Citizenship</th>
+                                    <th style="min-width:120px;">Occupation</th>
+                                    <th style="min-width:130px;">Employment Status</th>
+                                    <th style="min-width:140px;">Email</th>
+                                    <th style="min-width:110px;">Phone Number</th>
+                                    <th style="min-width:70px;">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="householdTableBody">
+                                <tr>
+                                    <td colspan="19" class="text-center">
+                                        <div class="loading-spinner-mini"><i class="fas fa-spinner fa-spin"></i> Loading...</div>
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
                 <div id="householdPagination"></div>
             </div>
         </div>
-        
-        <!-- Date Picker Modal -->
-        <div id="datePickerModal" class="modal">
-            <div class="modal-content" style="max-width: 400px;">
-                <div class="modal-header">
-                    <h2><i class="fas fa-calendar-alt"></i> Select Date</h2>
-                    <button class="close-modal" onclick="closeDatePicker()">&times;</button>
+
+        <!-- ============ HOUSEHOLD MODAL ============ -->
+        <div id="householdModal" class="modal" style="display:none; align-items:flex-start; justify-content:center; overflow-y:auto; padding:30px 0;">
+            <div class="modal-content" style="max-width: 1300px; width: 95%; margin:0 auto;">
+                <div class="modal-header" style="background:#17a2b8;">
+                    <h2 id="householdModalTitle"><i class="fas fa-home"></i> Add Household</h2>
+                    <button class="close-modal" onclick="closeHouseholdModal()">&times;</button>
                 </div>
-                <div class="modal-body" id="datePickerBody">
-                    <div class="form-group">
-                        <label>Year</label>
-                        <select id="datePickerYear" class="form-control" onchange="updateDatePickerDay()">
-                            <!-- Filled by JS -->
-                        </select>
-                    </div>
-                    <div class="form-row">
-                        <div class="form-group half">
-                            <label>Month</label>
-                            <select id="datePickerMonth" class="form-control" onchange="updateDatePickerDay()">
-                                <option value="1">January</option>
-                                <option value="2">February</option>
-                                <option value="3">March</option>
-                                <option value="4">April</option>
-                                <option value="5">May</option>
-                                <option value="6">June</option>
-                                <option value="7">July</option>
-                                <option value="8">August</option>
-                                <option value="9">September</option>
-                                <option value="10">October</option>
-                                <option value="11">November</option>
-                                <option value="12">December</option>
-                            </select>
+                <div class="modal-body" style="max-height: 78vh; overflow-y: auto; padding: 20px 25px;">
+                    <form id="householdForm" onsubmit="event.preventDefault(); saveHouseholdModal();">
+                        <input type="hidden" id="modalHouseholdId">
+                        <div class="form-row">
+                            <div class="form-group half">
+                                <label>Purok *</label>
+                                <input type="text" id="modalPurok" class="form-control" required placeholder="e.g. 1, 2, 3...">
+                            </div>
+                            <div class="form-group half">
+                                <label>Household Address *</label>
+                                <input type="text" id="modalAddress" class="form-control" required placeholder="e.g. 123 Main St.">
+                            </div>
                         </div>
-                        <div class="form-group half">
-                            <label>Day</label>
-                            <select id="datePickerDay" class="form-control">
-                                <!-- Filled by JS -->
-                            </select>
+
+                        <div style="margin-top:20px; border-top:1px solid #eef2ef; padding-top:15px;">
+                            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; flex-wrap:wrap; gap:10px;">
+                                <h3 style="margin:0; font-size:1.1rem; color:#1a472a;">
+                                    <i class="fas fa-users"></i> Members
+                                    <span id="modalMemberCount" style="font-size:0.9rem; color:#6c757d; margin-left:8px;">(0)</span>
+                                </h3>
+                                <button type="button" class="btn-add-household" style="background:#28a745;" onclick="addModalMemberRow()">
+                                    <i class="fas fa-user-plus"></i> Add Member
+                                </button>
+                            </div>
+                            <div class="table-fit-wrapper" id="modalTableFitWrapper">
+                                <div class="table-fit-inner" id="modalTableFitInner">
+                                    <table class="household-table" id="modalMemberTable" style="font-size:13px;">
+                                        <thead>
+                                            <tr>
+                                                <th style="min-width:110px;">Last Name *<span class="col-hint">required</span></th>
+                                                <th style="min-width:90px;">First Name<span class="col-hint">optional</span></th>
+                                                <th style="min-width:90px;">Middle Name<span class="col-hint">optional</span></th>
+                                                <th style="min-width:50px;">Ext<span class="col-hint">Jr/Sr/III</span></th>
+                                                <th style="min-width:130px;">Place of Birth<span class="col-hint">city, province</span></th>
+                                                <th style="min-width:140px;">Date of Birth<span class="col-hint">YYYY-MM-DD</span></th>
+                                                <th style="min-width:50px;">Age<span class="col-hint">auto</span></th>
+                                                <th style="min-width:70px;">Sex<span class="col-hint">M or F</span></th>
+                                                <th style="min-width:100px;">Civil Status<span class="col-hint">Single/Married…</span></th>
+                                                <th style="min-width:100px;">Citizenship<span class="col-hint">e.g. Filipino</span></th>
+                                                <th style="min-width:110px;">Occupation<span class="col-hint">optional</span></th>
+                                                <th style="min-width:120px;">Employment<span class="col-hint">Employed/Student…</span></th>
+                                                <th style="min-width:150px;">Email<span class="col-hint">name@mail.com</span></th>
+                                                <th style="min-width:120px;">Phone Number<span class="col-hint">digits only</span></th>
+                                                <th style="width:60px;">Action</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="modalMembersBody">
+                                            <tr><td colspan="15" class="text-center" style="color:#6c757d; padding:20px;">No members yet. Click "Add Member".</td></tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+
+                            <div class="format-legend">
+                                <span class="legend-item"><i class="fas fa-calendar-alt"></i> Date of Birth: <code>YYYY-MM-DD</code> (e.g. <code>1990-05-14</code>)</span>
+                                <span class="legend-item"><i class="fas fa-venus-mars"></i> Sex: <code>M</code> or <code>F</code></span>
+                                <span class="legend-item"><i class="fas fa-envelope"></i> Email: <code>name@mail.com</code></span>
+                                <span class="legend-item"><i class="fas fa-phone"></i> Phone: digits only, optional <code>+</code></span>
+                            </div>
                         </div>
-                    </div>
-                    <div class="form-buttons" style="margin-top:15px;">
-                        <button class="btn-verify" onclick="confirmDatePicker()"><i class="fas fa-check"></i> Set Date</button>
-                        <button class="btn-close" onclick="closeDatePicker()">Cancel</button>
+
+                        <div class="form-buttons" style="margin-top:20px; display:flex; gap:10px; justify-content:flex-end;">
+                            <button type="button" class="btn-close" onclick="closeHouseholdModal()" style="background:#6c757d; color:white; border:none; padding:10px 25px; border-radius:8px; cursor:pointer;">Cancel</button>
+                            <button type="submit" class="btn-verify" style="background:#28a745; color:white; border:none; padding:10px 25px; border-radius:8px; cursor:pointer; font-weight:600;">
+                                <i class="fas fa-save"></i> Save Household
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+
+        <!-- ============ RESIDENT DETAIL MODAL ============ -->
+        <div id="residentDetailModal" class="modal" style="display:none; z-index:2250; align-items:flex-start; justify-content:center; overflow-y:auto; padding:30px 0;">
+            <div class="modal-content" style="max-width: 900px; width: 95%; margin:0 auto;">
+                <div class="modal-header" style="background: linear-gradient(135deg,#2ea05a,#1e7e6c);">
+                    <h2 id="residentDetailTitle"><i class="fas fa-user-circle"></i> Resident Details</h2>
+                    <button class="close-modal" onclick="closeResidentDetailModal()">&times;</button>
+                </div>
+                <div class="modal-body" style="padding: 22px 26px; max-height: 80vh; overflow-y: auto;">
+                    <div id="residentDetailBody">
+                        <div style="text-align:center; padding:40px; color:#6c757d;">
+                            <i class="fas fa-spinner fa-spin" style="font-size:32px;"></i>
+                            <p>Loading analytics...</p>
+                        </div>
                     </div>
                 </div>
             </div>
         </div>
-        
-        <!-- Sex Dropdown Modal -->
-        <div id="sexDropdownModal" class="modal">
-            <div class="modal-content" style="max-width: 350px;">
-                <div class="modal-header">
-                    <h2><i class="fas fa-venus-mars"></i> Select Sex</h2>
-                    <button class="close-modal" onclick="closeSexDropdown()">&times;</button>
+
+        <!-- ============ CONFIRMATION MODAL ============ -->
+        <div id="confirmationModal" class="modal" style="display:none; z-index:2200; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.6); align-items:center; justify-content:center;">
+            <div class="confirmation-modal-content" style="background:white; border-radius:20px; max-width:440px; width:90%; text-align:center; padding:30px 25px; box-shadow:0 25px 60px rgba(0,0,0,0.3); animation: slideDown 0.25s ease;">
+                <div style="width:80px; height:80px; border-radius:50%; background:#fff4e5; display:flex; align-items:center; justify-content:center; margin: 0 auto 18px;">
+                    <i class="fas fa-exclamation-triangle" style="font-size:38px; color:#ff9800;"></i>
                 </div>
-                <div class="modal-body" id="sexDropdownBody">
-                    <div style="display:flex; gap:20px; justify-content:center; padding:20px 0;">
-                        <button class="sex-option-btn" onclick="selectSex('M')" style="background: #4a90d9; color: white; padding: 20px 40px; border: none; border-radius: 12px; font-size: 24px; cursor: pointer; transition: all 0.3s;">
-                            <i class="fas fa-mars" style="display:block; font-size: 40px; margin-bottom: 10px;"></i>
-                            Male
-                        </button>
-                        <button class="sex-option-btn" onclick="selectSex('F')" style="background: #e91e63; color: white; padding: 20px 40px; border: none; border-radius: 12px; font-size: 24px; cursor: pointer; transition: all 0.3s;">
-                            <i class="fas fa-venus" style="display:block; font-size: 40px; margin-bottom: 10px;"></i>
-                            Female
-                        </button>
-                    </div>
+                <div id="confirmationModalTitle" style="font-size:1.25rem; font-weight:700; color:#1a472a; margin-bottom:10px;">
+                    Confirm
                 </div>
-            </div>
-        </div>
-        
-        <!-- Confirmation Modal -->
-        <div id="confirmationModal" class="modal" style="display:none; z-index:2000;">
-            <div class="modal-content" style="max-width: 450px; margin-top: 15%;">
-                <div class="modal-header" style="background: #ff9800;">
-                    <h2 id="confirmationModalTitle"><i class="fas fa-question-circle"></i> Confirm</h2>
-                    <button class="close-modal" onclick="closeConfirmationModal()">&times;</button>
+                <div id="confirmationModalMessage" style="color:#5f7f6e; font-size:15px; line-height:1.6; margin-bottom:25px;">
+                    Are you sure?
                 </div>
-                <div class="modal-body" id="confirmationModalBody" style="text-align:center; padding: 30px;">
-                    <div style="font-size: 48px; margin-bottom: 15px; color: #ff9800;">
-                        <i class="fas fa-exclamation-triangle"></i>
-                    </div>
-                    <p id="confirmationModalMessage" style="font-size: 16px; color: #333; line-height: 1.6;">Are you sure?</p>
-                </div>
-                <div class="modal-footer" style="display:flex; gap:10px; justify-content:center; padding: 15px 24px; border-top: 1px solid #eef2ef;">
-                    <button class="btn-confirm" id="confirmationModalConfirm" style="background: #ff9800; color: white; border: none; padding: 10px 30px; border-radius: 8px; cursor: pointer; font-weight: 600;">
-                        Yes, Proceed
+                <div style="display:flex; gap:12px; justify-content:center;">
+                    <button id="confirmationModalConfirm" style="background:#ff9800; color:white; border:none; padding:11px 28px; border-radius:40px; font-weight:600; cursor:pointer; font-size:15px; transition:all 0.2s; min-width:130px;">
+                        <i class="fas fa-check"></i> Yes, Proceed
                     </button>
-                    <button class="btn-close" onclick="closeConfirmationModal()" style="background: #6c757d; color: white; border: none; padding: 10px 30px; border-radius: 8px; cursor: pointer;">
+                    <button onclick="closeConfirmationModal()" style="background:#e9ecef; color:#495057; border:none; padding:11px 28px; border-radius:40px; font-weight:600; cursor:pointer; font-size:15px; transition:all 0.2s; min-width:100px;">
                         Cancel
                     </button>
                 </div>
@@ -199,1469 +559,1416 @@ function renderHouseholdView() {
     `;
 }
 
-// ============ CAPITALIZATION FUNCTION ============
+// ============ AUTO-FIT TABLE (ZOOM OUT ON SMALL SCREENS ONLY) ============
+function fitTableToWidth(wrapperId, innerId) {
+    var wrapper = document.getElementById(wrapperId);
+    var inner = document.getElementById(innerId);
+    if (!wrapper || !inner) return;
+    var table = inner.querySelector('table');
+    if (!table) return;
 
+    var isSmallScreen = window.innerWidth <= 1100;
+
+    inner.style.transform = 'scale(1)';
+    inner.style.width = '100%';
+    wrapper.style.height = 'auto';
+    wrapper.style.overflowX = 'visible';
+
+    if (!isSmallScreen) {
+        wrapper.style.overflowX = 'auto';
+        return;
+    }
+
+    var naturalWidth = table.scrollWidth;
+    var availableWidth = wrapper.clientWidth;
+
+    if (naturalWidth <= availableWidth || availableWidth === 0) {
+        inner.style.transform = 'scale(1)';
+        wrapper.style.height = '';
+        wrapper.style.overflowX = 'auto';
+        return;
+    }
+
+    var scale = availableWidth / naturalWidth;
+    if (scale < 0.45) scale = 0.45;
+
+    inner.style.transform = 'scale(' + scale + ')';
+
+    var naturalHeight = table.scrollHeight;
+    wrapper.style.height = (naturalHeight * scale) + 'px';
+    wrapper.style.overflowX = (scale <= 0.45) ? 'auto' : 'hidden';
+}
+
+function refitAllHouseholdTables() {
+    fitTableToWidth('householdTableFitWrapper', 'householdTableFitInner');
+    fitTableToWidth('modalTableFitWrapper', 'modalTableFitInner');
+}
+
+(function () {
+    var t;
+    window.addEventListener('resize', function () {
+        clearTimeout(t);
+        t = setTimeout(refitAllHouseholdTables, 120);
+    });
+})();
+
+// ============ CAPITALIZATION HELPERS ============
 function capitalizeText(text) {
     if (!text) return '';
-    
-    // Trim extra spaces
     text = text.trim();
-    
-    // Handle special cases like "Sto Tomas", "San Bartolome"
-    // Split by space or comma
     var words = text.split(/([\s,]+)/);
     var result = [];
-    
+    var specialAbbr = ['Sto', 'San', 'Santa', 'Santo', 'Sta', 'Sr', 'Jr', 'Dr', 'Mr', 'Mrs', 'Ms'];
     for (var i = 0; i < words.length; i++) {
         var word = words[i];
-        // Skip if it's a space or comma separator
-        if (/^[\s,]+$/.test(word)) {
-            result.push(word);
-            continue;
-        }
-        
-        // Handle special abbreviations (keep as is)
-        var specialAbbr = ['Sto', 'San', 'Santa', 'Santo', 'Sta', 'Sr', 'Jr', 'Dr', 'Mr', 'Mrs', 'Ms'];
+        if (/^[\s,]+$/.test(word)) { result.push(word); continue; }
         var lowerWord = word.toLowerCase();
-        
-        // Check if it's a special abbreviation
-        var isSpecial = specialAbbr.some(function(abbr) {
-            return lowerWord === abbr.toLowerCase();
-        });
-        
-        if (isSpecial) {
-            // Find the correct capitalization from special list
-            var matched = specialAbbr.find(function(abbr) {
-                return abbr.toLowerCase() === lowerWord;
-            });
-            result.push(matched);
-        } else {
-            // Capitalize first letter, rest lowercase
-            result.push(word.charAt(0).toUpperCase() + word.slice(1).toLowerCase());
-        }
+        var matched = specialAbbr.find(function(abbr) { return abbr.toLowerCase() === lowerWord; });
+        if (matched) result.push(matched);
+        else result.push(word.charAt(0).toUpperCase() + word.slice(1).toLowerCase());
     }
-    
     return result.join('');
 }
-
-function capitalizeNameField(value) {
-    if (!value) return '';
-    return capitalizeText(value);
+function capitalizeNameField(v) { return v ? capitalizeText(v) : ''; }
+function capitalizePlaceOfBirth(v) {
+    if (!v) return '';
+    return v.split(',').map(function(p) { return capitalizeText(p.trim()); }).join(', ');
+}
+function capitalizeCivilStatus(v) {
+    if (!v) return '';
+    var valid = ['Single', 'Married', 'Widowed', 'Divorced', 'Separated'];
+    var m = valid.find(function(s) { return s.toLowerCase() === v.toLowerCase(); });
+    return m || capitalizeText(v);
+}
+function capitalizeEmploymentStatus(v) {
+    if (!v) return '';
+    var valid = ['Employed', 'Unemployed', 'Solo Parent', 'OSY', 'OSC', 'Student', 'Retired'];
+    var m = valid.find(function(s) { return s.toLowerCase() === v.toLowerCase(); });
+    return m || capitalizeText(v);
 }
 
-function capitalizePlaceOfBirth(value) {
-    if (!value) return '';
-    // Split by comma for multiple locations
-    var parts = value.split(',');
-    var result = [];
-    for (var i = 0; i < parts.length; i++) {
-        result.push(capitalizeText(parts[i].trim()));
-    }
-    return result.join(', ');
+// ============ VALIDATION HELPERS ============
+function isValidDateYMD(val) {
+    if (!val) return true;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(val)) return false;
+    var parts = val.split('-');
+    var y = parseInt(parts[0]), m = parseInt(parts[1]), d = parseInt(parts[2]);
+    if (m < 1 || m > 12) return false;
+    if (d < 1 || d > 31) return false;
+    var dt = new Date(y, m - 1, d);
+    return dt.getFullYear() === y && dt.getMonth() === m - 1 && dt.getDate() === d;
 }
 
-function capitalizeCivilStatus(value) {
-    if (!value) return '';
-    var validStatus = ['Single', 'Married', 'Widowed', 'Divorced', 'Separated'];
-    var lowerValue = value.toLowerCase();
-    
-    // Find matching valid status
-    var matched = validStatus.find(function(status) {
-        return status.toLowerCase() === lowerValue;
-    });
-    
-    return matched || capitalizeText(value);
+function isValidSex(val) {
+    if (!val) return true;
+    return val === 'M' || val === 'F';
 }
 
-function capitalizeEmploymentStatus(value) {
-    if (!value) return '';
-    var validEmployment = ['Employed', 'Unemployed', 'Solo Parent', 'OSY', 'OSC', 'Student', 'Retired'];
-    var lowerValue = value.toLowerCase();
-    
-    // Find matching valid employment status
-    var matched = validEmployment.find(function(status) {
-        return status.toLowerCase() === lowerValue;
-    });
-    
-    return matched || capitalizeText(value);
+function isValidEmail(val) {
+    if (!val) return true;
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(val);
 }
 
-// ============ CONFIRMATION MODAL FUNCTIONS ============
-
-let confirmationCallback = null;
-
-function showConfirmationModal(message, title, onConfirm) {
-    // Remove any existing confirmation modal
-    const existing = document.querySelector('.confirmation-modal');
-    if (existing) existing.remove();
-    
-    // Create modal dynamically (works even if #confirmationModal isn't in DOM)
-    const modal = document.createElement('div');
-    modal.className = 'confirmation-modal';
-    modal.id = 'confirmationModal';
-    modal.style.cssText = 'display:flex; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.6); z-index:2000; align-items:center; justify-content:center;';
-    modal.innerHTML = `
-        <div class="confirmation-modal-content" style="background:white; border-radius:28px; max-width:450px; width:90%; text-align:center; padding:30px 25px; animation:slideDown 0.3s ease; box-shadow:0 25px 50px rgba(0,0,0,0.3);">
-            <div class="notification-icon warning" style="font-size:48px; margin-bottom:15px; color:#ff9800;">
-                <i class="fas fa-exclamation-triangle"></i>
-            </div>
-            <div class="notification-title" style="font-size:1.3rem; font-weight:700; color:#1a472a; margin-bottom:12px;">
-                ${escapeHtml(title || 'Confirm')}
-            </div>
-            <div class="notification-message" style="color:#5f7f6e; margin-bottom:25px; line-height:1.5;">
-                ${escapeHtml(message)}
-            </div>
-            <div class="confirmation-buttons" style="display:flex; gap:15px; justify-content:center; margin-top:25px;">
-                <button class="confirmation-btn-confirm" id="confirmYesBtn" style="background:#ff9800; color:white; border:none; padding:10px 25px; border-radius:40px; font-weight:600; cursor:pointer; transition:all 0.2s;">
-                    Yes, Proceed
-                </button>
-                <button class="confirmation-btn-cancel" id="confirmNoBtn" style="background:#6c757d; color:white; border:none; padding:10px 25px; border-radius:40px; font-weight:600; cursor:pointer; transition:all 0.2s;">
-                    Cancel
-                </button>
-            </div>
-        </div>
-    `;
-    
-    document.body.appendChild(modal);
-    confirmationCallback = onConfirm;
-    
-    document.getElementById('confirmYesBtn').addEventListener('click', function() {
-        modal.remove();
-        if (typeof confirmationCallback === 'function') {
-            confirmationCallback();
-        }
-        confirmationCallback = null;
-    });
-    
-    document.getElementById('confirmNoBtn').addEventListener('click', function() {
-        modal.remove();
-        confirmationCallback = null;
-    });
+function isValidPhone(val) {
+    if (!val) return true;
+    return /^\+?\d{7,15}$/.test(val);
 }
 
-function closeConfirmationModal() {
-    const modal = document.querySelector('.confirmation-modal');
-    if (modal) modal.remove();
-    confirmationCallback = null;
-}
-
-function confirmAction() {
-    if (typeof confirmationCallback === 'function') {
-        confirmationCallback();
-    }
-    closeConfirmationModal();
-}
-
-// ============ DATE PICKER FUNCTIONS ============
-
-let datePickerTarget = null;
-let datePickerOriginalValue = '';
-
-function openDatePicker(cell) {
-    datePickerTarget = cell;
-    datePickerOriginalValue = cell.textContent.trim();
-    
-    var modal = document.getElementById('datePickerModal');
-    var yearSelect = document.getElementById('datePickerYear');
-    var monthSelect = document.getElementById('datePickerMonth');
-    var daySelect = document.getElementById('datePickerDay');
-    
-    // Populate years (1900 to current year)
-    yearSelect.innerHTML = '';
-    var currentYear = new Date().getFullYear();
-    for (var y = currentYear; y >= 1900; y--) {
-        var option = document.createElement('option');
-        option.value = y;
-        option.textContent = y;
-        yearSelect.appendChild(option);
-    }
-    
-    // Set default to current date or existing value
-    var existingDate = datePickerOriginalValue;
-    var year = currentYear;
-    var month = new Date().getMonth() + 1;
-    var day = new Date().getDate();
-    
-    if (existingDate) {
-        var parts = existingDate.split('-');
-        if (parts.length === 3) {
-            year = parseInt(parts[0]) || currentYear;
-            month = parseInt(parts[1]) || 1;
-            day = parseInt(parts[2]) || 1;
-        }
-    }
-    
-    yearSelect.value = year;
-    monthSelect.value = month;
-    updateDatePickerDay();
-    daySelect.value = day;
-    
-    modal.style.display = 'block';
-}
-
-function updateDatePickerDay() {
-    var month = parseInt(document.getElementById('datePickerMonth').value);
-    var year = parseInt(document.getElementById('datePickerYear').value);
-    var daySelect = document.getElementById('datePickerDay');
-    
-    // Get days in month
-    var daysInMonth = new Date(year, month, 0).getDate();
-    
-    daySelect.innerHTML = '';
-    for (var d = 1; d <= daysInMonth; d++) {
-        var option = document.createElement('option');
-        option.value = d;
-        option.textContent = d;
-        daySelect.appendChild(option);
-    }
-}
-
-function confirmDatePicker() {
-    if (!datePickerTarget) return;
-    
-    var year = document.getElementById('datePickerYear').value;
-    var month = String(document.getElementById('datePickerMonth').value).padStart(2, '0');
-    var day = String(document.getElementById('datePickerDay').value).padStart(2, '0');
-    
-    var dateStr = year + '-' + month + '-' + day;
-    datePickerTarget.textContent = dateStr;
-    datePickerTarget.dataset.originalValue = dateStr;
-    
-    // Calculate age automatically
-    calculateAgeFromDate(datePickerTarget);
-    
-    // Trigger change detection
-    var row = datePickerTarget.closest('tr');
-    if (row) {
-        row.classList.add('changed');
-        row.dataset.changed = 'true';
-    }
-    
-    closeDatePicker();
-    // Re-validate the row
-    validateRow(row);
-}
-
-function closeDatePicker() {
-    document.getElementById('datePickerModal').style.display = 'none';
-    datePickerTarget = null;
-}
-
-// ============ SEX DROPDOWN FUNCTIONS ============
-
-let sexDropdownTarget = null;
-
-function openSexDropdown(cell) {
-    sexDropdownTarget = cell;
-    document.getElementById('sexDropdownModal').style.display = 'block';
-}
-
-function selectSex(sex) {
-    if (!sexDropdownTarget) return;
-    
-    sexDropdownTarget.textContent = sex;
-    sexDropdownTarget.dataset.originalValue = sex;
-    
-    var row = sexDropdownTarget.closest('tr');
-    if (row) {
-        row.classList.add('changed');
-        row.dataset.changed = 'true';
-        validateRow(row);
-    }
-    
-    closeSexDropdown();
-}
-
-function closeSexDropdown() {
-    document.getElementById('sexDropdownModal').style.display = 'none';
-    sexDropdownTarget = null;
-}
-
-// ============ AGE CALCULATION ============
-
-function calculateAgeFromDate(dateCell) {
-    var dateStr = dateCell.textContent.trim();
-    if (!dateStr) return;
-    
+// ============ AGE HELPER ============
+function calculateAgeFromDateStr(dateStr) {
+    if (!dateStr) return null;
     var parts = dateStr.split('-');
-    if (parts.length !== 3) return;
-    
-    var year = parseInt(parts[0]);
-    var month = parseInt(parts[1]);
-    var day = parseInt(parts[2]);
-    
-    if (isNaN(year) || isNaN(month) || isNaN(day)) return;
-    
-    var birthDate = new Date(year, month - 1, day);
+    if (parts.length !== 3) return null;
+    var year = parseInt(parts[0]), month = parseInt(parts[1]), day = parseInt(parts[2]);
+    if (isNaN(year) || isNaN(month) || isNaN(day)) return null;
+    if (year < 1900 || year > new Date().getFullYear()) return null;
+    var birth = new Date(year, month - 1, day);
     var today = new Date();
-    
-    var age = today.getFullYear() - birthDate.getFullYear();
-    var m = today.getMonth() - birthDate.getMonth();
-    if (m < 0 || (m === 0 && today.getDate() < birthDate.getDate())) {
-        age--;
-    }
-    
-    // Find the age cell in the same row
-    var row = dateCell.closest('tr');
-    if (!row) return;
-    
-    var ageCell = row.querySelector('[data-field="age"]');
-    if (ageCell) {
-        ageCell.textContent = age > 0 ? age : 0;
-        ageCell.dataset.originalValue = age > 0 ? age : 0;
-    }
+    var age = today.getFullYear() - birth.getFullYear();
+    var m = today.getMonth() - birth.getMonth();
+    if (m < 0 || (m === 0 && today.getDate() < birth.getDate())) age--;
+    return age > 0 ? age : 0;
 }
 
 // ============ LOAD HOUSEHOLDS ============
-
-async function loadHouseholds(purok = 'all', page = 1, search = '') {
+async function loadHouseholds(purok, page, search) {
+    purok = purok || 'all';
+    page = page || 1;
+    search = search || '';
     currentHouseholdPurok = purok;
     currentHouseholdPage = page;
     currentHouseholdSearch = search;
-    
+
     try {
         let url = 'household_ajax.php?action=get_households&page=' + page + '&per_page=50';
         if (purok && purok !== 'all') url += '&purok=' + encodeURIComponent(purok);
         if (search) url += '&search=' + encodeURIComponent(search);
-        
+
         var response = await fetch(url);
         var data = await response.json();
-        
+
         if (data.success) {
             currentHouseholdData = data.data;
             currentHouseholdTotalPages = data.totalPages;
-            
-            renderEditableTable(data);
+            renderHouseholdTable(data);
             renderHouseholdPagination(data);
             updateHouseholdStats(data);
             loadPurokFilter(data.purokCounts || {});
         }
     } catch (error) {
         console.error('Error loading households:', error);
-        document.getElementById('householdTableBody').innerHTML = '<tr><td colspan="17" class="text-center">Error loading data. Please refresh.</td></tr>';
+        document.getElementById('householdTableBody').innerHTML = '<tr><td colspan="19" class="text-center">Error loading data. Please refresh.</td></tr>';
     }
 }
 
-// ============ RENDER EDITABLE TABLE WITH ADDRESS MERGED ============
-
-function renderEditableTable(data) {
+// ============ RENDER READ-ONLY TABLE ============
+function renderHouseholdTable(data) {
     var tbody = document.getElementById('householdTableBody');
-    
+
     if (!data.data || data.data.length === 0) {
         tbody.innerHTML = `
             <tr>
-                <td colspan="17" class="text-center">
+                <td colspan="19" class="text-center">
                     <div class="empty-state">
                         <i class="fas fa-home fa-3x"></i>
                         <p>No households found. Click "Add Household" to create one.</p>
                     </div>
                 </td>
-            </tr>
-        `;
+            </tr>`;
+        setTimeout(refitAllHouseholdTables, 30);
         return;
     }
-    
-    var html = '';
-    var rowNumber = ((data.currentPage - 1) * data.perPage) + 1;
-    var displayCount = 0;
-    
-    // Group data by address and purok
-    var addressGroups = {};
+
+    var households = {};
     data.data.forEach(function(item) {
-        var key = (item.household_address || '') + '|' + (item.purok || '');
-        if (!addressGroups[key]) {
-            addressGroups[key] = {
-                address: item.household_address || '',
-                purok: item.purok || '',
-                households: []
-            };
-        }
-        // Add household if not already in the group
-        var existing = addressGroups[key].households.find(function(h) {
-            return h.household_id === item.household_id;
-        });
-        if (!existing && item.household_id) {
-            addressGroups[key].households.push({
+        if (!households[item.household_id]) {
+            households[item.household_id] = {
                 household_id: item.household_id,
+                purok: item.purok || '',
+                address: item.household_address || '',
                 no_of_members: item.no_of_members || 0,
                 members: []
-            });
+            };
         }
-        // Add member
-        if (item.member_id) {
-            var household = addressGroups[key].households.find(function(h) {
-                return h.household_id === item.household_id;
-            });
-            if (household) {
-                household.members.push(item);
-            }
-        }
+        if (item.member_id) households[item.household_id].members.push(item);
     });
-    
-    // Render each address group
-    var addressKeys = Object.keys(addressGroups);
-    addressKeys.forEach(function(key) {
-        var group = addressGroups[key];
+
+    var addressGroups = {};
+    Object.values(households).forEach(function(h) {
+        var key = h.address + '|' + h.purok;
+        if (!addressGroups[key]) addressGroups[key] = { address: h.address, purok: h.purok, households: [] };
+        addressGroups[key].households.push(h);
+    });
+
+    var html = '';
+    var displayCount = 0;
+    var rowNumber = ((data.currentPage - 1) * data.perPage) + 1;
+
+    Object.values(addressGroups).forEach(function(group) {
         var totalMembersInAddress = 0;
-        group.households.forEach(function(h) {
-            totalMembersInAddress += h.members.length || 0;
-        });
-        
-        var isFirstAddressRow = true;
-        var addressRowspan = totalMembersInAddress || 1;
-        var purokRowspan = addressRowspan;
-        
-        // For each household in this address
-        group.households.forEach(function(household, householdIndex) {
+        group.households.forEach(function(h) { totalMembersInAddress += h.members.length || 0; });
+        var groupRowspan = totalMembersInAddress || 1;
+        var firstGroupRow = true;
+
+        group.households.forEach(function(household) {
             var members = household.members;
             var memberCount = members.length || 0;
-            
-            if (members.length === 0) {
-                // Household with no members
+
+            if (memberCount === 0) {
                 displayCount++;
-                var showPurok = isFirstAddressRow && householdIndex === 0;
-                var showAddress = isFirstAddressRow && householdIndex === 0;
-                
                 html += `
-                    <tr class="address-group-row" data-household-id="${household.household_id}" data-member-id="" data-address="${escapeHtml(group.address)}" data-purok="${escapeHtml(group.purok)}">
-                        ${showAddress ? '<td class="row-number" rowspan="' + addressRowspan + '">' + displayCount + '</td>' : ''}
-                        ${showPurok ? '<td class="editable-cell purok-cell" data-field="purok" rowspan="' + purokRowspan + '" contenteditable="true">' + escapeHtml(group.purok) + '</td>' : ''}
-                        ${showAddress ? '<td class="editable-cell household-address-cell" data-field="household_address" rowspan="' + addressRowspan + '" contenteditable="true">' + escapeHtml(group.address) + '</td>' : ''}
-                        <td class="member-count-cell"><span class="member-count-badge">0</span></td>
-                        <td colspan="12" style="color:#6c757d; font-style:italic;">No members - click + to add</td>
-                        <td>
+                    <tr data-household-id="${household.household_id}" style="cursor:pointer;" onclick="openEditHouseholdModal(${household.household_id})">
+                        ${firstGroupRow ? '<td class="row-number" rowspan="' + groupRowspan + '">' + displayCount + '</td>' : ''}
+                        ${firstGroupRow ? '<td rowspan="' + groupRowspan + '">' + escapeHtml(group.purok) + '</td>' : ''}
+                        ${firstGroupRow ? '<td rowspan="' + groupRowspan + '">' + escapeHtml(group.address) + '</td>' : ''}
+                        <td><span class="member-count-badge">0</span></td>
+                        <td colspan="14" style="color:#6c757d; font-style:italic;">No members - click row to add</td>
+                        <td onclick="event.stopPropagation();">
                             <button class="btn-action delete-household" onclick="deleteHousehold(${household.household_id})" title="Delete Household">
-                                <i class="fas fa-home"></i>
+                                <i class="fas fa-trash"></i>
                             </button>
-                            <button class="btn-action add" onclick="addMemberRow(${household.household_id})" title="Add Member">
+                            <button class="btn-action add" onclick="openEditHouseholdModal(${household.household_id})" title="Add Member">
                                 <i class="fas fa-user-plus"></i>
                             </button>
                         </td>
-                    </tr>
-                `;
-                isFirstAddressRow = false;
+                    </tr>`;
+                firstGroupRow = false;
                 return;
             }
-            
-            // Render each member
-            members.forEach(function(member, memberIndex) {
+
+            members.forEach(function(member, idx) {
                 displayCount++;
-                var showAddress = isFirstAddressRow && householdIndex === 0 && memberIndex === 0;
-                var showPurok = isFirstAddressRow && householdIndex === 0 && memberIndex === 0;
-                var showMemberCount = memberIndex === 0;
-                var rowNum = (memberIndex === 0 && householdIndex === 0) ? displayCount : '';
-                
-                // Calculate rowspan
-                var addressRowspanTotal = totalMembersInAddress || 1;
-                var purokRowspanTotal = addressRowspanTotal;
+                var showGroupCells = firstGroupRow && idx === 0;
+                var showMemberCount = idx === 0;
                 var memberCountRowspan = memberCount || 1;
-                
-                var showAddressCell = isFirstAddressRow && householdIndex === 0 && memberIndex === 0;
-                var addressRowspanAttr = showAddressCell ? ' rowspan="' + addressRowspanTotal + '"' : '';
-                var purokRowspanAttr = showPurok ? ' rowspan="' + purokRowspanTotal + '"' : '';
-                var memberCountRowspanAttr = showMemberCount ? ' rowspan="' + memberCountRowspan + '"' : '';
-                var memberCountValue = showMemberCount ? '<span class="member-count-badge">' + memberCount + '</span>' : '';
-                
-                var displayDate = '';
-                if (member.date_of_birth) {
-                    displayDate = member.date_of_birth;
-                }
-                
-                // Calculate age from date of birth for display
+
                 var displayAge = member.age || '';
                 if (member.date_of_birth) {
                     var calcAge = calculateAgeFromDateStr(member.date_of_birth);
-                    if (calcAge !== null) {
-                        displayAge = calcAge;
-                    }
+                    if (calcAge !== null) displayAge = calcAge;
                 }
-                
+
+                // --- Registered resident highlight ---
+                var hasAccount = parseInt(member.has_account || 0) === 1;
+                var rowClass = (showGroupCells ? 'address-first-row ' : 'address-member-row ') +
+                               (idx === 0 ? 'household-first-member ' : '') +
+                               (hasAccount ? 'member-has-account' : '');
+
+                var accountBadge = hasAccount
+                    ? ' <span class="account-badge" title="This resident has a registered account"><i class="fas fa-check-circle"></i> Registered</span>'
+                    : '';
+
+                // Last name cell — clickable only when registered
+                var lastNameCell;
+                if (hasAccount) {
+                    lastNameCell = '<a href="javascript:void(0);" class="member-lastname-link" ' +
+                                   'onclick="event.stopPropagation(); openResidentDetailModal(' + member.member_id + ')" ' +
+                                   'title="View resident analytics" ' +
+                                   'style="color:#1e7e6c;font-weight:700;text-decoration:none;border-bottom:1px dashed #7fbfa4;cursor:pointer;">' +
+                                   escapeHtml(member.last_name || '') + '</a>' + accountBadge;
+                } else {
+                    lastNameCell = escapeHtml(member.last_name || '') + accountBadge;
+                }
+
                 html += `
-                    <tr class="${showAddressCell ? 'address-first-row' : 'address-member-row'} 
-                              ${memberIndex === 0 ? 'household-first-member' : ''}" 
-                        data-household-id="${household.household_id}" 
-                        data-member-id="${member.member_id}"
-                        data-address="${escapeHtml(group.address)}"
-                        data-purok="${escapeHtml(group.purok)}">
-                        
-                        ${showAddressCell ? '<td class="row-number" ' + addressRowspanAttr + '>' + rowNum + '</td>' : ''}
-                        ${showPurok ? '<td class="editable-cell purok-cell" data-field="purok" ' + purokRowspanAttr + ' contenteditable="true">' + escapeHtml(group.purok) + '</td>' : ''}
-                        ${showAddressCell ? '<td class="editable-cell household-address-cell" data-field="household_address" ' + addressRowspanAttr + ' contenteditable="true">' + escapeHtml(group.address) + '</td>' : ''}
-                        ${showMemberCount ? '<td class="member-count-cell" ' + memberCountRowspanAttr + '>' + memberCountValue + '</td>' : ''}
-                        
-                        <td class="editable-cell" data-field="last_name" contenteditable="true">${escapeHtml(member.last_name || '')}</td>
-                        <td class="editable-cell" data-field="first_name" contenteditable="true">${escapeHtml(member.first_name || '')}</td>
-                        <td class="editable-cell" data-field="middle_name" contenteditable="true">${escapeHtml(member.middle_name || '')}</td>
-                        <td class="editable-cell" data-field="ext" contenteditable="true">${escapeHtml(member.ext || '')}</td>
-                        <td class="editable-cell" data-field="place_of_birth" contenteditable="true">${escapeHtml(member.place_of_birth || '')}</td>
-                        <td class="editable-cell date-cell" data-field="date_of_birth" contenteditable="true" onclick="openDatePicker(this)">${displayDate}</td>
-                        <td class="editable-cell age-cell" data-field="age">${displayAge}</td>
-                        <td class="editable-cell sex-cell" data-field="sex" contenteditable="false" onclick="openSexDropdown(this)">${escapeHtml(member.sex || '')}</td>
-                        <td class="editable-cell" data-field="civil_status" contenteditable="true">${escapeHtml(member.civil_status || '')}</td>
-                        <td class="editable-cell" data-field="citizenship" contenteditable="true">${escapeHtml(member.citizenship || '')}</td>
-                        <td class="editable-cell" data-field="occupation" contenteditable="true">${escapeHtml(member.occupation || '')}</td>
-                        <td class="editable-cell" data-field="employment_status" contenteditable="true">${escapeHtml(member.employment_status || '')}</td>
-                        <td>
-                            ${memberIndex === 0 ? `
-                                <button class="btn-action delete-household" onclick="deleteHousehold(${member.household_id})" title="Delete Household">
-                                    <i class="fas fa-home"></i>
-                                </button>
-                            ` : ''}
-                            <button class="btn-action delete" onclick="deleteRow(${member.household_id}, ${member.member_id})" title="Delete Member">
-                                <i class="fas fa-trash"></i>
+                    <tr class="${rowClass}"
+                        data-household-id="${household.household_id}" data-member-id="${member.member_id}"
+                        style="cursor:pointer;" onclick="openEditHouseholdModal(${household.household_id})">
+                        ${showGroupCells ? '<td class="row-number" rowspan="' + groupRowspan + '">' + rowNumber + '</td>' : ''}
+                        ${showGroupCells ? '<td rowspan="' + groupRowspan + '">' + escapeHtml(group.purok) + '</td>' : ''}
+                        ${showGroupCells ? '<td rowspan="' + groupRowspan + '">' + escapeHtml(group.address) + '</td>' : ''}
+                        ${showMemberCount ? '<td rowspan="' + memberCountRowspan + '"><span class="member-count-badge">' + memberCount + '</span></td>' : ''}
+                        <td>${lastNameCell}</td>
+                        <td>${escapeHtml(member.first_name || '')}</td>
+                        <td>${escapeHtml(member.middle_name || '')}</td>
+                        <td>${escapeHtml(member.ext || '')}</td>
+                        <td>${escapeHtml(member.place_of_birth || '')}</td>
+                        <td>${escapeHtml(member.date_of_birth || '')}</td>
+                        <td>${displayAge}</td>
+                        <td>${escapeHtml(member.sex || '')}</td>
+                        <td>${escapeHtml(member.civil_status || '')}</td>
+                        <td>${escapeHtml(member.citizenship || '')}</td>
+                        <td>${escapeHtml(member.occupation || '')}</td>
+                        <td>${escapeHtml(member.employment_status || '')}</td>
+                        <td>${escapeHtml(member.email || '')}</td>
+                        <td>${escapeHtml(member.phone_number || '')}</td>
+                        <td onclick="event.stopPropagation();">
+                            ${idx === 0 ? `
+                                <button class="btn-action delete-household" onclick="deleteHousehold(${household.household_id})" title="Delete Household">
+                                    <i class="fas fa-trash"></i>
+                                </button>` : ''}
+                            <button class="btn-action delete" onclick="deleteMember(${member.member_id}, ${household.household_id})" title="Delete Member">
+                                <i class="fas fa-user-minus"></i>
                             </button>
-                            ${memberIndex === 0 ? '<button class="btn-action add" onclick="addMemberRow(' + member.household_id + ')" title="Add Member"><i class="fas fa-user-plus"></i></button>' : ''}
+                            ${idx === 0 ? '<button class="btn-action add" onclick="openEditHouseholdModal(' + household.household_id + ')" title="Add Member"><i class="fas fa-user-plus"></i></button>' : ''}
                         </td>
-                    </tr>
-                `;
+                    </tr>`;
+                firstGroupRow = false;
+                rowNumber++;
             });
-            
-            isFirstAddressRow = false;
         });
     });
-    
-    // Add a new empty row at the bottom for adding new household
-    html += `
-        <tr class="new-household-row">
-            <td></td>
-            <td class="editable-cell purok-cell" data-field="purok" contenteditable="true" placeholder="Purok"></td>
-            <td class="editable-cell household-address-cell" data-field="household_address" contenteditable="true" placeholder="House Address"></td>
-            <td></td>
-            <td colspan="13" style="color:#6c757d; font-style:italic;">Enter Purok and Household Address, then press Enter to add new household</td>
+
+    tbody.innerHTML = html;
+    setTimeout(refitAllHouseholdTables, 30);
+}
+
+// ============ HOUSEHOLD MODAL OPEN ============
+function openAddHouseholdModal() {
+    currentModalMode = 'add';
+    currentModalHouseholdId = null;
+    modalMembers = [];
+
+    document.getElementById('householdModalTitle').innerHTML = '<i class="fas fa-home"></i> Add Household';
+    document.getElementById('modalHouseholdId').value = '';
+    document.getElementById('modalPurok').value = '';
+    document.getElementById('modalAddress').value = '';
+    renderModalMembers();
+    document.getElementById('householdModal').style.display = 'flex';
+    setTimeout(refitAllHouseholdTables, 60);
+}
+
+function openEditHouseholdModal(householdId) {
+    currentModalMode = 'edit';
+    currentModalHouseholdId = householdId;
+
+    fetch('household_ajax.php?action=get_household_with_members&household_id=' + householdId)
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (!data.success) {
+                showErrorModal(data.message || 'Failed to load household.');
+                return;
+            }
+            var h = data.household;
+            document.getElementById('householdModalTitle').innerHTML = '<i class="fas fa-home"></i> Edit Household';
+            document.getElementById('modalHouseholdId').value = h.id;
+            document.getElementById('modalPurok').value = h.purok || '';
+            document.getElementById('modalAddress').value = h.address || '';
+
+            modalMembers = (data.members || []).map(function(m) {
+                return {
+                    id: m.id,
+                    last_name: m.last_name || '',
+                    first_name: m.first_name || '',
+                    middle_name: m.middle_name || '',
+                    ext: m.ext || '',
+                    place_of_birth: m.place_of_birth || '',
+                    date_of_birth: m.date_of_birth || '',
+                    age: m.age || '',
+                    sex: m.sex || '',
+                    civil_status: m.civil_status || '',
+                    citizenship: m.citizenship || '',
+                    occupation: m.occupation || '',
+                    employment_status: m.employment_status || '',
+                    email: m.email || '',
+                    phone_number: m.phone_number || '',
+                    _deleted: false
+                };
+            });
+            renderModalMembers();
+            document.getElementById('householdModal').style.display = 'flex';
+            setTimeout(refitAllHouseholdTables, 60);
+        })
+        .catch(function() {
+            showErrorModal('Failed to load household.');
+        });
+}
+
+function closeHouseholdModal() {
+    document.getElementById('householdModal').style.display = 'none';
+    currentModalHouseholdId = null;
+    modalMembers = [];
+}
+
+// ============ RENDER MODAL MEMBERS (editable table) ============
+function renderModalMembers() {
+    var tbody = document.getElementById('modalMembersBody');
+    var activeMembers = modalMembers.filter(function(m) { return !m._deleted; });
+    document.getElementById('modalMemberCount').textContent = '(' + activeMembers.length + ')';
+
+    if (activeMembers.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="15" class="text-center" style="color:#6c757d; padding:20px;">No members yet. Click "Add Member".</td></tr>';
+        attachModalMemberEvents();
+        setTimeout(refitAllHouseholdTables, 30);
+        return;
+    }
+
+    var html = '';
+    modalMembers.forEach(function(m, i) {
+        if (m._deleted) return;
+        html += buildModalMemberRow(m, i);
+    });
+    tbody.innerHTML = html;
+    attachModalMemberEvents();
+    setTimeout(refitAllHouseholdTables, 30);
+}
+
+function buildModalMemberRow(m, idx) {
+    var ageDisplay = m.age || '';
+    if (m.date_of_birth) {
+        var a = calculateAgeFromDateStr(m.date_of_birth);
+        if (a !== null) ageDisplay = a;
+    }
+
+    var dobClass = '';
+    if (m.date_of_birth) {
+        dobClass = isValidDateYMD(m.date_of_birth) ? 'valid-cell' : 'invalid-cell';
+    }
+    var sexClass = '';
+    if (m.sex) {
+        sexClass = isValidSex(m.sex) ? 'valid-cell' : 'invalid-cell';
+    }
+    var emailClass = '';
+    if (m.email) {
+        emailClass = isValidEmail(m.email) ? 'valid-cell' : 'invalid-cell';
+    }
+    var phoneClass = '';
+    if (m.phone_number) {
+        phoneClass = isValidPhone(m.phone_number) ? 'valid-cell' : 'invalid-cell';
+    }
+
+    return `
+        <tr data-modal-idx="${idx}">
+            <td class="editable-cell" contenteditable="true" data-field="last_name" data-placeholder="e.g. Dela Cruz">${escapeHtml(m.last_name || '')}</td>
+            <td class="editable-cell" contenteditable="true" data-field="first_name" data-placeholder="e.g. Juan">${escapeHtml(m.first_name || '')}</td>
+            <td class="editable-cell" contenteditable="true" data-field="middle_name" data-placeholder="e.g. Santos">${escapeHtml(m.middle_name || '')}</td>
+            <td class="editable-cell" contenteditable="true" data-field="ext" data-placeholder="Jr/Sr/III">${escapeHtml(m.ext || '')}</td>
+            <td class="editable-cell" contenteditable="true" data-field="place_of_birth" data-placeholder="City, Province">${escapeHtml(m.place_of_birth || '')}</td>
+            <td class="editable-cell date-cell ${dobClass}" contenteditable="true" data-field="date_of_birth" data-placeholder="YYYY-MM-DD">${escapeHtml(m.date_of_birth || '')}</td>
+            <td class="age-cell" data-field="age">${ageDisplay}</td>
+            <td class="editable-cell ${sexClass}" contenteditable="true" data-field="sex" data-placeholder="M/F">${escapeHtml(m.sex || '')}</td>
+            <td class="editable-cell" contenteditable="true" data-field="civil_status" data-placeholder="Single/Married...">${escapeHtml(m.civil_status || '')}</td>
+            <td class="editable-cell" contenteditable="true" data-field="citizenship" data-placeholder="Filipino">${escapeHtml(m.citizenship || '')}</td>
+            <td class="editable-cell" contenteditable="true" data-field="occupation" data-placeholder="e.g. Teacher">${escapeHtml(m.occupation || '')}</td>
+            <td class="editable-cell" contenteditable="true" data-field="employment_status" data-placeholder="Employed/Student...">${escapeHtml(m.employment_status || '')}</td>
+            <td class="editable-cell ${emailClass}" contenteditable="true" data-field="email" data-placeholder="name@mail.com">${escapeHtml(m.email || '')}</td>
+            <td class="editable-cell ${phoneClass}" contenteditable="true" data-field="phone_number" data-placeholder="09171234567">${escapeHtml(m.phone_number || '')}</td>
+            <td>
+                <button type="button" class="btn-action delete" onclick="removeModalMemberRow(${idx})" title="Remove">
+                    <i class="fas fa-trash"></i>
+                </button>
+            </td>
         </tr>
     `;
-    
-    tbody.innerHTML = html;
-    
-    // Attach event listeners for inline editing
-    attachInlineEditEvents();
 }
 
-// ============ AGE CALCULATION HELPER ============
-
-function calculateAgeFromDateStr(dateStr) {
-    if (!dateStr) return null;
-    var parts = dateStr.split('-');
-    if (parts.length !== 3) return null;
-    
-    var year = parseInt(parts[0]);
-    var month = parseInt(parts[1]);
-    var day = parseInt(parts[2]);
-    
-    if (isNaN(year) || isNaN(month) || isNaN(day)) return null;
-    if (year < 1900 || year > new Date().getFullYear()) return null;
-    
-    var birthDate = new Date(year, month - 1, day);
-    var today = new Date();
-    
-    var age = today.getFullYear() - birthDate.getFullYear();
-    var m = today.getMonth() - birthDate.getMonth();
-    if (m < 0 || (m === 0 && today.getDate() < birthDate.getDate())) {
-        age--;
-    }
-    
-    return age > 0 ? age : 0;
-}
-
-// ============ INLINE EDITING ============
-
-function attachInlineEditEvents() {
-    var editableCells = document.querySelectorAll('.editable-cell[contenteditable="true"]');
-    
-    editableCells.forEach(function(cell) {
-        cell.removeEventListener('keydown', handleCellKeydown);
-        cell.removeEventListener('blur', handleCellBlur);
-        cell.removeEventListener('focus', handleCellFocus);
-        
-        cell.addEventListener('keydown', handleCellKeydown);
-        cell.addEventListener('blur', handleCellBlur);
-        cell.addEventListener('focus', handleCellFocus);
-    });
-    
-    // Sex cells - click to open dropdown
-    var sexCells = document.querySelectorAll('.sex-cell');
-    sexCells.forEach(function(cell) {
-        cell.removeEventListener('click', function() { openSexDropdown(cell); });
-        cell.addEventListener('click', function() { openSexDropdown(cell); });
-    });
-}
-
-function handleCellFocus(e) {
-    var cell = e.target;
-    var originalValue = cell.textContent;
-    cell.dataset.originalValue = originalValue;
-    cell.classList.add('editing');
-    cell.classList.remove('invalid-field');
-}
-
-function handleCellBlur(e) {
-    var cell = e.target;
-    var rawValue = cell.textContent;
-    var newValue = rawValue.trim();
-    var originalValue = cell.dataset.originalValue || '';
-    cell.classList.remove('editing');
-    
-    // Skip date fields (handled by date picker)
-    if (cell.dataset.field === 'date_of_birth') {
-        return;
-    }
-    
-    // Skip sex fields (handled by dropdown)
-    if (cell.dataset.field === 'sex') {
-        return;
-    }
-    
-    // Apply capitalization based on field type
-    var field = cell.dataset.field;
-    var formattedValue = newValue;
-    
-    if (newValue) {
-        switch(field) {
-            case 'last_name':
-            case 'first_name':
-            case 'middle_name':
-            case 'citizenship':
-                formattedValue = capitalizeNameField(newValue);
-                break;
-            case 'place_of_birth':
-                formattedValue = capitalizePlaceOfBirth(newValue);
-                break;
-            case 'civil_status':
-                formattedValue = capitalizeCivilStatus(newValue);
-                break;
-            case 'employment_status':
-                formattedValue = capitalizeEmploymentStatus(newValue);
-                break;
-            case 'occupation':
-                // Capitalize each word in occupation
-                formattedValue = newValue.split(' ').map(function(word) {
-                    return capitalizeNameField(word);
-                }).join(' ');
-                break;
-            default:
-                formattedValue = newValue;
-        }
-        
-        // Update cell with formatted value if different
-        if (formattedValue !== newValue) {
-            cell.textContent = formattedValue;
-        }
-    }
-    
-    if (formattedValue !== originalValue) {
-        var row = cell.closest('tr');
-        if (row) {
-            row.classList.add('changed');
-            row.dataset.changed = 'true';
-        }
-        
-        var rowEl = cell.closest('tr');
-        if (rowEl && rowEl.classList.contains('new-household-row')) {
-            var purokCell = rowEl.querySelector('[data-field="purok"]');
-            var addressCell = rowEl.querySelector('[data-field="household_address"]');
-            var purok = purokCell ? purokCell.textContent.trim() : '';
-            var address = addressCell ? addressCell.textContent.trim() : '';
-            if (purok && address) {
-                addNewHousehold(purok, address);
+function attachModalMemberEvents() {
+    var cells = document.querySelectorAll('#modalMembersBody .editable-cell[contenteditable="true"]');
+    cells.forEach(function(cell) {
+        cell.addEventListener('focus', function() {
+            cell.dataset.originalValue = cell.textContent;
+        });
+        cell.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                cell.blur();
+                var all = Array.from(document.querySelectorAll('#modalMembersBody .editable-cell[contenteditable="true"]'));
+                var i = all.indexOf(cell);
+                if (i >= 0 && i < all.length - 1) all[i + 1].focus();
             }
-        }
-        
-        // Re-validate the row
-        validateRow(row);
-    }
-}
+            if (e.key === 'Escape') {
+                cell.textContent = cell.dataset.originalValue || '';
+                cell.blur();
+            }
+        });
+        cell.addEventListener('blur', function() {
+            var row = cell.closest('tr');
+            if (!row) return;
+            var idx = parseInt(row.dataset.modalIdx);
+            var field = cell.dataset.field;
+            var val = cell.textContent.trim();
+            var raw = cell.dataset.originalValue || '';
+            if (val === raw) return;
 
-function handleCellKeydown(e) {
-    if (e.key === 'Enter') {
-        e.preventDefault();
-        e.target.blur();
-        
-        var currentCell = e.target;
-        var currentRow = currentCell.closest('tr');
-        var cells = currentRow.querySelectorAll('.editable-cell[contenteditable="true"]');
-        var currentIndex = Array.from(cells).indexOf(currentCell);
-        
-        if (currentIndex < cells.length - 1) {
-            cells[currentIndex + 1].focus();
-        } else {
-            var nextRow = currentRow.nextElementSibling;
-            if (nextRow) {
-                var nextCells = nextRow.querySelectorAll('.editable-cell[contenteditable="true"]');
-                if (nextCells.length > 0) {
-                    nextCells[0].focus();
+            cell.classList.remove('invalid-cell', 'valid-cell');
+
+            if (field === 'last_name' || field === 'first_name' || field === 'middle_name' || field === 'citizenship') {
+                val = capitalizeNameField(val);
+                if (val) cell.classList.add('valid-cell');
+            } else if (field === 'place_of_birth') {
+                val = capitalizePlaceOfBirth(val);
+                if (val) cell.classList.add('valid-cell');
+            } else if (field === 'civil_status') {
+                val = capitalizeCivilStatus(val);
+                if (val) cell.classList.add('valid-cell');
+            } else if (field === 'employment_status') {
+                val = capitalizeEmploymentStatus(val);
+                if (val) cell.classList.add('valid-cell');
+            } else if (field === 'occupation') {
+                val = val.split(' ').map(capitalizeNameField).join(' ');
+                if (val) cell.classList.add('valid-cell');
+            } else if (field === 'sex') {
+                val = val.toUpperCase().replace(/[^MF]/g, '');
+                if (val.length > 1) val = val.charAt(0);
+                if (val && !isValidSex(val)) {
+                    cell.classList.add('invalid-cell');
+                    cell.title = 'Sex must be M or F';
+                } else if (val) {
+                    cell.classList.add('valid-cell');
+                    cell.title = '';
                 }
+            } else if (field === 'email') {
+                val = val.toLowerCase().replace(/\s+/g, '');
+                if (val && !isValidEmail(val)) {
+                    cell.classList.add('invalid-cell');
+                    cell.title = 'Enter a valid email like name@mail.com';
+                } else if (val) {
+                    cell.classList.add('valid-cell');
+                    cell.title = '';
+                }
+            } else if (field === 'phone_number') {
+                val = val.replace(/[^\d+]/g, '');
+                if (val.indexOf('+') > 0) val = val.replace(/\+/g, '');
+                if ((val.match(/\+/g) || []).length > 1) val = val.replace(/\+/g, '');
+                if (val && !isValidPhone(val)) {
+                    cell.classList.add('invalid-cell');
+                    cell.title = 'Enter 7–15 digits (optional leading +)';
+                } else if (val) {
+                    cell.classList.add('valid-cell');
+                    cell.title = '';
+                }
+            } else if (field === 'date_of_birth') {
+                var norm = normalizeDate(val);
+                if (norm) val = norm;
+
+                if (val && !isValidDateYMD(val)) {
+                    cell.textContent = val;
+                    cell.classList.add('invalid-cell');
+                    cell.title = 'Date must be YYYY-MM-DD (e.g. 1990-05-14)';
+                    modalMembers[idx][field] = val;
+                    modalMembers[idx].age = '';
+                    var ageCell = row.querySelector('.age-cell');
+                    if (ageCell) ageCell.textContent = '';
+                    return;
+                }
+
+                cell.textContent = val;
+                modalMembers[idx][field] = val;
+                if (val) cell.classList.add('valid-cell');
+                var calcAge = calculateAgeFromDateStr(val);
+                modalMembers[idx].age = calcAge !== null ? calcAge : '';
+                var ageCell2 = row.querySelector('.age-cell');
+                if (ageCell2) ageCell2.textContent = (calcAge !== null ? calcAge : '');
+                return;
+            }
+
+            cell.textContent = val;
+            modalMembers[idx][field] = val;
+        });
+    });
+}
+
+// ============ DATE NORMALIZER (accepts many formats → YYYY-MM-DD) ============
+var MONTH_NAMES = {
+    january: 1, jan: 1,
+    february: 2, feb: 2,
+    march: 3, mar: 3,
+    april: 4, apr: 4,
+    may: 5,
+    june: 6, jun: 6,
+    july: 7, jul: 7,
+    august: 8, aug: 8,
+    september: 9, sep: 9, sept: 9,
+    october: 10, oct: 10,
+    november: 11, nov: 11,
+    december: 12, dec: 12
+};
+
+function pad2(n) { return String(n).padStart(2, '0'); }
+
+function buildDate(y, m, d) {
+    y = parseInt(y); m = parseInt(m); d = parseInt(d);
+    if (isNaN(y) || isNaN(m) || isNaN(d)) return '';
+    if (y < 1900 || y > 2100) return '';
+    if (m < 1 || m > 12) return '';
+    if (d < 1 || d > 31) return '';
+    var dt = new Date(y, m - 1, d);
+    if (dt.getFullYear() !== y || dt.getMonth() !== m - 1 || dt.getDate() !== d) return '';
+    return y + '-' + pad2(m) + '-' + pad2(d);
+}
+
+function normalizeDate(input) {
+    if (!input) return '';
+    var raw = String(input).trim();
+    if (!raw) return '';
+
+    var s = raw
+        .replace(/,/g, ' ')
+        .replace(/[\.\/\-]/g, ' ')
+        .replace(/(\d+)(st|nd|rd|th)\b/gi, '$1')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+    var lower = s.toLowerCase();
+
+    var tokens = lower.split(' ');
+    var monthNum = null, dayNum = null, yearNum = null;
+
+    for (var i = 0; i < tokens.length; i++) {
+        var t = tokens[i];
+        if (!t) continue;
+        if (MONTH_NAMES.hasOwnProperty(t)) {
+            monthNum = MONTH_NAMES[t];
+        } else if (/^\d{4}$/.test(t)) {
+            yearNum = parseInt(t);
+        } else if (/^\d{1,2}$/.test(t)) {
+            if (dayNum === null) dayNum = parseInt(t);
+            else if (monthNum === null) monthNum = parseInt(t);
+        } else if (/^\d+$/.test(t)) {
+            if (t.length <= 2) {
+                var yy = parseInt(t);
+                yearNum = yy >= 50 ? 1900 + yy : 2000 + yy;
+            } else {
+                yearNum = parseInt(t);
             }
         }
     }
-    
-    if (e.key === 'Escape') {
-        var cell = e.target;
-        var originalValue = cell.dataset.originalValue || '';
-        cell.textContent = originalValue;
-        cell.blur();
+
+    if (monthNum && dayNum && yearNum) {
+        return buildDate(yearNum, monthNum, dayNum);
     }
+
+    var nums = tokens.filter(function(x) { return /^\d+$/.test(x); });
+    if (nums.length === 3) {
+        var a = parseInt(nums[0]), b = parseInt(nums[1]), c = parseInt(nums[2]);
+
+        if (nums[0].length === 4) return buildDate(a, b, c);
+
+        if (nums[2].length === 4) {
+            if (a > 12) return buildDate(c, b, a);
+            if (b > 12) return buildDate(c, a, b);
+            return buildDate(c, a, b);
+        }
+
+        if (nums[2].length <= 2) {
+            var y2 = parseInt(nums[2]);
+            var yyyy = y2 >= 50 ? 1900 + y2 : 2000 + y2;
+            if (a > 12) return buildDate(yyyy, b, a);
+            return buildDate(yyyy, a, b);
+        }
+    }
+
+    return raw;
 }
 
-// ============ VALIDATION FUNCTIONS ============
+// ============ MODAL MEMBER ROW ACTIONS ============
+function addModalMemberRow() {
+    modalMembers.push({
+        id: 0,
+        last_name: '',
+        first_name: '',
+        middle_name: '',
+        ext: '',
+        place_of_birth: '',
+        date_of_birth: '',
+        age: '',
+        sex: '',
+        civil_status: '',
+        citizenship: 'Filipino',
+        occupation: '',
+        employment_status: '',
+        email: '',
+        phone_number: '',
+        _deleted: false
+    });
+    renderModalMembers();
+    setTimeout(function() {
+        var rows = document.querySelectorAll('#modalMembersBody tr');
+        if (rows.length) {
+            var lastRow = rows[rows.length - 1];
+            var ln = lastRow.querySelector('[data-field="last_name"]');
+            if (ln) ln.focus();
+        }
+    }, 50);
+}
 
-function validateRow(row) {
-    if (!row) return;
-    
-    // Skip new household rows
-    if (row.classList.contains('new-household-row')) return;
-    
-    // Skip rows without household id
-    var householdId = row.dataset.householdId;
-    if (!householdId) return;
-    
-    var fields = row.querySelectorAll('.editable-cell');
-    var isValid = true;
-    var errorMessages = [];
-    
-    // Check if this is a member row (has member_id)
-    var isMemberRow = row.dataset.memberId && row.dataset.memberId !== '';
-    
-    fields.forEach(function(cell) {
-        var field = cell.dataset.field;
-        var value = cell.textContent.trim();
-        cell.classList.remove('invalid-field');
-        
-        // Skip empty cells for non-required fields
-        if (!value) {
-            // Required fields: Last Name, Purok, Household Address
-            if (field === 'last_name' && isMemberRow) {
-                cell.classList.add('invalid-field');
-                isValid = false;
-                errorMessages.push('Last Name is required');
-            }
-            if (field === 'purok') {
-                cell.classList.add('invalid-field');
-                isValid = false;
-                errorMessages.push('Purok is required');
-            }
-            if (field === 'household_address') {
-                cell.classList.add('invalid-field');
-                isValid = false;
-                errorMessages.push('Household Address is required');
-            }
+function removeModalMemberRow(idx) {
+    var m = modalMembers[idx];
+    if (!m) return;
+
+    if (!m.id) {
+        modalMembers.splice(idx, 1);
+        renderModalMembers();
+        return;
+    }
+
+    var name = (m.first_name ? m.first_name + ' ' : '') + (m.last_name || '');
+    showConfirmationModal('Remove member "' + name.trim() + '"? This will be applied when you save.', 'Confirm Remove', function() {
+        modalMembers[idx]._deleted = true;
+        renderModalMembers();
+    });
+}
+
+// ============ SAVE HOUSEHOLD ============
+async function saveHouseholdModal() {
+    var id = document.getElementById('modalHouseholdId').value;
+    var purok = capitalizeText(document.getElementById('modalPurok').value.trim());
+    var address = capitalizeText(document.getElementById('modalAddress').value.trim());
+
+    if (!purok || !address) {
+        showErrorModal('Purok and Household Address are required.');
+        return;
+    }
+
+    var activeMembers = modalMembers.filter(function(m) { return !m._deleted; });
+    var problems = [];
+
+    for (var i = 0; i < activeMembers.length; i++) {
+        var m = activeMembers[i];
+        var label = 'Member #' + (i + 1) + (m.last_name ? ' (' + m.last_name + ')' : '');
+
+        if (!m.last_name || !m.last_name.trim()) {
+            problems.push(label + ': Last Name is required');
+        }
+        if (m.date_of_birth && !isValidDateYMD(m.date_of_birth)) {
+            problems.push(label + ': Date of Birth must be YYYY-MM-DD (e.g. 1990-05-14)');
+        }
+        if (m.sex && !isValidSex(m.sex)) {
+            problems.push(label + ': Sex must be M or F');
+        }
+        if (m.email && !isValidEmail(m.email)) {
+            problems.push(label + ': Email format is invalid');
+        }
+        if (m.phone_number && !isValidPhone(m.phone_number)) {
+            problems.push(label + ': Phone must be 7–15 digits (optional leading +)');
+        }
+    }
+
+    if (problems.length > 0) {
+        showErrorModal('Please fix the following before saving:\n\n• ' + problems.join('\n• '), 'Format Errors');
+        return;
+    }
+
+    var saveBtn = document.querySelector('#householdForm button[type="submit"]');
+    if (saveBtn) { saveBtn.disabled = true; saveBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Saving...'; }
+
+    try {
+        var fd = new FormData();
+        fd.append('action', id ? 'edit_household' : 'add_household');
+        if (id) fd.append('id', id);
+        fd.append('purok', purok);
+        fd.append('address', address);
+
+        var res = await fetch('household_ajax.php', { method: 'POST', body: fd });
+        var data = await res.json();
+        if (!data.success) {
+            showErrorModal(data.message || 'Failed to save household.');
             return;
         }
-        
-        // Validate field values
-        switch(field) {
-            case 'purok':
-                if (!value) {
-                    cell.classList.add('invalid-field');
-                    isValid = false;
-                    errorMessages.push('Purok is required');
-                }
-                break;
-                
-            case 'household_address':
-                if (!value) {
-                    cell.classList.add('invalid-field');
-                    isValid = false;
-                    errorMessages.push('Household Address is required');
-                }
-                break;
-                
-            case 'date_of_birth':
-                if (value) {
-                    var datePattern = /^\d{4}-\d{2}-\d{2}$/;
-                    if (!datePattern.test(value)) {
-                        cell.classList.add('invalid-field');
-                        isValid = false;
-                        errorMessages.push('Invalid date format. Use YYYY-MM-DD');
-                    } else {
-                        var parts = value.split('-');
-                        var year = parseInt(parts[0]);
-                        var month = parseInt(parts[1]);
-                        var day = parseInt(parts[2]);
-                        var dateObj = new Date(year, month - 1, day);
-                        if (dateObj.getFullYear() !== year || 
-                            dateObj.getMonth() !== month - 1 || 
-                            dateObj.getDate() !== day) {
-                            cell.classList.add('invalid-field');
-                            isValid = false;
-                            errorMessages.push('Invalid date');
-                        }
-                    }
-                }
-                break;
-                
-            case 'age':
-                if (value) {
-                    var ageNum = parseInt(value);
-                    if (isNaN(ageNum) || ageNum < 0 || ageNum > 150) {
-                        cell.classList.add('invalid-field');
-                        isValid = false;
-                        errorMessages.push('Age must be between 0 and 150');
-                    }
-                }
-                break;
-                
-            case 'sex':
-                if (value) {
-                    var validSex = ['M', 'F'];
-                    if (!validSex.some(function(s) { return s === value; })) {
-                        cell.classList.add('invalid-field');
-                        isValid = false;
-                        errorMessages.push('Sex must be M or F');
-                    }
-                }
-                break;
-                
-            case 'civil_status':
-                if (value) {
-                    var validStatus = ['Single', 'Married', 'Widowed', 'Divorced', 'Separated'];
-                    if (!validStatus.some(function(s) { return s.toLowerCase() === value.toLowerCase(); })) {
-                        cell.classList.add('invalid-field');
-                        isValid = false;
-                        errorMessages.push('Invalid Civil Status');
-                    }
-                }
-                break;
-                
-            case 'employment_status':
-                if (value) {
-                    var validEmployment = ['Employed', 'Unemployed', 'Solo Parent', 'OSY', 'OSC', 'Student', 'Retired'];
-                    if (!validEmployment.some(function(s) { return s.toLowerCase() === value.toLowerCase(); })) {
-                        cell.classList.add('invalid-field');
-                        isValid = false;
-                        errorMessages.push('Invalid Employment Status');
-                    }
-                }
-                break;
-        }
-    });
-    
-    if (!isValid) {
-        row.classList.add('has-errors');
-        row.dataset.errors = errorMessages.join('; ');
-    } else {
-        row.classList.remove('has-errors');
-        row.dataset.errors = '';
-    }
-    
-    return isValid;
-}
+        var householdId = id ? parseInt(id) : parseInt(data.id);
 
-function validateAllRows() {
-    var rows = document.querySelectorAll('#householdTableBody tr:not(.new-household-row):not(.new-member-row)');
-    var hasErrors = false;
-    var errorCount = 0;
-    var errorDetails = [];
-    
-    rows.forEach(function(row) {
-        var isValid = validateRow(row);
-        if (!isValid) {
-            hasErrors = true;
-            errorCount++;
-            var householdId = row.dataset.householdId;
-            var nameCell = row.querySelector('[data-field="last_name"]');
-            var name = nameCell ? nameCell.textContent.trim() : 'Unknown';
-            var errors = row.dataset.errors || 'Unknown error';
-            errorDetails.push('Row ' + errorCount + ' (' + name + '): ' + errors);
+        var errors = [];
+        for (var j = 0; j < modalMembers.length; j++) {
+            var m = modalMembers[j];
+            if (m._deleted && m.id) {
+                var dfd = new FormData();
+                dfd.append('action', 'delete_member');
+                dfd.append('id', m.id);
+                var dres = await fetch('household_ajax.php', { method: 'POST', body: dfd });
+                var ddata = await dres.json();
+                if (!ddata.success) errors.push(ddata.message);
+                continue;
+            }
+            if (m._deleted) continue;
+            if (!m.last_name && !m.id) continue;
+
+            var mfd = new FormData();
+            if (m.id) {
+                mfd.append('action', 'edit_member');
+                mfd.append('id', m.id);
+            } else {
+                mfd.append('action', 'add_member');
+            }
+            mfd.append('household_id', householdId);
+            mfd.append('last_name', m.last_name || '');
+            mfd.append('first_name', m.first_name || '');
+            mfd.append('middle_name', m.middle_name || '');
+            mfd.append('ext', m.ext || '');
+            mfd.append('place_of_birth', m.place_of_birth || '');
+            mfd.append('date_of_birth', m.date_of_birth || '');
+            mfd.append('age', m.age || 0);
+            mfd.append('sex', m.sex || '');
+            mfd.append('civil_status', m.civil_status || '');
+            mfd.append('citizenship', m.citizenship || 'Filipino');
+            mfd.append('occupation', m.occupation || '');
+            mfd.append('employment_status', m.employment_status || '');
+            mfd.append('email', m.email || '');
+            mfd.append('phone_number', m.phone_number || '');
+
+            var mres = await fetch('household_ajax.php', { method: 'POST', body: mfd });
+            var mdata = await mres.json();
+            if (!mdata.success) errors.push(mdata.message || 'Failed to save member: ' + (m.last_name || ''));
         }
-    });
-    
-    if (hasErrors) {
-        showNotificationModal('error', 'Validation Errors', 'Found ' + errorCount + ' row(s) with errors:\n\n' + errorDetails.join('\n'));
-    } else {
-        showNotificationModal('success', 'Validation Passed', 'All rows are valid!');
+
+        if (errors.length > 0) {
+            showWarningModal('Household saved, but some members failed:\n\n' + errors.join('\n'), 'Partial Save');
+        } else {
+            showSuccessModal('Household and members saved successfully.', 'Saved');
+        }
+
+        closeHouseholdModal();
+        loadHouseholds(currentHouseholdPurok, currentHouseholdPage, currentHouseholdSearch);
+    } catch (e) {
+        console.error(e);
+        showErrorModal('An error occurred while saving.');
+    } finally {
+        if (saveBtn) { saveBtn.disabled = false; saveBtn.innerHTML = '<i class="fas fa-save"></i> Save Household'; }
     }
 }
 
-// ============ NOTIFICATION MODAL ============
+// ============ RESIDENT DETAIL MODAL ============
+function openResidentDetailModal(memberId) {
+    var modal = document.getElementById('residentDetailModal');
+    var body = document.getElementById('residentDetailBody');
+    if (!modal || !body) return;
 
-function showNotificationModal(type, title, message) {
-    var iconClass = '';
-    var iconHtml = '';
-    var color = '';
-    
-    switch(type) {
-        case 'success':
-            iconClass = 'success';
-            iconHtml = '<i class="fas fa-check-circle"></i>';
-            color = '#28a745';
-            break;
-        case 'error':
-            iconClass = 'error';
-            iconHtml = '<i class="fas fa-times-circle"></i>';
-            color = '#dc3545';
-            break;
-        case 'warning':
-            iconClass = 'warning';
-            iconHtml = '<i class="fas fa-exclamation-triangle"></i>';
-            color = '#ff9800';
-            break;
-        case 'info':
-            iconClass = 'info';
-            iconHtml = '<i class="fas fa-info-circle"></i>';
-            color = '#17a2b8';
-            break;
+    body.innerHTML = `
+        <div style="text-align:center; padding:40px; color:#6c757d;">
+            <i class="fas fa-spinner fa-spin" style="font-size:32px;"></i>
+            <p>Loading analytics...</p>
+        </div>`;
+    modal.style.display = 'flex';
+
+    // Destroy any previous charts + reset complaint pie data holder
+    try { if (rdCharts.docs) { rdCharts.docs.destroy(); rdCharts.docs = null; } } catch(e){}
+    try { if (rdCharts.equipment) { rdCharts.equipment.destroy(); rdCharts.equipment = null; } } catch(e){}
+    try { if (rdCharts.complaints) { rdCharts.complaints.destroy(); rdCharts.complaints = null; } } catch(e){}
+    rdComplaintsPieData = { labels: [], values: [], colors: [] };
+
+    fetch('household_ajax.php?action=get_resident_analytics&member_id=' + memberId)
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (!data.success) {
+                body.innerHTML = `
+                    <div style="text-align:center; padding:30px;">
+                        <div style="font-size:44px; color:#ff9800; margin-bottom:8px;"><i class="fas fa-info-circle"></i></div>
+                        <p style="color:#555;">${escapeHtml(data.message || 'Failed to load analytics.')}</p>
+                    </div>`;
+                return;
+            }
+            renderResidentDetail(data);
+            setTimeout(function() { drawResidentCharts(data); }, 60);
+        })
+        .catch(function() {
+            body.innerHTML = `
+                <div style="text-align:center; padding:30px;">
+                    <div style="font-size:44px; color:#dc3545; margin-bottom:8px;"><i class="fas fa-times-circle"></i></div>
+                    <p style="color:#555;">Could not load analytics. Please try again.</p>
+                </div>`;
+        });
+}
+
+function closeResidentDetailModal() {
+    var modal = document.getElementById('residentDetailModal');
+    if (modal) modal.style.display = 'none';
+    try { if (rdCharts.docs) { rdCharts.docs.destroy(); rdCharts.docs = null; } } catch(e){}
+    try { if (rdCharts.equipment) { rdCharts.equipment.destroy(); rdCharts.equipment = null; } } catch(e){}
+    try { if (rdCharts.complaints) { rdCharts.complaints.destroy(); rdCharts.complaints = null; } } catch(e){}
+}
+
+function renderResidentDetail(data) {
+    var m = data.member || {};
+    var r = data.resident || {};
+    var docs = data.documents || { total: 0, byType: {}, byStatus: {} };
+    var eq = data.equipment || { total: 0, byItem: {}, byStatus: {} };
+    var cmp = data.complaints || {
+        total: 0,
+        as_complainant: { total: 0, resolved: 0, unresolved: 0, pending: 0, list: [] },
+        as_respondent: { total: 0, resolved: 0, unresolved: 0, pending: 0, list: [] },
+        most_recent: null
+    };
+
+    var first = r.first_name || m.first_name || '';
+    var last = r.last_name || m.last_name || '';
+    var initials = ((first.charAt(0) || '') + (last.charAt(0) || '')).toUpperCase();
+
+    var fullName = (last ? last + ', ' : '') + first + (m.middle_name ? ' ' + m.middle_name : '');
+    var accountStatus = '';
+    if (r.is_active == 0) {
+        accountStatus = '<span class="rd-badge" style="background:#ffebee;color:#c62828;border-color:#f5c6c6;"><i class="fas fa-user-slash"></i> Inactive</span>';
+    } else if (r.is_verified == 0) {
+        accountStatus = '<span class="rd-badge" style="background:#fff8e1;color:#b26a00;border-color:#f0d99a;"><i class="fas fa-hourglass-half"></i> Pending</span>';
+    } else {
+        accountStatus = '<span class="rd-badge"><i class="fas fa-check-circle"></i> Active</span>';
     }
-    
-    var modalHtml = `
-        <div class="notification-modal" id="notificationModal">
-            <div class="notification-modal-content" style="max-width: 500px; max-height: 80vh; overflow-y: auto;">
-                <div class="notification-icon ${iconClass}" style="font-size: 60px; text-align: center; margin-bottom: 15px;">
-                    ${iconHtml}
+
+    var householdLine = (m.purok ? 'Purok ' + escapeHtml(m.purok) + ' • ' : '') +
+                        (m.household_address ? escapeHtml(m.household_address) : '');
+
+    // Build combined equipment+facility+vehicle breakdown string for the stat card
+    var combinedItemCount = Object.keys(eq.byItem).length;
+
+    var html = `
+        <div class="rd-header">
+            <div class="rd-avatar">${escapeHtml(initials || '?')}</div>
+            <div style="flex:1;">
+                <div class="rd-name">${escapeHtml(fullName.trim())} ${accountStatus}</div>
+                <div class="rd-sub"><i class="fas fa-home"></i> ${householdLine || 'No household info'}</div>
+                <div class="rd-sub"><i class="fas fa-envelope"></i> ${escapeHtml(r.email || '—')} &nbsp; <i class="fas fa-user"></i> ${escapeHtml(r.username || '—')}</div>
+            </div>
+        </div>
+
+        <div class="rd-stats">
+            <div class="rd-stat">
+                <div class="label">Document Requests</div>
+                <div class="value">${docs.total}</div>
+                <div class="hint">${Object.keys(docs.byType).length} type(s)</div>
+            </div>
+            <div class="rd-stat blue">
+                <div class="label">Equipment / Facility / Vehicle</div>
+                <div class="value">${eq.total}</div>
+                <div class="hint">${combinedItemCount} item(s)</div>
+            </div>
+            <div class="rd-stat orange">
+                <div class="label">Complaints</div>
+                <div class="value">${cmp.total}</div>
+                <div class="hint">${(cmp.as_complainant.total || 0)} filed • ${(cmp.as_respondent.total || 0)} against</div>
+            </div>
+        </div>
+
+        <div class="rd-section">
+            <h4><i class="fas fa-file-alt"></i> Document Requests by Type</h4>
+            <div class="rd-charts">
+                <div class="rd-chart-box">
+                    <h5>Distribution</h5>
+                    <div class="rd-chart-wrap">
+                        <canvas id="rdDocsChart"></canvas>
+                    </div>
                 </div>
-                <div class="notification-title" style="font-size: 22px; font-weight: 700; text-align: center; margin-bottom: 10px; color: ${color};">
-                    ${escapeHtml(title)}
-                </div>
-                <div class="notification-message" style="font-size: 14px; color: #555; text-align: left; line-height: 1.8; padding: 10px 0; white-space: pre-wrap; max-height: 300px; overflow-y: auto;">
-                    ${escapeHtml(message).replace(/\n/g, '<br>')}
-                </div>
-                <div style="text-align: center; margin-top: 20px;">
-                    <button class="notification-btn" onclick="this.closest('.notification-modal').remove()" style="background: ${color}; color: white; border: none; padding: 10px 30px; border-radius: 8px; cursor: pointer; font-size: 16px; font-weight: 600;">
-                        OK
-                    </button>
+                <div class="rd-chart-box">
+                    <h5>Breakdown</h5>
+                    ${Object.keys(docs.byType).length === 0
+                        ? '<div class="rd-empty">No document requests yet.</div>'
+                        : '<ul class="rd-list">' + Object.keys(docs.byType).map(function(k){
+                            return '<li><span>' + escapeHtml(k) + '</span><span class="pill">' + docs.byType[k] + '</span></li>';
+                          }).join('') + '</ul>'}
                 </div>
             </div>
         </div>
+
+        <div class="rd-section">
+            <h4><i class="fas fa-tools"></i> Equipment / Facility / Vehicle Requests</h4>
+            <div class="rd-charts">
+                <div class="rd-chart-box">
+                    <h5>Frequency (all types)</h5>
+                    <div class="rd-chart-wrap">
+                        <canvas id="rdEquipmentChart"></canvas>
+                    </div>
+                </div>
+                <div class="rd-chart-box">
+                    <h5>Breakdown</h5>
+                    ${Object.keys(eq.byItem).length === 0
+                        ? '<div class="rd-empty">No requests yet.</div>'
+                        : '<ul class="rd-list">' + Object.keys(eq.byItem).map(function(k){
+                            return '<li><span>' + escapeHtml(k) + '</span><span class="pill">' + eq.byItem[k] + '</span></li>';
+                          }).join('') + '</ul>'}
+                </div>
+            </div>
+        </div>
+
+        <div class="rd-section">
+            <h4><i class="fas fa-exclamation-circle"></i> Complaints — Filed vs Filed Against</h4>
+            ${cmp.total === 0
+                ? '<div class="rd-empty">No complaints related to this resident.</div>'
+                : buildComplaintsBlock(cmp)}
+        </div>
     `;
-    
-    // Remove existing notification modal
-    var existing = document.querySelector('.notification-modal');
-    if (existing) existing.remove();
-    
-    document.body.insertAdjacentHTML('beforeend', modalHtml);
+    document.getElementById('residentDetailBody').innerHTML = html;
 }
 
-// Shortcut functions for notifications
-function showSuccessModal(message, title) {
-    showNotificationModal('success', title || 'Success!', message);
-}
+// ============ COMPLAINTS BLOCK BUILDER ============
+function buildComplaintsBlock(cmp) {
+    var asComp = cmp.as_complainant || { total: 0, resolved: 0, unresolved: 0, pending: 0, list: [] };
+    var asResp = cmp.as_respondent  || { total: 0, resolved: 0, unresolved: 0, pending: 0, list: [] };
+    var recent = cmp.most_recent;
 
-function showErrorModal(message, title) {
-    showNotificationModal('error', title || 'Error!', message);
-}
-
-function showWarningModal(message, title) {
-    showNotificationModal('warning', title || 'Warning!', message);
-}
-
-// ============ ADD NEW ROWS ============
-
-function addNewHouseholdRow() {
-    var tbody = document.getElementById('householdTableBody');
-    var newRow = document.createElement('tr');
-    newRow.className = 'new-household-row';
-    newRow.dataset.changed = 'true';
-    newRow.innerHTML = `
-        <td></td>
-        <td class="editable-cell purok-cell" data-field="purok" contenteditable="true" placeholder="Purok"></td>
-        <td class="editable-cell household-address-cell" data-field="household_address" contenteditable="true" placeholder="House Address"></td>
-        <td></td>
-        <td colspan="13" style="color:#6c757d; font-style:italic;">Enter Purok and Household Address, then press Enter to add new household</td>
-    `;
-    tbody.appendChild(newRow);
-    attachInlineEditEvents();
-    
-    setTimeout(function() {
-        var firstCell = newRow.querySelector('.editable-cell');
-        if (firstCell) firstCell.focus();
-    }, 100);
-}
-
-function addMemberRow(householdId) {
-    var tbody = document.getElementById('householdTableBody');
-    var rows = tbody.querySelectorAll('tr[data-household-id="' + householdId + '"]');
-    var insertAfter = rows.length > 0 ? rows[rows.length - 1] : null;
-    
-    if (!insertAfter) {
-        var allRows = tbody.querySelectorAll('tr');
-        for (var i = 0; i < allRows.length; i++) {
-            if (allRows[i].dataset.householdId == householdId) {
-                insertAfter = allRows[i];
-                break;
-            }
-        }
+    // Highlighted recent card
+    var recentHtml = '';
+    if (recent) {
+        var recentClass = recent._class === 'resolved' ? 'recent-resolved' :
+                          recent._class === 'pending'  ? 'recent-pending'  : 'recent-unresolved';
+        var roleLabel = recent._role === 'complainant' ? 'Filed by this resident' : 'Filed against this resident';
+        var roleColor = recent._role === 'complainant' ? '#2ea05a' : '#c0392b';
+        var recentStatusLabel = recent.status.replace(/_/g, ' ').replace(/\b\w/g, function(c){ return c.toUpperCase(); });
+        recentHtml = `
+            <div class="rd-recent ${recentClass}">
+                <div class="rd-recent-label">
+                    <i class="fas fa-star" style="color:#ffb300;"></i> Most Recent Complaint
+                    <span class="rd-recent-role" style="background:${roleColor};">${roleLabel}</span>
+                </div>
+                <div class="rd-recent-title">${escapeHtml(recent.title || '')}</div>
+                <div class="rd-recent-meta">
+                    <span><i class="fas fa-hashtag"></i> ${escapeHtml(recent.reference_number || '')}</span>
+                    <span><i class="fas fa-calendar-alt"></i> ${escapeHtml((recent.created_at || '').substring(0,10))}</span>
+                    <span><i class="fas fa-circle" style="color:${recent._class === 'resolved' ? '#2ea05a' : recent._class === 'pending' ? '#ff9800' : '#dc3545'}; font-size:8px;"></i> ${escapeHtml(recentStatusLabel)}</span>
+                </div>
+            </div>
+        `;
     }
-    
-    if (!insertAfter) {
-        showErrorModal('Could not find household to add member to.', 'Error');
+
+    // Pie chart data — grouped by role + outcome
+    var pieLabels = [];
+    var pieValues = [];
+    var pieColors = [];
+
+    if (asComp.resolved > 0)   { pieLabels.push('Filed — Resolved');     pieValues.push(asComp.resolved);   pieColors.push('#4caf50'); }
+    if (asComp.unresolved > 0) { pieLabels.push('Filed — Unresolved');   pieValues.push(asComp.unresolved); pieColors.push('#ff9800'); }
+    if (asComp.pending > 0)    { pieLabels.push('Filed — Pending');      pieValues.push(asComp.pending);    pieColors.push('#ffd54f'); }
+    if (asResp.resolved > 0)   { pieLabels.push('Against — Resolved');   pieValues.push(asResp.resolved);   pieColors.push('#2196f3'); }
+    if (asResp.unresolved > 0) { pieLabels.push('Against — Unresolved'); pieValues.push(asResp.unresolved); pieColors.push('#e91e63'); }
+    if (asResp.pending > 0)    { pieLabels.push('Against — Pending');    pieValues.push(asResp.pending);    pieColors.push('#9c27b0'); }
+
+    // Store on module-level variable — drawResidentCharts reads this after DOM is inserted
+    rdComplaintsPieData = { labels: pieLabels, values: pieValues, colors: pieColors };
+
+    var pieCanvas = (pieLabels.length > 0)
+        ? '<canvas id="rdComplaintsChart"></canvas>'
+        : '<div class="rd-empty">No chart data yet.</div>';
+
+    var listHtml = function(list) {
+        if (!list || list.length === 0) {
+            return '<div class="rd-empty" style="padding:12px 0;">None</div>';
+        }
+        return '<ul class="rd-complist">' + list.map(function(c) {
+            var cls = c._class === 'resolved' ? 'rc-resolved' :
+                      c._class === 'pending'  ? 'rc-pending'  : 'rc-unresolved';
+            var statusLabel = c.status.replace(/_/g, ' ').replace(/\b\w/g, function(s){ return s.toUpperCase(); });
+            return '<li class="' + cls + '">' +
+                     '<div class="rc-ref">' + escapeHtml(c.reference_number || '') + '</div>' +
+                     '<div class="rc-title">' + escapeHtml(c.title || '') + '</div>' +
+                     '<div class="rc-meta">' +
+                       '<span>' + escapeHtml((c.created_at || '').substring(0,10)) + '</span>' +
+                       '<span class="rc-status">' + escapeHtml(statusLabel) + '</span>' +
+                     '</div>' +
+                   '</li>';
+        }).join('') + '</ul>';
+    };
+
+    return `
+        ${recentHtml}
+
+        <div class="rd-charts" style="grid-template-columns: 1fr 1fr;">
+            <div class="rd-chart-box">
+                <h5>Overall Breakdown</h5>
+                <div class="rd-chart-wrap">
+                    ${pieCanvas}
+                </div>
+            </div>
+            <div class="rd-chart-box">
+                <h5>Summary</h5>
+                <ul class="rd-list" style="margin-top:4px;">
+                    <li>
+                        <span><i class="fas fa-file-signature" style="color:#2ea05a;"></i> Filed by resident</span>
+                        <span class="pill">${asComp.total}</span>
+                    </li>
+                    <li>
+                        <span style="padding-left:14px;font-size:12px;color:#4caf50;">Resolved</span>
+                        <span class="pill" style="background:#e8f5e9;color:#2e7d32;">${asComp.resolved}</span>
+                    </li>
+                    <li>
+                        <span style="padding-left:14px;font-size:12px;color:#c62828;">Unresolved</span>
+                        <span class="pill" style="background:#ffebee;color:#c62828;">${asComp.unresolved}</span>
+                    </li>
+                    <li>
+                        <span style="padding-left:14px;font-size:12px;color:#b26a00;">Pending</span>
+                        <span class="pill" style="background:#fff8e1;color:#b26a00;">${asComp.pending}</span>
+                    </li>
+                    <li style="margin-top:6px;border-top:1px solid #eef2ef;padding-top:8px;">
+                        <span><i class="fas fa-user-shield" style="color:#c0392b;"></i> Filed against resident</span>
+                        <span class="pill">${asResp.total}</span>
+                    </li>
+                    <li>
+                        <span style="padding-left:14px;font-size:12px;color:#4caf50;">Resolved</span>
+                        <span class="pill" style="background:#e8f5e9;color:#2e7d32;">${asResp.resolved}</span>
+                    </li>
+                    <li>
+                        <span style="padding-left:14px;font-size:12px;color:#c62828;">Unresolved</span>
+                        <span class="pill" style="background:#ffebee;color:#c62828;">${asResp.unresolved}</span>
+                    </li>
+                    <li>
+                        <span style="padding-left:14px;font-size:12px;color:#b26a00;">Pending</span>
+                        <span class="pill" style="background:#fff8e1;color:#b26a00;">${asResp.pending}</span>
+                    </li>
+                </ul>
+            </div>
+        </div>
+
+        <div class="rd-charts" style="grid-template-columns: 1fr 1fr; margin-top:12px;">
+            <div class="rd-chart-box">
+                <h5><i class="fas fa-file-signature" style="color:#2ea05a;"></i> Filed by this resident</h5>
+                ${listHtml(asComp.list)}
+            </div>
+            <div class="rd-chart-box">
+                <h5><i class="fas fa-user-shield" style="color:#c0392b;"></i> Filed against this resident</h5>
+                ${listHtml(asResp.list)}
+            </div>
+        </div>
+    `;
+}
+
+function drawResidentCharts(data) {
+    if (!window.Chart) {
+        setTimeout(function() { drawResidentCharts(data); }, 150);
         return;
     }
-    
-    var address = insertAfter.dataset.address || '';
-    var purok = insertAfter.dataset.purok || '';
-    
-    var newRow = document.createElement('tr');
-    newRow.className = 'new-member-row';
-    newRow.dataset.householdId = householdId;
-    newRow.dataset.memberId = '';
-    newRow.dataset.address = address;
-    newRow.dataset.purok = purok;
-    newRow.dataset.changed = 'true';
-    newRow.innerHTML = `
-        <td></td>
-        <td></td>
-        <td></td>
-        <td></td>
-        <td class="editable-cell" data-field="last_name" contenteditable="true" placeholder="Last Name *"></td>
-        <td class="editable-cell" data-field="first_name" contenteditable="true" placeholder="First Name"></td>
-        <td class="editable-cell" data-field="middle_name" contenteditable="true" placeholder="Middle Name"></td>
-        <td class="editable-cell" data-field="ext" contenteditable="true" placeholder="Ext"></td>
-        <td class="editable-cell" data-field="place_of_birth" contenteditable="true" placeholder="Birth Place"></td>
-        <td class="editable-cell date-cell" data-field="date_of_birth" contenteditable="true" onclick="openDatePicker(this)" placeholder="Click to select date"></td>
-        <td class="editable-cell age-cell" data-field="age" contenteditable="true" placeholder="Auto-calculated"></td>
-        <td class="editable-cell sex-cell" data-field="sex" contenteditable="false" onclick="openSexDropdown(this)" placeholder="Click to select"></td>
-        <td class="editable-cell" data-field="civil_status" contenteditable="true" placeholder="Civil Status"></td>
-        <td class="editable-cell" data-field="citizenship" contenteditable="true" placeholder="Citizenship"></td>
-        <td class="editable-cell" data-field="occupation" contenteditable="true" placeholder="Occupation"></td>
-        <td class="editable-cell" data-field="employment_status" contenteditable="true" placeholder="Employment"></td>
-        <td>
-            <button class="btn-action delete" onclick="cancelNewRow(this)" title="Cancel">
-                <i class="fas fa-times"></i>
-            </button>
-        </td>
-    `;
-    
-    insertAfter.parentNode.insertBefore(newRow, insertAfter.nextSibling);
-    attachInlineEditEvents();
-    
-    setTimeout(function() {
-        var lastNameCell = newRow.querySelector('[data-field="last_name"]');
-        if (lastNameCell) lastNameCell.focus();
-    }, 100);
-}
+    var docs = data.documents || { byType: {} };
+    var eq = data.equipment || { byItem: {} };
 
-function cancelNewRow(button) {
-    var row = button.closest('tr');
-    if (!row) return;
-    
-    // Use modal confirmation
-    showConfirmationModal('Cancel this new row?', 'Confirm Cancel', function() {
-        row.remove();
-        var householdId = row.dataset.householdId;
-        if (householdId) {
-            updateMemberCount(householdId);
-        }
-    });
-}
-
-function updateMemberCount(householdId) {
-    var rows = document.querySelectorAll('tr[data-household-id="' + householdId + '"]');
-    var count = 0;
-    rows.forEach(function(r) {
-        if (r.dataset.memberId && r.dataset.memberId !== '' && !r.classList.contains('new-member-row')) {
-            count++;
-        }
-    });
-    
-    var firstRow = rows[0];
-    if (firstRow) {
-        var countCell = firstRow.querySelector('.member-count-cell');
-        if (countCell) {
-            countCell.innerHTML = '<span class="member-count-badge">' + count + '</span>';
-        }
-    }
-}
-
-async function addNewHousehold(purok, address) {
-    try {
-        var formData = new FormData();
-        formData.append('action', 'add_household');
-        formData.append('purok', purok);
-        formData.append('address', address);
-        
-        var response = await fetch('household_ajax.php', { method: 'POST', body: formData });
-        var data = await response.json();
-        
-        if (data.success) {
-            showSuccessModal('Household added successfully!', 'Success');
-            loadHouseholds(currentHouseholdPurok, currentHouseholdPage, currentHouseholdSearch);
+    // ---- Pie chart: Document requests by type ----
+    var docLabels = Object.keys(docs.byType);
+    var docValues = docLabels.map(function(k){ return docs.byType[k]; });
+    var docCanvas = document.getElementById('rdDocsChart');
+    if (docCanvas) {
+        if (docLabels.length === 0) {
+            docCanvas.parentNode.innerHTML = '<div class="rd-empty">No document requests yet.</div>';
         } else {
-            showErrorModal(data.message, 'Error');
+            rdCharts.docs = new Chart(docCanvas.getContext('2d'), {
+                type: 'doughnut',
+                data: {
+                    labels: docLabels,
+                    datasets: [{
+                        data: docValues,
+                        backgroundColor: [
+                            '#2ea05a','#2196f3','#ff9800','#9c27b0','#e91e63',
+                            '#00bcd4','#8bc34a','#ffc107','#795548','#607d8b'
+                        ],
+                        borderWidth: 2,
+                        borderColor: '#fff'
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            position: 'bottom',
+                            labels: { font: { size: 11 }, boxWidth: 12 }
+                        }
+                    },
+                    cutout: '60%'
+                }
+            });
         }
-    } catch (error) {
-        showErrorModal('An error occurred.', 'Error');
+    }
+
+    // ---- Bar chart: Equipment / Facility / Vehicle combined ----
+    // We merge them into one bar chart, one bar per item, with type prefix so it's clear
+    var combined = {};
+
+    // Equipment items
+    Object.keys(eq.byItem || {}).forEach(function(k) {
+        combined['Equipment: ' + k] = eq.byItem[k];
+    });
+
+    // Facility items (if present in the payload — the AJAX may return equipment only;
+    // if you later extend the AJAX to include facilities and vehicles in eq.byItem
+    // with a type prefix, they will show up automatically)
+    if (data.facilities && data.facilities.byItem) {
+        Object.keys(data.facilities.byItem).forEach(function(k) {
+            combined['Facility: ' + k] = data.facilities.byItem[k];
+        });
+    }
+    if (data.vehicles && data.vehicles.byItem) {
+        Object.keys(data.vehicles.byItem).forEach(function(k) {
+            combined['Vehicle: ' + k] = data.vehicles.byItem[k];
+        });
+    }
+
+    var eqLabels = Object.keys(combined);
+    var eqValues = eqLabels.map(function(k){ return combined[k]; });
+    var eqCanvas = document.getElementById('rdEquipmentChart');
+    if (eqCanvas) {
+        if (eqLabels.length === 0) {
+            eqCanvas.parentNode.innerHTML = '<div class="rd-empty">No requests yet.</div>';
+        } else {
+            rdCharts.equipment = new Chart(eqCanvas.getContext('2d'), {
+                type: 'bar',
+                data: {
+                    labels: eqLabels,
+                    datasets: [{
+                        label: 'Times Requested',
+                        data: eqValues,
+                        backgroundColor: 'rgba(33,150,243,0.75)',
+                        borderColor: '#1565c0',
+                        borderWidth: 1.5,
+                        borderRadius: 6
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            ticks: { precision: 0, font: { size: 11 } },
+                            grid: { color: '#eef2ef' }
+                        },
+                        x: {
+                            ticks: { font: { size: 10 }, autoSkip: false, maxRotation: 45, minRotation: 0 },
+                            grid: { display: false }
+                        }
+                    }
+                }
+            });
+        }
+    }
+
+    // ---- Pie chart: Complaints breakdown ----
+    var cmpPie = document.getElementById('rdComplaintsChart');
+    if (cmpPie && rdComplaintsPieData && rdComplaintsPieData.labels && rdComplaintsPieData.labels.length > 0) {
+        rdCharts.complaints = new Chart(cmpPie.getContext('2d'), {
+            type: 'pie',
+            data: {
+                labels: rdComplaintsPieData.labels,
+                datasets: [{
+                    data: rdComplaintsPieData.values,
+                    backgroundColor: rdComplaintsPieData.colors,
+                    borderWidth: 2,
+                    borderColor: '#fff'
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        position: 'bottom',
+                        labels: { font: { size: 11 }, boxWidth: 12, padding: 8 }
+                    }
+                }
+            }
+        });
     }
 }
 
-// ============ DELETE ROW ============
-
-async function deleteRow(householdId, memberId) {
-    // Use modal confirmation
+// ============ DELETE FROM MAIN TABLE ============
+function deleteMember(memberId, householdId) {
     showConfirmationModal('Delete this member? This action cannot be undone.', 'Confirm Delete', async function() {
         try {
-            var formData = new FormData();
-            formData.append('action', 'delete_member');
-            formData.append('id', memberId);
-            
-            var response = await fetch('household_ajax.php', { method: 'POST', body: formData });
-            var data = await response.json();
-            
+            var fd = new FormData();
+            fd.append('action', 'delete_member');
+            fd.append('id', memberId);
+            var res = await fetch('household_ajax.php', { method: 'POST', body: fd });
+            var data = await res.json();
             if (data.success) {
-                showSuccessModal('Member deleted successfully', 'Deleted');
+                showSuccessModal(data.message || 'Member deleted.', 'Deleted');
                 loadHouseholds(currentHouseholdPurok, currentHouseholdPage, currentHouseholdSearch);
             } else {
-                showErrorModal(data.message, 'Error');
+                showErrorModal(data.message || 'Delete failed.');
             }
-        } catch (error) {
-            showErrorModal('An error occurred.', 'Error');
-        }
+        } catch (e) { showErrorModal('An error occurred.'); }
     });
 }
 
-// ============ DELETE HOUSEHOLD ============
-
-async function deleteHousehold(householdId) {
-    try {
-        var response = await fetch('household_ajax.php?action=get_household_members&household_id=' + householdId);
-        var data = await response.json();
-        
-        if (data.success && data.data.length > 0) {
-            showErrorModal('Cannot delete this household because it has ' + data.data.length + ' member(s). Please delete all members first.', 'Cannot Delete');
-            return;
-        }
-    } catch (error) {
-        showErrorModal('An error occurred while checking members.', 'Error');
-        return;
-    }
-    
-    // Use modal confirmation
-    showConfirmationModal('Are you sure you want to delete this household? This action cannot be undone.', 'Confirm Delete', async function() {
-        try {
-            var formData = new FormData();
-            formData.append('action', 'delete_household');
-            formData.append('id', householdId);
-            
-            var response = await fetch('household_ajax.php', { method: 'POST', body: formData });
-            var data = await response.json();
-            
-            if (data.success) {
-                showSuccessModal(data.message, 'Deleted');
-                loadHouseholds(currentHouseholdPurok, currentHouseholdPage, currentHouseholdSearch);
-            } else {
-                showErrorModal(data.message, 'Error');
-            }
-        } catch (error) {
-            showErrorModal('An error occurred.', 'Error');
-        }
-    });
-}
-
-// ============ SAVE ALL ============
-
-async function saveAllRows() {
-    // First validate all rows
-    var rows = document.querySelectorAll('#householdTableBody tr:not(.new-household-row):not(.new-member-row)');
-    var hasErrors = false;
-    var errorDetails = [];
-    
-    rows.forEach(function(row) {
-        var isValid = validateRow(row);
-        if (!isValid) {
-            hasErrors = true;
-            var nameCell = row.querySelector('[data-field="last_name"]');
-            var name = nameCell ? nameCell.textContent.trim() : 'Unknown';
-            var errors = row.dataset.errors || 'Unknown error';
-            errorDetails.push('Row ' + (name || 'Unknown') + ': ' + errors);
-        }
-    });
-    
-    if (hasErrors) {
-        showErrorModal('Cannot save. Please fix the following errors:\n\n' + errorDetails.join('\n'), 'Validation Errors');
-        return;
-    }
-    
-    // Get all rows including new ones
-    var allRows = document.querySelectorAll('#householdTableBody tr');
-    var dataToSave = [];
-    var hasChanges = false;
-    var processedHouseholds = {};
-    var validationErrors = [];
-    
-    // Check for new household rows
-    var newHouseholdRows = document.querySelectorAll('.new-household-row');
-    newHouseholdRows.forEach(function(row) {
-        var purokCell = row.querySelector('[data-field="purok"]');
-        var addressCell = row.querySelector('[data-field="household_address"]');
-        var purok = purokCell ? purokCell.textContent.trim() : '';
-        var address = addressCell ? addressCell.textContent.trim() : '';
-        if (purok && address) {
-            dataToSave.push({
-                household_id: 0,
-                member_id: 0,
-                purok: purok,
-                household_address: address,
-                last_name: '',
-                first_name: '',
-                middle_name: '',
-                ext: '',
-                place_of_birth: '',
-                date_of_birth: '',
-                age: 0,
-                sex: '',
-                civil_status: '',
-                citizenship: '',
-                occupation: '',
-                employment_status: '',
-                _new_household: true
-            });
-            hasChanges = true;
-        }
-    });
-    
-    // Process all existing rows
-    var existingRows = document.querySelectorAll('#householdTableBody tr:not(.new-household-row):not(.new-member-row)');
-    
-    existingRows.forEach(function(row) {
-        var householdId = row.dataset.householdId;
-        var memberId = row.dataset.memberId;
-        
-        if (!householdId) return;
-        
-        var purok = '';
-        var address = '';
-        var purokCell = row.querySelector('[data-field="purok"]');
-        var addressCell = row.querySelector('[data-field="household_address"]');
-        
-        if (purokCell) {
-            purok = purokCell.textContent.trim();
-        } else {
-            purok = row.dataset.purok || '';
-        }
-        
-        if (addressCell) {
-            address = addressCell.textContent.trim();
-        } else {
-            address = row.dataset.address || '';
-        }
-        
-        var rowData = {
-            household_id: parseInt(householdId),
-            member_id: memberId ? parseInt(memberId) : 0,
-            purok: purok,
-            household_address: address,
-            last_name: '',
-            first_name: '',
-            middle_name: '',
-            ext: '',
-            place_of_birth: '',
-            date_of_birth: '',
-            age: 0,
-            sex: '',
-            civil_status: '',
-            citizenship: '',
-            occupation: '',
-            employment_status: ''
-        };
-        
-        var cells = row.querySelectorAll('.editable-cell');
-        cells.forEach(function(cell) {
-            var field = cell.dataset.field;
-            var value = cell.textContent.trim();
-            if (field && rowData.hasOwnProperty(field)) {
-                if (field === 'age') {
-                    rowData[field] = parseInt(value) || 0;
-                } else if (field === 'date_of_birth') {
-                    rowData[field] = value;
-                } else {
-                    rowData[field] = value;
-                }
-            }
-        });
-        
-        if (row.classList.contains('changed') || row.dataset.changed === 'true') {
-            hasChanges = true;
-        }
-        
-        var key = householdId + '_' + (memberId || 'new');
-        if (!processedHouseholds[key]) {
-            dataToSave.push(rowData);
-            processedHouseholds[key] = true;
-        }
-    });
-    
-    // Check for new member rows
-    var newMemberRows = document.querySelectorAll('.new-member-row');
-    newMemberRows.forEach(function(row) {
-        var householdId = row.dataset.householdId;
-        if (!householdId) return;
-        
-        var rowData = {
-            household_id: parseInt(householdId),
-            member_id: 0,
-            purok: row.dataset.purok || '',
-            household_address: row.dataset.address || '',
-            last_name: '',
-            first_name: '',
-            middle_name: '',
-            ext: '',
-            place_of_birth: '',
-            date_of_birth: '',
-            age: 0,
-            sex: '',
-            civil_status: '',
-            citizenship: '',
-            occupation: '',
-            employment_status: ''
-        };
-        
-        var cells = row.querySelectorAll('.editable-cell');
-        var hasData = false;
-        cells.forEach(function(cell) {
-            var field = cell.dataset.field;
-            var value = cell.textContent.trim();
-            if (field && rowData.hasOwnProperty(field)) {
-                if (field === 'age') {
-                    rowData[field] = parseInt(value) || 0;
-                } else if (field === 'date_of_birth') {
-                    rowData[field] = value;
-                    if (value) hasData = true;
-                } else {
-                    rowData[field] = value;
-                    if (value) hasData = true;
-                }
-            }
-        });
-        
-        if (hasData) {
-            if (!rowData.last_name) {
-                validationErrors.push('Last Name is required for new member');
+function deleteHousehold(householdId) {
+    fetch('household_ajax.php?action=get_household_members&household_id=' + householdId)
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.success && data.data.length > 0) {
+                showErrorModal('Cannot delete this household because it has ' + data.data.length + ' member(s). Please delete all members first.', 'Cannot Delete');
                 return;
             }
-            dataToSave.push(rowData);
-            hasChanges = true;
-        } else {
-            row.remove();
-        }
-    });
-    
-    if (validationErrors.length > 0) {
-        showErrorModal(validationErrors.join('\n'), 'Validation Error');
-        return;
-    }
-    
-    if (!hasChanges) {
-        showWarningModal('No changes to save.', 'No Changes');
-        return;
-    }
-    
-    try {
-        var response = await fetch('household_ajax.php?action=save_all', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ rows: dataToSave })
-        });
-        
-        var data = await response.json();
-        
-        if (data.success) {
-            showSuccessModal(data.message, 'Saved');
-            document.querySelectorAll('.changed').forEach(function(el) {
-                el.classList.remove('changed');
-                el.dataset.changed = 'false';
+            showConfirmationModal('Are you sure you want to delete this household? This action cannot be undone.', 'Confirm Delete', async function() {
+                try {
+                    var fd = new FormData();
+                    fd.append('action', 'delete_household');
+                    fd.append('id', householdId);
+                    var res = await fetch('household_ajax.php', { method: 'POST', body: fd });
+                    var data = await res.json();
+                    if (data.success) {
+                        showSuccessModal(data.message || 'Household deleted.', 'Deleted');
+                        loadHouseholds(currentHouseholdPurok, currentHouseholdPage, currentHouseholdSearch);
+                    } else {
+                        showErrorModal(data.message || 'Delete failed.');
+                    }
+                } catch (e) { showErrorModal('An error occurred.'); }
             });
-            loadHouseholds(currentHouseholdPurok, currentHouseholdPage, currentHouseholdSearch);
-        } else {
-            showErrorModal(data.message, 'Error');
-        }
-    } catch (error) {
-        showErrorModal('An error occurred while saving.', 'Error');
-    }
+        })
+        .catch(function() { showErrorModal('An error occurred while checking members.'); });
 }
 
-// ============ UTILITY FUNCTIONS ============
+// ============ CONFIRMATION MODAL ============
+function showConfirmationModal(message, title, onConfirm) {
+    document.getElementById('confirmationModalTitle').textContent = title || 'Confirm';
+    document.getElementById('confirmationModalMessage').textContent = message;
+    var modal = document.getElementById('confirmationModal');
+    modal.style.display = 'flex';
+    confirmationCallback = onConfirm;
 
+    var yesBtn = document.getElementById('confirmationModalConfirm');
+    var newBtn = yesBtn.cloneNode(true);
+    yesBtn.parentNode.replaceChild(newBtn, yesBtn);
+    newBtn.addEventListener('click', function() {
+        modal.style.display = 'none';
+        if (typeof confirmationCallback === 'function') confirmationCallback();
+        confirmationCallback = null;
+    });
+}
+function closeConfirmationModal() {
+    document.getElementById('confirmationModal').style.display = 'none';
+    confirmationCallback = null;
+}
+
+// ============ NOTIFICATIONS ============
+function showNotificationModal(type, title, message) {
+    var color, iconHtml;
+    switch (type) {
+        case 'success': color = '#28a745'; iconHtml = '<i class="fas fa-check-circle"></i>'; break;
+        case 'error': color = '#dc3545'; iconHtml = '<i class="fas fa-times-circle"></i>'; break;
+        case 'warning': color = '#ff9800'; iconHtml = '<i class="fas fa-exclamation-triangle"></i>'; break;
+        default: color = '#17a2b8'; iconHtml = '<i class="fas fa-info-circle"></i>';
+    }
+    var existing = document.querySelector('.notification-modal');
+    if (existing) existing.remove();
+    var modalHtml = `
+        <div class="notification-modal" style="display:flex; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.6); z-index:2300; align-items:center; justify-content:center;">
+            <div class="notification-modal-content" style="background:white; border-radius:16px; max-width:500px; width:90%; padding:25px; box-shadow:0 20px 60px rgba(0,0,0,0.3);">
+                <div style="font-size:50px; text-align:center; margin-bottom:12px; color:${color};">${iconHtml}</div>
+                <div style="font-size:20px; font-weight:700; text-align:center; margin-bottom:10px; color:${color};">${escapeHtml(title)}</div>
+                <div style="font-size:14px; color:#555; text-align:left; line-height:1.7; white-space:pre-wrap; max-height:300px; overflow-y:auto;">${escapeHtml(message)}</div>
+                <div style="text-align:center; margin-top:20px;">
+                    <button onclick="this.closest('.notification-modal').remove()" style="background:${color}; color:white; border:none; padding:10px 30px; border-radius:8px; cursor:pointer; font-weight:600;">OK</button>
+                </div>
+            </div>
+        </div>`;
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+}
+function showSuccessModal(msg, title) { showNotificationModal('success', title || 'Success!', msg); }
+function showErrorModal(msg, title) { showNotificationModal('error', title || 'Error!', msg); }
+function showWarningModal(msg, title) { showNotificationModal('warning', title || 'Warning!', msg); }
+
+// ============ UTILITIES ============
 function escapeHtml(text) {
-    if (!text) return '';
+    if (text === null || text === undefined) return '';
     var div = document.createElement('div');
-    div.textContent = text;
+    div.textContent = String(text);
     return div.innerHTML;
 }
 
-// ============ RENDER PAGINATION ============
-
+// ============ PAGINATION ============
 function renderHouseholdPagination(data) {
     var container = document.getElementById('householdPagination');
     if (!container) return;
-    
-    if (data.totalPages <= 1) {
-        container.innerHTML = '';
-        return;
-    }
-    
+    if (data.totalPages <= 1) { container.innerHTML = ''; return; }
+
     var html = '<div class="pagination-wrapper"><div class="pagination">';
-    
     if (data.currentPage > 1) {
-        html += '<button class="page-btn" onclick="loadHouseholds(\'' + currentHouseholdPurok + '\', ' + (data.currentPage - 1) + ', \'' + currentHouseholdSearch + '\')">';
-        html += '<i class="fas fa-chevron-left"></i> Prev</button>';
+        html += '<button class="page-btn" onclick="loadHouseholds(\'' + currentHouseholdPurok + '\', ' + (data.currentPage - 1) + ', \'' + currentHouseholdSearch + '\')"><i class="fas fa-chevron-left"></i> Prev</button>';
     } else {
         html += '<button class="page-btn disabled" disabled><i class="fas fa-chevron-left"></i> Prev</button>';
     }
-    
     var maxVisible = 5;
     var startPage = Math.max(1, data.currentPage - Math.floor(maxVisible / 2));
     var endPage = Math.min(data.totalPages, startPage + maxVisible - 1);
-    
-    if (endPage - startPage < maxVisible - 1) {
-        startPage = Math.max(1, endPage - maxVisible + 1);
-    }
-    
+    if (endPage - startPage < maxVisible - 1) startPage = Math.max(1, endPage - maxVisible + 1);
+
     if (startPage > 1) {
         html += '<button class="page-btn" onclick="loadHouseholds(\'' + currentHouseholdPurok + '\', 1, \'' + currentHouseholdSearch + '\')">1</button>';
         if (startPage > 2) html += '<span class="page-dots">...</span>';
     }
-    
     for (var i = startPage; i <= endPage; i++) {
         var activeClass = i === data.currentPage ? 'active' : '';
         html += '<button class="page-btn ' + activeClass + '" onclick="loadHouseholds(\'' + currentHouseholdPurok + '\', ' + i + ', \'' + currentHouseholdSearch + '\')">' + i + '</button>';
     }
-    
     if (endPage < data.totalPages) {
         if (endPage < data.totalPages - 1) html += '<span class="page-dots">...</span>';
         html += '<button class="page-btn" onclick="loadHouseholds(\'' + currentHouseholdPurok + '\', ' + data.totalPages + ', \'' + currentHouseholdSearch + '\')">' + data.totalPages + '</button>';
     }
-    
     if (data.currentPage < data.totalPages) {
-        html += '<button class="page-btn" onclick="loadHouseholds(\'' + currentHouseholdPurok + '\', ' + (data.currentPage + 1) + ', \'' + currentHouseholdSearch + '\')">';
-        html += 'Next <i class="fas fa-chevron-right"></i></button>';
+        html += '<button class="page-btn" onclick="loadHouseholds(\'' + currentHouseholdPurok + '\', ' + (data.currentPage + 1) + ', \'' + currentHouseholdSearch + '\')">Next <i class="fas fa-chevron-right"></i></button>';
     } else {
         html += '<button class="page-btn disabled" disabled>Next <i class="fas fa-chevron-right"></i></button>';
     }
-    
     html += '</div></div>';
     container.innerHTML = html;
 }
 
-// ============ UPDATE STATS ============
-
+// ============ STATS ============
 function updateHouseholdStats(data) {
     var totalEl = document.getElementById('totalHouseholds');
     var membersEl = document.getElementById('totalMembers');
     var puroksEl = document.getElementById('totalPuroks');
-    
     if (totalEl) totalEl.textContent = data.total || 0;
-    
+
     fetch('household_ajax.php?action=get_household_counts')
-        .then(function(response) { return response.json(); })
-        .then(function(countData) {
-            if (countData.success) {
-                if (membersEl) membersEl.textContent = countData.totalMembers || 0;
-                if (puroksEl) {
-                    var purokCount = Object.keys(countData.data || {}).length;
-                    puroksEl.textContent = purokCount || 0;
-                }
+        .then(function(r) { return r.json(); })
+        .then(function(cd) {
+            if (cd.success) {
+                if (membersEl) membersEl.textContent = cd.totalMembers || 0;
+                if (puroksEl) puroksEl.textContent = Object.keys(cd.data || {}).length || 0;
             }
         })
-        .catch(function(err) { console.error('Error loading stats:', err); });
+        .catch(function(err) { console.error(err); });
 }
 
-// ============ LOAD PUROK FILTER ============
-
+// ============ PUROK FILTER ============
 function loadPurokFilter(purokCounts) {
     var select = document.getElementById('purokFilter');
     if (!select) return;
-    
     if (select.options.length <= 1) {
         fetch('household_ajax.php?action=get_puroks')
-            .then(function(response) { return response.json(); })
+            .then(function(r) { return r.json(); })
             .then(function(data) {
                 if (data.success) {
                     select.innerHTML = '<option value="all">All Puroks</option>';
@@ -1669,28 +1976,18 @@ function loadPurokFilter(purokCounts) {
                         var count = purokCounts[purok] || 0;
                         select.innerHTML += '<option value="' + escapeHtml(purok) + '">Purok ' + escapeHtml(purok) + ' (' + count + ')</option>';
                     });
-                    
-                    if (currentHouseholdPurok !== 'all') {
-                        select.value = currentHouseholdPurok;
-                    }
+                    if (currentHouseholdPurok !== 'all') select.value = currentHouseholdPurok;
                 }
-            })
-            .catch(function(err) { console.error('Error loading puroks:', err); });
+            });
     } else {
-        var options = select.querySelectorAll('option');
-        options.forEach(function(option) {
+        select.querySelectorAll('option').forEach(function(option) {
             if (option.value !== 'all') {
                 var count = purokCounts[option.value] || 0;
-                var text = 'Purok ' + option.value + ' (' + count + ')';
-                if (option.textContent !== text) {
-                    option.textContent = text;
-                }
+                option.textContent = 'Purok ' + option.value + ' (' + count + ')';
             }
         });
     }
 }
-
-// ============ FILTER FUNCTIONS ============
 
 function filterHouseholdsByPurok() {
     var select = document.getElementById('purokFilter');
@@ -1708,11 +2005,9 @@ function searchHouseholds() {
     }, 300);
 }
 
-// ============ ADD HOUSEHOLD TO SIDEBAR ============
-
+// ============ SIDEBAR ============
 function addHouseholdToSidebar() {
     var householdItem = document.querySelector('.nav-item.standalone[data-view="household"]');
-    
     var clickHandler = function() {
         document.querySelectorAll('.nav-item').forEach(function(nav) {
             nav.classList.remove('active-parent', 'active');
@@ -1721,17 +2016,13 @@ function addHouseholdToSidebar() {
         document.querySelectorAll('.sub-option').forEach(function(sub) {
             sub.classList.remove('active-sub');
         });
-        
         if (typeof closeCertification === 'function') closeCertification();
-        
         var dashboardBody = document.getElementById('dashboardBody');
         if (dashboardBody) {
             dashboardBody.innerHTML = renderHouseholdView();
             loadHouseholds('all', 1);
         }
-        
         if (typeof closeDropdown === 'function') closeDropdown();
-        
         if (window.innerWidth <= 768) {
             var sidebar = document.getElementById('sidebar');
             var overlay = document.getElementById('sidebarOverlay');
@@ -1739,39 +2030,24 @@ function addHouseholdToSidebar() {
             if (overlay) overlay.classList.add('hide');
         }
     };
-    
     if (householdItem) {
+        householdItem.removeEventListener('click', clickHandler);
         householdItem.addEventListener('click', clickHandler);
         return;
     }
-    
     var navMenu = document.querySelector('.nav-menu');
     if (!navMenu) return;
-    
     var dashboardItem = document.querySelector('.nav-item.standalone[data-view="dashboard"]');
     if (!dashboardItem) return;
-    
     var newHouseholdItem = document.createElement('div');
     newHouseholdItem.className = 'nav-item standalone';
     newHouseholdItem.setAttribute('data-view', 'household');
     newHouseholdItem.innerHTML = '<i class="fas fa-home"></i><span>Household</span>';
-    
-    if (dashboardItem.nextSibling) {
-        navMenu.insertBefore(newHouseholdItem, dashboardItem.nextSibling);
-    } else {
-        navMenu.appendChild(newHouseholdItem);
-    }
-    
+    if (dashboardItem.nextSibling) navMenu.insertBefore(newHouseholdItem, dashboardItem.nextSibling);
+    else navMenu.appendChild(newHouseholdItem);
     newHouseholdItem.addEventListener('click', clickHandler);
 }
 
-// Initialize
-document.addEventListener('DOMContentLoaded', function() {
-    addHouseholdToSidebar();
-});
-
-if (document.readyState === 'complete') {
-    addHouseholdToSidebar();
-} else {
-    window.addEventListener('load', addHouseholdToSidebar);
-}
+document.addEventListener('DOMContentLoaded', addHouseholdToSidebar);
+if (document.readyState === 'complete') addHouseholdToSidebar();
+else window.addEventListener('load', addHouseholdToSidebar);

@@ -3,18 +3,25 @@
 // ============================================================
 // TASK: Remind residents about equipment due soon / overdue.
 //
-//   • Due within 3 days     → daily reminder
-//   • Overdue               → daily reminder
+//   • Due within 3 days (status = 'borrowed')   → daily reminder
+//   • Overdue (status = 'unreturned')           → every 3 hours
 //
 // Guards:
 //   - notifications table same-day check (per request per type)
+//   - last_overdue_notification_at column (3-hour guard for overdue)
+//
+// NOTE: The functions that flip 'borrowed' → 'unreturned' and the
+// vehicle trip reminder live in their own task files:
+//   - cron/tasks/equipment_return_reminder.php
+//   - cron/tasks/vehicle_trip_reminder.php
 // ============================================================
 
 function cron_task_return_reminder($conn) {
     $sent = 0;
 
     // ------------------------------------------------------------
-    // 1) DUE WITHIN 3 DAYS
+    // 1) DUE WITHIN 3 DAYS  (status = 'borrowed' only)
+    //    Only remind when the resident actually has the item.
     // ------------------------------------------------------------
     $dueSql = "SELECT r.id AS request_id,
                       r.resident_id,
@@ -25,7 +32,7 @@ function cron_task_return_reminder($conn) {
                       DATEDIFF(r.end_datetime, NOW()) AS days_until_due
                FROM requests r
                JOIN equipment_requests er ON r.id = er.request_id
-               WHERE r.status IN ('approved', 'borrowed')
+               WHERE r.status = 'borrowed'
                  AND r.request_type = 'equipment'
                  AND r.end_datetime >= NOW()
                  AND DATEDIFF(r.end_datetime, NOW()) BETWEEN 0 AND 3";
@@ -81,85 +88,80 @@ function cron_task_return_reminder($conn) {
     }
 
     // ------------------------------------------------------------
-// 2) OVERDUE - Send every 3 hours, even if notification was deleted
-// ------------------------------------------------------------
-$overSql = "SELECT r.id AS request_id,
-                   r.resident_id,
-                   r.`reference`,
-                   r.end_datetime,
-                   r.last_overdue_notification_at,
-                   er.equipment_name,
-                   er.quantity,
-                   DATEDIFF(NOW(), r.end_datetime) AS days_overdue
-            FROM requests r
-            JOIN equipment_requests er ON r.id = er.request_id
-            WHERE r.status IN ('approved', 'borrowed')
-              AND r.request_type = 'equipment'
-              AND r.end_datetime < NOW()";
+    // 2) OVERDUE — status = 'unreturned' only
+    //    Send every 3 hours (guarded by last_overdue_notification_at).
+    //    The flip 'borrowed' → 'unreturned' is done by
+    //    cron_task_equipment_return_reminder() in its own task file.
+    // ------------------------------------------------------------
+    $overSql = "SELECT r.id AS request_id,
+                       r.resident_id,
+                       r.`reference`,
+                       r.end_datetime,
+                       r.last_overdue_notification_at,
+                       er.equipment_name,
+                       er.quantity,
+                       DATEDIFF(NOW(), r.end_datetime) AS days_overdue
+                FROM requests r
+                JOIN equipment_requests er ON r.id = er.request_id
+                WHERE r.status = 'unreturned'
+                  AND r.request_type = 'equipment'
+                  AND r.end_datetime < NOW()";
 
-$overStmt = mysqli_prepare($conn, $overSql);
+    $overStmt = mysqli_prepare($conn, $overSql);
 
-if (!$overStmt) {
-    cronLog("return_reminder: PREPARE (overdue) FAILED — " . mysqli_error($conn));
-    cronLog("return_reminder: SQL was:\n" . $overSql);
-} else {
-    mysqli_stmt_execute($overStmt);
-    $overRes = mysqli_stmt_get_result($overStmt);
+    if (!$overStmt) {
+        cronLog("return_reminder: PREPARE (overdue) FAILED — " . mysqli_error($conn));
+        cronLog("return_reminder: SQL was:\n" . $overSql);
+    } else {
+        mysqli_stmt_execute($overStmt);
+        $overRes = mysqli_stmt_get_result($overStmt);
 
-    $overRows = [];
-    while ($row = mysqli_fetch_assoc($overRes)) $overRows[] = $row;
-    mysqli_free_result($overRes);
-    mysqli_stmt_close($overStmt);
+        $overRows = [];
+        while ($row = mysqli_fetch_assoc($overRes)) $overRows[] = $row;
+        mysqli_free_result($overRes);
+        mysqli_stmt_close($overStmt);
 
-    foreach ($overRows as $row) {
-        $residentId = (int)$row['resident_id'];
-        $requestId  = (int)$row['request_id'];
-        $days       = (int)$row['days_overdue'];
+        foreach ($overRows as $row) {
+            $residentId = (int)$row['resident_id'];
+            $requestId  = (int)$row['request_id'];
+            $days       = (int)$row['days_overdue'];
 
-        // ------------------------------------------------------------
-        // 3-HOUR GUARD: Check last_overdue_notification_at timestamp
-        // This persists even if the notification was deleted.
-        // ------------------------------------------------------------
-        $lastSent = $row['last_overdue_notification_at'];
+            // 3-HOUR GUARD — check last_overdue_notification_at
+            $lastSent = $row['last_overdue_notification_at'];
 
-        if ($lastSent !== null) {
-            $hoursSinceLast = (time() - strtotime($lastSent)) / 3600;
-            if ($hoursSinceLast < 3) {
-                // Less than 3 hours since last overdue notification — skip
-                cronLog("equipment_overdue: SKIPPED resident=$residentId request=$requestId (last sent " . round($hoursSinceLast, 1) . "h ago)");
-                continue;
+            if ($lastSent !== null) {
+                $hoursSinceLast = (time() - strtotime($lastSent)) / 3600;
+                if ($hoursSinceLast < 3) {
+                    cronLog("equipment_overdue: SKIPPED resident=$residentId request=$requestId (last sent " . round($hoursSinceLast, 1) . "h ago)");
+                    continue;
+                }
             }
+
+            $title = "🚨 Equipment Overdue — Action Required!";
+            $msg   = "Your borrowed {$row['equipment_name']} ({$row['quantity']} item(s)) is {$days} day(s) overdue. Please return it immediately.";
+
+            cronSendNotification(
+                $conn, 'resident', $residentId, null,
+                $title, $msg, 'equipment_overdue'
+            );
+
+            cronSafePushResident(
+                $conn, $residentId,
+                $title, $msg,
+                '/BRITE/resident/dashboard.php'
+            );
+
+            // Update the tracking timestamp — 3-hour guard for future runs.
+            $upd = mysqli_prepare($conn,
+                "UPDATE requests SET last_overdue_notification_at = NOW() WHERE id = ?");
+            mysqli_stmt_bind_param($upd, "i", $requestId);
+            mysqli_stmt_execute($upd);
+            mysqli_stmt_close($upd);
+
+            $sent++;
+            cronLog("equipment_overdue: sent to resident=$residentId for request=$requestId (overdue=$days)");
         }
-
-        $title = "🚨 Equipment Overdue — Action Required!";
-        $msg   = "Your borrowed {$row['equipment_name']} ({$row['quantity']} item(s)) is {$days} day(s) overdue. Please return it immediately.";
-
-        cronSendNotification(
-            $conn, 'resident', $residentId, null,
-            $title, $msg, 'equipment_overdue'
-        );
-
-        cronSafePushResident(
-            $conn, $residentId,
-            $title, $msg,
-            '/BRITE/resident/dashboard.php'
-        );
-
-        // ------------------------------------------------------------
-        // Update the tracking timestamp — this is the key part.
-        // Even if the notification row is deleted, this timestamp
-        // remains and prevents re-sending for 3 hours.
-        // ------------------------------------------------------------
-        $upd = mysqli_prepare($conn,
-            "UPDATE requests SET last_overdue_notification_at = NOW() WHERE id = ?");
-        mysqli_stmt_bind_param($upd, "i", $requestId);
-        mysqli_stmt_execute($upd);
-        mysqli_stmt_close($upd);
-
-        $sent++;
-        cronLog("equipment_overdue: sent to resident=$residentId for request=$requestId (overdue=$days)");
     }
-}
 
     return $sent;
 }

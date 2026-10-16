@@ -27,14 +27,15 @@ function cronLog($msg) {
  * Never throws. If pushToUser() is broken or missing in CLI context,
  * logs the reason and returns false so the caller can continue.
  */
-function cronSafePush($conn, $user_id, $title, $body, $url = '') {
+function cronSafePush($conn, $user_id, $title, $body, $url = '', $document_path = null) {
     cronLog("cronSafePush: called for user=$user_id");
     if (!function_exists('pushToUser')) {
         cronLog("cronSafePush: pushToUser NOT DEFINED (push_send.php not loaded)");
         return false;
     }
     try {
-        $sent = pushToUser($conn, $user_id, $title, $body, $url);
+        // ✅ pass $document_path as 6th arg (pushToUser should accept it — add there too)
+        $sent = pushToUser($conn, $user_id, $title, $body, $url, $document_path);
         if ($sent > 0) {
             cronLog("cronSafePush: OK user=$user_id sent=$sent");
             return true;
@@ -46,13 +47,14 @@ function cronSafePush($conn, $user_id, $title, $body, $url = '') {
         return false;
     }
 }
-function cronSafePushResident($conn, $resident_id, $title, $body, $url = '') {
+function cronSafePushResident($conn, $resident_id, $title, $body, $url = '', $document_path = null) {
     if (!function_exists('pushToResident')) {
         cronLog("cronSafePushResident: pushToResident not defined");
         return false;
     }
     try {
-        $sent = pushToResident($conn, $resident_id, $title, $body, $url);
+        // ✅ pass $document_path as 6th arg
+        $sent = pushToResident($conn, $resident_id, $title, $body, $url, $document_path);
         if ($sent > 0) {
             cronLog("cronSafePushResident: OK resident=$resident_id sent=$sent");
             return true;
@@ -66,20 +68,53 @@ function cronSafePushResident($conn, $resident_id, $title, $body, $url = '') {
 }
 
 /* ---------------- Notifications ---------------- */
-function cronSendNotification($conn, $user_type, $user_id, $complaint_id, $title, $message, $type = 'info') {
-    $resident_id    = ($user_type === 'resident') ? $user_id : null;
-    $reference_id   = $complaint_id ?: null;
-    $reference_type = $complaint_id ? 'complaint' : null;
+/**
+ * Send a notification row.
+ *
+ * Backwards-compatible — existing callers that pass only 7/8 args still work.
+ * New callers (vehicle trip / equipment return) may pass $reference_id +
+ * $reference_type explicitly so the same-day guard can find them.
+ *
+ * Signature:
+ *   cronSendNotification($conn, $user_type, $user_id, $complaint_id,
+ *                        $title, $message, $type = 'info',
+ *                        $document_path = null,
+ *                        $reference_id = null, $reference_type = null)
+ */
+function cronSendNotification(
+    $conn,
+    $user_type,
+    $user_id,
+    $complaint_id,
+    $title,
+    $message,
+    $type = 'info',
+    $document_path = null,
+    $reference_id = null,
+    $reference_type = null
+) {
+    $resident_id = ($user_type === 'resident') ? $user_id : null;
+
+    // Fall back to complaint-based reference if caller didn't supply one.
+    if ($reference_id === null) {
+        $reference_id   = $complaint_id ?: null;
+        $reference_type = $complaint_id ? 'complaint' : null;
+    } elseif ($reference_type === null) {
+        $reference_type = 'complaint';
+    }
 
     $sql = "INSERT INTO notifications
-              (user_type, user_id, resident_id, type, title, message, reference_id, reference_type)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
+              (user_type, user_id, resident_id, type, title, message, reference_id, reference_type, document_path)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
     $s = mysqli_prepare($conn, $sql);
     if (!$s) { cronLog("sendNotification prepare failed: " . mysqli_error($conn)); return false; }
-    mysqli_stmt_bind_param($s, "siisssis",
+
+    mysqli_stmt_bind_param($s, "siisssiss",
         $user_type, $user_id, $resident_id,
         $type, $title, $message,
-        $reference_id, $reference_type);
+        $reference_id, $reference_type,
+        $document_path);
+
     $ok = mysqli_stmt_execute($s);
     if (!$ok) cronLog("sendNotification execute failed: " . mysqli_stmt_error($s));
     mysqli_stmt_close($s);
@@ -102,7 +137,7 @@ function cronGetComplaintCreator($conn, $complaint_id) {
 /**
  * Send a reminder to every matched party on a complaint.
  */
-function cronRemindParties($conn, $complaint_id, $title, $messageBody, &$notifiedIds = []) {
+function cronRemindParties($conn, $complaint_id, $title, $messageBody, &$notifiedIds = [], $document_path = null) {
     $st = mysqli_prepare($conn,
         "SELECT DISTINCT matched_resident_id FROM complaint_parties
          WHERE complaint_id = ? AND matched_resident_id IS NOT NULL");
@@ -114,11 +149,11 @@ function cronRemindParties($conn, $complaint_id, $title, $messageBody, &$notifie
     while ($p = mysqli_fetch_assoc($res)) {
         $rid = (int)$p['matched_resident_id'];
         if (!$rid) continue;
-        if (in_array($rid, $notifiedIds, true)) continue;   // avoid dupes in same run
+        if (in_array($rid, $notifiedIds, true)) continue;
 
-        cronSendNotification($conn, 'resident', $rid, $complaint_id, $title, $messageBody, 'hearing');
+        cronSendNotification($conn, 'resident', $rid, $complaint_id, $title, $messageBody, 'hearing', $document_path);
         cronSafePushResident($conn, $rid, $title, $messageBody,
-            '/BRITE/resident/dashboard.php');
+            '/BRITE/resident/dashboard.php', $document_path);
 
         $notifiedIds[] = $rid;
         $count++;
@@ -128,11 +163,11 @@ function cronRemindParties($conn, $complaint_id, $title, $messageBody, &$notifie
     return $count;
 }
 
-function cronRemindAdmin($conn, $admin_id, $complaint_id, $title, $messageBody, $link = '') {
+function cronRemindAdmin($conn, $admin_id, $complaint_id, $title, $messageBody, $link = '', $document_path = null) {
     if (!$admin_id) return false;
-    cronSendNotification($conn, 'admin', (int)$admin_id, $complaint_id, $title, $messageBody, 'hearing');
+    cronSendNotification($conn, 'admin', (int)$admin_id, $complaint_id, $title, $messageBody, 'hearing', $document_path);
     if ($link) {
-        cronSafePush($conn, (int)$admin_id, $title, $messageBody, $link);
+        cronSafePush($conn, (int)$admin_id, $title, $messageBody, $link, $document_path);
     }
     return true;
 }

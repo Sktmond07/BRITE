@@ -144,6 +144,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $resident_match = $_SESSION['resident_match'];
                         $verification_status = $_SESSION['verification_status'];
                         $id_verified = $_SESSION['id_verified'];
+
+                        // Remember which household_members row this person matched,
+                        // so we can link it after the resident account is created.
+                        $_SESSION['matched_member_id'] = intval($verifyResult['resident_data']['id'] ?? 0);
                         
                         if (!empty($resident_match)) {
                             if (isset($resident_match['household_address']) && !empty($resident_match['household_address'])) {
@@ -192,6 +196,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             unset($_SESSION['detected_id_type']);
             unset($_SESSION['id_verified']);
             unset($_SESSION['verification_errors']);
+            unset($_SESSION['matched_member_id']);
             ?>
             <!DOCTYPE html>
             <html lang="en">
@@ -1537,6 +1542,23 @@ function processFullRegistration($data) {
     );
     
     if ($stmt->execute()) {
+        $newResidentId = $conn->insert_id;
+
+        // ---- Link this resident account back to the household_members master-list row ----
+        // acc_id lives on household_members. We never touch the resident table again.
+        $matchedMemberId = intval($_SESSION['matched_member_id'] ?? 0);
+        if ($matchedMemberId > 0) {
+            $linkStmt = $conn->prepare("
+                UPDATE household_members 
+                SET acc_id = ? 
+                WHERE id = ? 
+                  AND (acc_id IS NULL OR acc_id = 0)
+            ");
+            $linkStmt->bind_param("ii", $newResidentId, $matchedMemberId);
+            $linkStmt->execute();
+            $linkStmt->close();
+        }
+
         return [
             'success' => true,
             'message' => 'Registration successful!',

@@ -109,7 +109,7 @@ case 'get_all_bookings':
     $status = isset($_GET['status']) && $_GET['status'] !== 'all' ? $_GET['status'] : null;
     $type = isset($_GET['type']) && $_GET['type'] !== 'all' ? $_GET['type'] : null;
     $date = isset($_GET['date']) ? $_GET['date'] : null;
-    $result = getAllBookings($conn, $status, $type, 1, 9999);
+    $result = getAllBookings($conn, $status, $type, 1, 9999, $date);
     echo json_encode(['success' => true, 'data' => $result]);
     break;
         

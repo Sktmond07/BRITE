@@ -1468,7 +1468,12 @@ async function goToWizardStep(step) {
         const canProceed = await validateCurrentStep(DocumentModule.wizardStep);
         if (!canProceed) return;
     }
-    
+
+    // If user goes back to step 1 while a payment poll is running, stop it
+    if (step === 1 && __paymentPollActive) {
+        stopPaymentPolling();
+    }
+
     DocumentModule.wizardStep = step;
     updateWizardProgress(step);
     
@@ -2206,17 +2211,22 @@ async function loadWizardStep2() {
 let pendingPaymentRequest = null;
 
 async function submitWizardRequest() {
+    console.log('=== submitWizardRequest ===');
+    console.log('isFree:', DocumentModule.wizardData.isFree);
+    console.log('paymentAmount:', DocumentModule.wizardData.paymentAmount);
+    console.log('residentType:', DocumentModule.wizardData.residentType);
+    console.log('selectedDoc:', DocumentModule.wizardData.selectedDoc);
+    
     const submitBtn = document.getElementById('wizardSubmitBtn');
     if (submitBtn) {
         submitBtn.disabled = true;
         submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Processing...';
     }
     
-    // Check if payment is required
     const isFree = DocumentModule.wizardData.isFree || DocumentModule.wizardData.paymentAmount === 0;
     
     if (!isFree && DocumentModule.wizardData.paymentAmount > 0) {
-        // Show payment modal instead of submitting
+        // Show payment modal
         if (submitBtn) {
             submitBtn.disabled = false;
             submitBtn.innerHTML = '<i class="fas fa-paper-plane"></i> Submit Request';
@@ -2225,94 +2235,151 @@ async function submitWizardRequest() {
         return;
     }
     
-    // Free document - submit directly
+    // Free doc — submit directly
     await executeSubmitRequest();
 }
+
+// ============ PAYMENT MODAL — Channel picker ============
+
+
 
 function showPaymentModal() {
     const totalAmount = DocumentModule.wizardData.paymentAmount || 0;
     const docName = DocumentModule.wizardData.selectedDoc?.name || 'Document';
-    
-    // Create modal overlay
+
     const overlay = document.createElement('div');
     overlay.className = 'payment-modal-overlay';
     overlay.id = 'paymentModalOverlay';
     overlay.innerHTML = `
-        <div class="payment-modal-content">
+        <div class="payment-modal-content" style="max-width: 540px;">
             <div class="payment-modal-header">
-                <i class="fas fa-credit-card" style="font-size: 48px; color: #2e7d32;"></i>
-                <h3>Payment Required</h3>
-                <p style="color: #666; font-size: 14px;">Please complete payment to submit your request</p>
-                <div class="amount">₱${totalAmount.toFixed(2)}</div>
+                <i class="fas fa-credit-card" style="font-size: 42px; color: #2e7d32;"></i>
+                <h3 style="margin: 12px 0 4px;">Choose Payment Method</h3>
+                <p style="color: #666; font-size: 14px; margin: 0;">How would you like to pay?</p>
+                <div class="amount" style="margin-top: 12px;">₱${totalAmount.toFixed(2)}</div>
                 <p style="color: #999; font-size: 13px; margin-top: 5px;">${escapeHtml(docName)}</p>
             </div>
-            
-            <div class="payment-method-grid">
-                <div class="payment-method-option selected" onclick="selectPaymentMethodModal('online')" style="border-color: #2e7d32; background: #e8f5e9;">
-                    <span class="pm-icon"><i class="fas fa-mobile-alt" style="color: #0066B3;"></i></span>
-                    <span class="pm-label">Online Payment</span>
-                    <span class="pm-desc">GCash / Maya</span>
+
+            <div style="padding: 10px 0;">
+                <div class="pm-card" id="pmCardOnline" style="border: 2px solid #e2efe8; border-radius: 14px; margin-bottom: 12px; overflow: hidden; transition: all .2s;">
+                    <div onclick="toggleOnlineMethods()" style="padding: 16px 18px; cursor: pointer; display: flex; align-items: center; gap: 14px; background: #fff;">
+                        <div style="width: 48px; height: 48px; border-radius: 12px; background: linear-gradient(135deg,#0066B3,#00B4D8); display: flex; align-items: center; justify-content: center; flex-shrink: 0;">
+                            <i class="fas fa-mobile-alt" style="color: #fff; font-size: 22px;"></i>
+                        </div>
+                        <div style="flex: 1;">
+                            <div style="font-weight: 700; color: #1a2b22; font-size: 15px;">Online Payment</div>
+                            <div style="font-size: 12px; color: #888; margin-top: 2px;">GCash, Maya, QR Ph, Bank Transfer</div>
+                        </div>
+                        <i class="fas fa-chevron-down" id="pmOnlineChevron" style="color: #999; transition: transform .2s;"></i>
+                    </div>
+
+                    <div id="pmOnlineSub" style="display: none; padding: 12px 18px 16px; border-top: 1px solid #eef2ef; background: #fafbfa;">
+                        <div style="font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: #888; font-weight: 700; margin-bottom: 10px;">Select your wallet</div>
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+                            <div class="pm-sub-option" onclick="selectSubMethod('GCASH')" data-method="GCASH" style="border: 2px solid #e2efe8; border-radius: 12px; padding: 12px; cursor: pointer; text-align: center; background: #fff; transition: all .15s;">
+                                <div style="font-size: 22px; color: #0070E0; margin-bottom: 4px;"><i class="fas fa-wallet"></i></div>
+                                <div style="font-weight: 700; font-size: 13px; color: #1a2b22;">GCash</div>
+                            </div>
+                            <div class="pm-sub-option" onclick="selectSubMethod('PAYMAYA')" data-method="PAYMAYA" style="border: 2px solid #e2efe8; border-radius: 12px; padding: 12px; cursor: pointer; text-align: center; background: #fff; transition: all .15s;">
+                                <div style="font-size: 22px; color: #00A86B; margin-bottom: 4px;"><i class="fas fa-wallet"></i></div>
+                                <div style="font-weight: 700; font-size: 13px; color: #1a2b22;">Maya</div>
+                            </div>
+                            <div class="pm-sub-option" onclick="selectSubMethod('QRPH')" data-method="QRPH" style="border: 2px solid #e2efe8; border-radius: 12px; padding: 12px; cursor: pointer; text-align: center; background: #fff; transition: all .15s;">
+                                <div style="font-size: 22px; color: #1565c0; margin-bottom: 4px;"><i class="fas fa-qrcode"></i></div>
+                                <div style="font-weight: 700; font-size: 13px; color: #1a2b22;">QR Ph</div>
+                            </div>
+                            <div class="pm-sub-option" onclick="selectSubMethod('BANK_TRANSFER')" data-method="BANK_TRANSFER" style="border: 2px solid #e2efe8; border-radius: 12px; padding: 12px; cursor: pointer; text-align: center; background: #fff; transition: all .15s;">
+                                <div style="font-size: 22px; color: #f57c00; margin-bottom: 4px;"><i class="fas fa-university"></i></div>
+                                <div style="font-weight: 700; font-size: 13px; color: #1a2b22;">Bank Transfer</div>
+                            </div>
+                        </div>
+                    </div>
                 </div>
-                <div class="payment-method-option" onclick="selectPaymentMethodModal('pay_at_claim')" style="border-color: #eef2ef; background: white;">
-                    <span class="pm-icon"><i class="fas fa-building" style="color: #ff9800;"></i></span>
-                    <span class="pm-label">Pay at Claim</span>
-                    <span class="pm-desc">Barangay Hall</span>
+
+                <div class="pm-card" id="pmCardClaim" onclick="selectPayAtClaim()" style="border: 2px solid #e2efe8; border-radius: 14px; padding: 16px 18px; cursor: pointer; display: flex; align-items: center; gap: 14px; background: #fff; transition: all .2s;">
+                    <div style="width: 48px; height: 48px; border-radius: 12px; background: linear-gradient(135deg,#ff9800,#f57c00); display: flex; align-items: center; justify-content: center; flex-shrink: 0;">
+                        <i class="fas fa-building" style="color: #fff; font-size: 22px;"></i>
+                    </div>
+                    <div style="flex: 1;">
+                        <div style="font-weight: 700; color: #1a2b22; font-size: 15px;">Pay at Claim</div>
+                        <div style="font-size: 12px; color: #888; margin-top: 2px;">Pay in cash at the Barangay Hall when claiming</div>
+                    </div>
+                    <i class="fas fa-chevron-right" style="color: #ccc;"></i>
                 </div>
             </div>
-            
-            <div id="paymentModalDetails" style="margin: 15px 0; padding: 12px; border-radius: 8px; background: #e3f2fd; border-left: 4px solid #0066B3;">
-                <span style="font-size: 13px; color: #555;"><i class="fas fa-info-circle"></i> You will be redirected to complete payment via GCash or Maya.</span>
-            </div>
-            
+
             <div class="payment-modal-actions">
                 <button class="btn-cancel-payment" onclick="closePaymentModal()">
                     <i class="fas fa-arrow-left"></i> Go Back
                 </button>
-                <button class="btn-pay" id="paymentModalPayBtn" onclick="processPaymentModal()">
-                    <i class="fas fa-check-circle"></i> Pay Now
+                <button class="btn-pay" id="paymentModalPayBtn" onclick="processPaymentModal()" disabled style="opacity:.5; cursor:not-allowed;">
+                    <i class="fas fa-check-circle"></i> Continue
                 </button>
             </div>
         </div>
     `;
-    
+
     document.body.appendChild(overlay);
+    DocumentModule.wizardData.paymentMethod = null;
+    DocumentModule.wizardData.paymentChannel = null;
+}
+
+function toggleOnlineMethods() {
+    const sub = document.getElementById('pmOnlineSub');
+    const chev = document.getElementById('pmOnlineChevron');
+    const isOpen = sub.style.display !== 'none';
+    sub.style.display = isOpen ? 'none' : 'block';
+    chev.style.transform = isOpen ? 'rotate(0)' : 'rotate(180deg)';
+    document.getElementById('pmCardOnline').style.borderColor = isOpen ? '#e2efe8' : '#0066B3';
+    if (!isOpen) document.getElementById('pmCardClaim').style.borderColor = '#e2efe8';
+}
+
+function selectSubMethod(method) {
+    document.querySelectorAll('.pm-sub-option').forEach(el => {
+        el.style.borderColor = '#e2efe8';
+        el.style.background = '#fff';
+    });
+    const selected = document.querySelector(`.pm-sub-option[data-method="${method}"]`);
+    if (selected) {
+        selected.style.borderColor = '#0066B3';
+        selected.style.background = '#e3f2fd';
+    }
+
     DocumentModule.wizardData.paymentMethod = 'online';
+    DocumentModule.wizardData.paymentChannel = method;
+
+    const btn = document.getElementById('paymentModalPayBtn');
+    btn.disabled = false;
+    btn.style.opacity = '1';
+    btn.style.cursor = 'pointer';
+    document.getElementById('pmCardClaim').style.borderColor = '#e2efe8';
+}
+
+function selectPayAtClaim() {
+    DocumentModule.wizardData.paymentMethod = 'pay_at_claim';
+    DocumentModule.wizardData.paymentChannel = null;
+
+    document.querySelectorAll('.pm-sub-option').forEach(el => {
+        el.style.borderColor = '#e2efe8';
+        el.style.background = '#fff';
+    });
+    document.getElementById('pmCardOnline').style.borderColor = '#e2efe8';
+    document.getElementById('pmCardClaim').style.borderColor = '#ff9800';
+
+    const btn = document.getElementById('paymentModalPayBtn');
+    btn.disabled = false;
+    btn.style.opacity = '1';
+    btn.style.cursor = 'pointer';
+
+    setTimeout(processPaymentModal, 250);
 }
 
 function closePaymentModal() {
+    stopPaymentPolling();
     const overlay = document.getElementById('paymentModalOverlay');
-    if (overlay) {
-        overlay.remove();
-    }
-    // Go back to step 1 so user can edit
+    if (overlay) overlay.remove();
     goToWizardStep(1);
-}
-
-function selectPaymentMethodModal(method) {
-    document.querySelectorAll('.payment-method-option').forEach(el => {
-        el.style.borderColor = '#eef2ef';
-        el.style.background = 'white';
-    });
-    const selectedEl = document.querySelector(`.payment-method-option[onclick*="selectPaymentMethodModal('${method}')"]`);
-    if (selectedEl) {
-        selectedEl.style.borderColor = '#2e7d32';
-        selectedEl.style.background = '#e8f5e9';
-    }
-    DocumentModule.wizardData.paymentMethod = method;
-    
-    const details = document.getElementById('paymentModalDetails');
-    if (details) {
-        if (method === 'online') {
-            details.style.background = '#e3f2fd';
-            details.style.borderLeftColor = '#0066B3';
-            details.innerHTML = `<span style="font-size:13px; color:#555;"><i class="fas fa-info-circle"></i> You will be redirected to complete payment via GCash or Maya.</span>`;
-        } else {
-            details.style.background = '#fff3e0';
-            details.style.borderLeftColor = '#ff9800';
-            details.innerHTML = `<span style="font-size:13px; color:#555;"><i class="fas fa-info-circle"></i> You will pay when you claim the document at Barangay Hall. Please bring exact amount.</span>`;
-        }
-    }
-}
+}   
 
 function processPaymentModal() {
     const payBtn = document.getElementById('paymentModalPayBtn');
@@ -2320,16 +2387,430 @@ function processPaymentModal() {
         payBtn.disabled = true;
         payBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Processing...';
     }
-    
-    // Close payment modal
+
     const overlay = document.getElementById('paymentModalOverlay');
-    if (overlay) {
-        overlay.remove();
+    if (overlay) overlay.remove();
+
+    if (DocumentModule.wizardData.paymentMethod === 'pay_at_claim') {
+        showLoading('Submitting your request');
+        executeSubmitRequest();
+    } else if (DocumentModule.wizardData.paymentMethod === 'online') {
+        // No tab is opened here. The waiting page is shown first and the
+        // resident opens the payment page themselves with the button.
+        closePaymentTab();
+        executeSubmitRequestWithPayment();
     }
-    
-    // Submit the request
-    executeSubmitRequest();
 }
+
+async function executeSubmitRequestWithPayment() {
+    try {
+        showLoading('Preparing payment...');
+        // STEP 1: Save draft to session (NOT to the database)
+        const draftFormData = new FormData();
+        draftFormData.append('action', 'save_draft_request');
+        draftFormData.append('document_type', DocumentModule.wizardData.selectedDoc?.name || '');
+        draftFormData.append('document_id', DocumentModule.wizardData.selectedDoc?.id || 0);
+        draftFormData.append('fee_type', DocumentModule.wizardData.residentType || 'regular');
+        draftFormData.append('fee', DocumentModule.wizardData.paymentAmount);
+        draftFormData.append('quantity', parseInt(document.getElementById('wizardQuantity')?.value || 1));
+        draftFormData.append('notes', document.getElementById('wizardNotes')?.value || '');
+        draftFormData.append('payment_method', 'online');
+        draftFormData.append('payment_channel', DocumentModule.wizardData.paymentChannel);
+        draftFormData.append('purpose', `Request for ${DocumentModule.wizardData.selectedDoc?.name || 'Document'}`);
+        draftFormData.append('pickup_date', document.getElementById('wizardPickupDate')?.value || '');
+        draftFormData.append('pickup_time', document.getElementById('wizardPickupTime')?.value || '');
+
+        document.querySelectorAll('#dynamicFieldsContainer input, #dynamicFieldsContainer select, #dynamicFieldsContainer textarea').forEach(field => {
+            if (field.name && field.type !== 'hidden') draftFormData.append(field.name, field.value);
+        });
+        document.querySelectorAll('#dynamicFieldsContainer input[type="hidden"][id*="children-data-"]').forEach(field => {
+            if (field.name) draftFormData.append(field.name, field.value);
+        });
+
+        const draftResp = await fetch('ajax_handler.php', { method: 'POST', body: draftFormData });
+        const draftData = await draftResp.json();
+
+        if (!draftData.success) {
+            hideLoading();
+            closePaymentTab();
+            showWizardError(draftData.message || 'Failed to prepare request.');
+            return;
+        }
+
+        // STEP 2: Create the Xendit payment (server reads from session draft)
+        showLoading('Preparing payment...');
+
+        const payFormData = new FormData();
+        payFormData.append('action', 'create_xendit_checkout');
+        payFormData.append('channel', DocumentModule.wizardData.paymentChannel);
+
+        const payResp = await fetch('ajax_handler.php', { method: 'POST', body: payFormData });
+        const payData = await payResp.json();
+
+        hideLoading();
+
+        if (!payData.success) {
+            closePaymentTab();
+            showWizardError(payData.message || 'Failed to create payment.');
+            return;
+        }
+
+        // GCash / Maya: keep the redirect URL; the resident opens it with the
+        // button on the waiting page (see openPaymentPage).
+        DocumentModule.paymentRedirectUrl = payData.redirect_url || null;
+
+        showPaymentQRPage(payData.draft_token, payData);
+
+    } catch (error) {
+        hideLoading();
+        closePaymentTab();
+        console.error('Error:', error);
+        showWizardError('Error: ' + error.message);
+    }
+}
+
+
+async function saveDraftRequest() {
+    // Helper used by executeSubmitRequestWithPayment — already inlined there.
+    // Kept for external callers.
+}
+
+// ============ QR PAGE ============
+
+let __paymentPollInterval = null;
+let __qrCountdownInterval = null;
+
+function showPaymentQRPage(draftToken, paymentData) {
+    const channelLabels = {
+        'GCASH': { name: 'GCash', color: '#0070E0', icon: 'fa-wallet' },
+        'PAYMAYA': { name: 'Maya', color: '#00A86B', icon: 'fa-wallet' },
+        'QRPH': { name: 'QR Ph', color: '#1565c0', icon: 'fa-qrcode' },
+        'BANK_TRANSFER': { name: 'Bank Transfer', color: '#f57c00', icon: 'fa-university' }
+    };
+    const ch = channelLabels[paymentData.channel] || channelLabels['QRPH'];
+    const requestId = draftToken; // keep local var name for template below
+
+    const container = createPaymentWaitModal();
+    container.innerHTML = `
+        <div style="max-width: 440px; margin: 0 auto; background: #fff; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 30px rgba(0,0,0,.08);">
+            <div style="background: linear-gradient(135deg, ${ch.color}, ${ch.color}dd); padding: 16px 20px; text-align: center; color: #fff;">
+                <div style="font-size: 11px; opacity: .85; letter-spacing: .5px;">PAYMENT VIA</div>
+                <div style="font-size: 20px; font-weight: 800; margin-top: 4px;">
+                    <i class="fas ${ch.icon}"></i> ${ch.name}
+                </div>
+            </div>
+
+            <div style="padding: 18px 20px 8px; text-align: center; border-bottom: 1px solid #eef2ef;">
+                <div style="font-size: 11px; color: #888; text-transform: uppercase; letter-spacing: .5px;">Amount to Pay</div>
+                <div style="font-size: 32px; font-weight: 800; color: #1a2b22; margin-top: 4px;">₱${parseFloat(paymentData.amount).toFixed(2)}</div>
+                <div style="font-size: 11px; color: #999; margin-top: 4px;">Ref: #${requestId}</div>
+            </div>
+
+            <div style="padding: 24px 20px; text-align: center;">
+                ${paymentData.qr_code_url && !paymentData.redirect_url ? `
+                    <div style="display: inline-block; padding: 16px; background: #fff; border: 2px solid #eef2ef; border-radius: 14px;">
+                        <img src="${paymentData.qr_code_url}" alt="Payment QR" style="width: 240px; height: 240px; display: block;">
+                    </div>
+                    <div style="font-size: 12px; color: #666; margin-top: 14px; line-height: 1.5;">
+                        <i class="fas fa-mobile-alt"></i> Open your <strong>${ch.name}</strong> app and scan this QR
+                    </div>
+                ` : `
+                    <div style="padding: 30px 10px;">
+                        <i class="fas fa-external-link-alt" style="font-size: 40px; color: ${ch.color}; margin-bottom: 14px; display: block;"></i>
+                        <div style="font-size: 13px; color: #555; margin-bottom: 14px; line-height: 1.5;">
+                            Click the button below to open the ${ch.name} payment page and complete your payment there.<br>
+                            This page will update automatically.
+                        </div>
+                        <button type="button" onclick="openPaymentPage()" style="display: inline-block; padding: 10px 20px; background: ${ch.color}; color: #fff; border: none; cursor: pointer; border-radius: 10px; font-weight: 700; font-size: 13px;">
+                            Open ${ch.name} payment page
+                        </button>
+                    </div>
+                `}
+            </div>
+
+            <div style="padding: 0 20px 16px;">
+                <div style="background: #f8faf9; border-radius: 12px; padding: 14px 16px; font-size: 12px; color: #555; line-height: 1.7;">
+                    <div style="font-weight: 700; color: #1a2b22; margin-bottom: 6px;">
+                        <i class="fas fa-info-circle"></i> How to pay
+                    </div>
+                    ${paymentData.qr_code_url && !paymentData.redirect_url ? `
+                    <div>1. Open your <strong>${ch.name}</strong> app</div>
+                    <div>2. Tap "Scan QR" or "Pay via QR"</div>
+                    <div>3. Scan the QR code above</div>
+                    <div>4. Confirm the amount and pay</div>
+                    ` : `
+                    <div>1. Click <strong>Open ${ch.name} payment page</strong></div>
+                    <div>2. Log in, confirm the amount and proceed to pay</div>
+                    <div>3. Come back here. This page updates by itself</div>
+                    `}
+                    <div style="margin-top: 8px; color: #2e7d32; font-weight: 600;">
+                        <i class="fas fa-sync-alt fa-spin"></i> Waiting for payment...
+                    </div>
+                </div>
+            </div>
+
+            <div style="padding: 14px 20px 20px; border-top: 1px solid #eef2ef; display: flex; justify-content: space-between; align-items: center;">
+                <div style="font-size: 11px; color: #999;">
+                    <i class="fas fa-clock"></i> Expires in <span id="qrExpiryCountdown" style="font-weight: 700; color: #c62828;">15:00</span>
+                </div>
+                <button onclick="checkPaymentNow('${requestId}')" style="background: #f0f4f9; border: none; padding: 6px 14px; border-radius: 8px; font-size: 11px; font-weight: 700; color: #555; cursor: pointer;">
+                    <i class="fas fa-redo"></i> Check Status
+                </button>
+            </div>
+
+            <div style="padding: 0 20px 18px;">
+                <div id="paymentPollWarning" style="display: none; background: #fff3e0; color: #e65100; border-radius: 10px; padding: 10px 12px; font-size: 12px; line-height: 1.5; margin-bottom: 10px;"></div>
+                <button onclick="cancelPaymentWait()" style="width: 100%; background: transparent; border: 1px solid #ddd; color: #666; padding: 9px; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer;">
+                    Cancel payment
+                </button>
+            </div>
+        </div>
+    `;
+
+    startPaymentPolling(draftToken);
+    startQRExpiryCountdown(paymentData.expires_at);
+}
+
+// Polling is driven by a state flag, NOT by DOM presence.
+// This survives any re-render of the wizard step, and only stops when:
+//   1. Payment is confirmed (paid)
+//   2. The wizard modal is closed
+//   3. The user navigates away from step 2
+let __paymentPollActive = false;
+let __paymentPollToken = null;
+let __paymentPollBusy = false;
+
+function startPaymentPolling(draftToken) {
+    // Kill any previous run
+    __paymentPollActive = false;
+    if (__paymentPollInterval) {
+        clearInterval(__paymentPollInterval);
+        __paymentPollInterval = null;
+    }
+
+    __paymentPollActive = true;
+    __paymentPollToken = draftToken;
+
+    __paymentPollInterval = setInterval(async () => {
+        // Self-terminate if state says stop
+        if (!__paymentPollActive || __paymentPollToken !== draftToken) {
+            clearInterval(__paymentPollInterval);
+            __paymentPollInterval = null;
+            return;
+        }
+
+        if (__paymentPollBusy) return;   // previous check still running
+        __paymentPollBusy = true;
+
+        try {
+            const resp = await fetch(
+                `ajax_handler.php?action=check_payment_status&draft_token=${encodeURIComponent(draftToken)}`
+            );
+            const data = await resp.json();
+
+            if (data.success && data.payment_status === 'paid') {
+                __paymentPollActive = false;
+                clearInterval(__paymentPollInterval);
+                __paymentPollInterval = null;
+                if (__qrCountdownInterval) {
+                    clearInterval(__qrCountdownInterval);
+                    __qrCountdownInterval = null;
+                }
+                showPaymentSuccess(data.request_id, data);
+            } else if (data.success && ['failed', 'cancelled', 'expired'].includes(data.payment_status)) {
+                handlePaymentFailed(data.payment_status);
+            } else if (data.success === false) {
+                console.warn('Payment status check:', data.message);
+                showPaymentProblem(data.message);
+            }
+        } catch (e) {
+            console.warn('Poll error:', e);
+        } finally {
+            __paymentPollBusy = false;
+        }
+    }, 3000);
+}
+
+function stopPaymentPolling() {
+    __paymentPollActive = false;
+    __paymentPollToken = null;
+
+    if (__paymentPollInterval) {
+        clearInterval(__paymentPollInterval);
+        __paymentPollInterval = null;
+    }
+    if (__qrCountdownInterval) {
+        clearInterval(__qrCountdownInterval);
+        __qrCountdownInterval = null;
+    }
+}
+
+async function checkPaymentNow(draftToken) {
+    try {
+        const resp = await fetch(
+            `ajax_handler.php?action=check_payment_status&draft_token=${encodeURIComponent(draftToken)}`
+        );
+        const data = await resp.json();
+        if (data.success && data.payment_status === 'paid') {
+            stopPaymentPolling();
+            showPaymentSuccess(data.request_id, data);
+        } else {
+            Swal.fire({
+                icon: 'info',
+                title: 'Not Yet Paid',
+                text: 'We have not received your payment yet. Please complete it and try again.',
+                confirmButtonColor: '#2e7d32',
+                timer: 3000
+            });
+        }
+    } catch (e) {
+        showErrorModal('Could not check payment status.');
+    }
+}
+function showPaymentSuccess(requestId, data) {
+    __paymentPollActive = false;
+    if (__qrCountdownInterval) clearInterval(__qrCountdownInterval);
+    if (__paymentPollInterval) clearInterval(__paymentPollInterval);
+
+    closePaymentTab();
+    closePaymentWaitModal();
+
+    const container = createReceiptModal();
+
+    const docName = data.document_type || DocumentModule.wizardData.selectedDoc?.name || 'Document';
+    const quantity = document.getElementById('wizardQuantity')?.value || 1;
+    const residentType = DocumentModule.wizardData.residentType || 'regular';
+    const residentTypeDisplay = residentType === 'senior' ? 'Senior Citizen'
+                              : residentType === 'student' ? 'Student'
+                              : 'Regular';
+    const amount = '₱' + parseFloat(data.amount || DocumentModule.wizardData.paymentAmount || 0).toFixed(2);
+    const dateToday = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+    const timeNow = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+
+    // Build QR image HTML (same as showWizardSuccess)
+    let qrImageHtml = '';
+    if (data.qr_code_path) {
+        const fullQrPath = '../' + data.qr_code_path;
+        qrImageHtml = `
+            <div style="text-align: center; padding: 20px 0 15px 0; border-bottom: 1px solid #eef2ef;">
+                <img src="${fullQrPath}" alt="QR Code"
+                     style="width: 160px; height: 160px; border-radius: 12px; border: 2px solid #e8f5e9; padding: 8px; background: white;">
+                <div style="font-size: 10px; color: #999; margin-top: 6px;">
+                    <i class="fas fa-qrcode"></i> Scan to verify
+                </div>
+            </div>
+        `;
+    }
+
+    container.innerHTML = `
+        <div id="receiptContainer" style="max-width: 400px; margin: 0 auto; background: white; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 30px rgba(0,0,0,0.08);">
+
+            <!-- Receipt Header -->
+            <div style="background: linear-gradient(135deg, #1a472a, #2e7d32); padding: 14px 20px; text-align: center; color: white;">
+                <div style="font-size: 18px; font-weight: 700; letter-spacing: 1px;">🏛️ BRITE</div>
+                <div style="font-size: 10px; opacity: 0.85;">Barangay San Bartolome • Sto Tomas, Pampanga</div>
+                <div style="font-size: 11px; margin-top: 4px; background: rgba(255,255,255,0.15); padding: 3px 14px; border-radius: 12px; display: inline-block; font-weight: 600;">
+                    ✅ PAID & APPROVED
+                </div>
+            </div>
+
+            <!-- QR Code Section -->
+            ${qrImageHtml}
+
+            <!-- Info Section -->
+            <div style="padding: 16px 20px 12px;">
+                <div style="background: #f8faf9; border-radius: 10px; padding: 12px 16px;">
+                    <div style="display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid #eef2ef;">
+                        <span style="color: #888; font-size: 12px;">Document</span>
+                        <span style="color: #1a472a; font-weight: 600; font-size: 13px;">${escapeHtml(docName)}</span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid #eef2ef;">
+                        <span style="color: #888; font-size: 12px;">Quantity</span>
+                        <span style="color: #333; font-weight: 600; font-size: 13px;">${quantity} copy(s)</span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid #eef2ef;">
+                        <span style="color: #888; font-size: 12px;">Type</span>
+                        <span style="color: #333; font-weight: 600; font-size: 13px;">${residentTypeDisplay}</span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; padding: 5px 0;">
+                        <span style="color: #888; font-size: 12px;">Amount Paid</span>
+                        <span style="color: #2e7d32; font-weight: 700; font-size: 15px;">${amount}</span>
+                    </div>
+                </div>
+
+                <!-- Footer Info -->
+                <div style="display: flex; justify-content: space-between; font-size: 9px; color: #bbb; padding: 8px 4px 0;">
+                    <span>Ref: #${requestId}</span>
+                    <span>${dateToday} ${timeNow}</span>
+                </div>
+            </div>
+
+            <!-- Buttons -->
+            <div style="padding: 0 20px 20px; display: flex; gap: 10px; flex-direction: column;">
+                <button onclick="downloadReceipt()" style="background: linear-gradient(135deg, #1976d2, #1565c0); color: white; border: none; padding: 10px; border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 14px; width: 100%;">
+                    <i class="fas fa-download"></i> Download Receipt
+                </button>
+                <button onclick="closeWizardSuccess()" style="background: linear-gradient(135deg, #1a472a, #2e7d32); color: white; border: none; padding: 10px; border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 14px; width: 100%;">
+                    <i class="fas fa-check-circle"></i> Done
+                </button>
+            </div>
+        </div>
+    `;
+
+    hideWizardBehindReceipt();
+
+    const nav = document.querySelector('.wizard-nav');
+    if (nav) nav.style.display = 'none';
+
+    setTimeout(() => {
+        if (typeof loadDashboard === 'function') loadDashboard();
+    }, 2000);
+}
+
+function startQRExpiryCountdown(expiresAtIso) {
+    if (__qrCountdownInterval) clearInterval(__qrCountdownInterval);
+
+    const expiresAt = new Date(expiresAtIso).getTime();
+
+    const update = () => {
+        const el = document.getElementById('qrExpiryCountdown');
+        if (!el) {
+            // Countdown element gone — stop the countdown only.
+            // Do NOT stop the payment poll — the poll is independent.
+            clearInterval(__qrCountdownInterval);
+            __qrCountdownInterval = null;
+            return;
+        }
+
+        const diff = expiresAt - Date.now();
+        if (diff <= 0) {
+            el.textContent = 'Expired';
+            el.style.color = '#999';
+            clearInterval(__qrCountdownInterval);
+            __qrCountdownInterval = null;
+            // Note: we still let the poll run — the payment may still be
+            // processing, and the server will reject the late success anyway.
+            return;
+        }
+        const m = Math.floor(diff / 60000);
+        const s = Math.floor((diff % 60000) / 1000);
+        el.textContent = `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+    };
+    update();
+    __qrCountdownInterval = setInterval(update, 1000);
+}
+// Export new functions
+window.toggleOnlineMethods = toggleOnlineMethods;
+window.selectSubMethod = selectSubMethod;
+window.selectPayAtClaim = selectPayAtClaim;
+window.executeSubmitRequestWithPayment = executeSubmitRequestWithPayment;
+window.showPaymentQRPage = showPaymentQRPage;
+window.saveDraftRequest = saveDraftRequest;
+window.startPaymentPolling = startPaymentPolling;
+window.checkPaymentNow = checkPaymentNow;
+window.showPaymentSuccess = showPaymentSuccess;
+window.startQRExpiryCountdown = startQRExpiryCountdown;
+window.stopPaymentPolling = stopPaymentPolling;
 
 async function executeSubmitRequest() {
     const submitBtn = document.getElementById('wizardSubmitBtn');
@@ -2375,6 +2856,7 @@ async function executeSubmitRequest() {
         const data = await response.json();
         
         if (data.success) {
+            hideLoading();
             // Show success with QR code
             showWizardSuccess(data);
             
@@ -2383,6 +2865,7 @@ async function executeSubmitRequest() {
             // No automatic redirect/close
             
         } else {
+            hideLoading();
             showWizardError(data.message || 'Failed to submit request.');
             if (submitBtn) {
                 submitBtn.disabled = false;
@@ -2390,6 +2873,7 @@ async function executeSubmitRequest() {
             }
         }
     } catch (error) {
+        hideLoading();
         console.error('Error submitting request:', error);
         showWizardError('Error submitting request. Please try again.');
         if (submitBtn) {
@@ -2400,8 +2884,7 @@ async function executeSubmitRequest() {
 }
 
 function showWizardSuccess(data) {
-    const container = document.getElementById('confirmationDisplay');
-    if (!container) return;
+    const container = createReceiptModal();
     
     const isFree = DocumentModule.wizardData.isFree || DocumentModule.wizardData.paymentAmount === 0;
     const autoApproved = data.auto_approved || isFree;
@@ -2491,6 +2974,8 @@ function showWizardSuccess(data) {
         </div>
     `;
     
+    hideWizardBehindReceipt();
+
     // Hide navigation buttons
     const submitBtn = document.getElementById('wizardSubmitBtn');
     if (submitBtn) submitBtn.style.display = 'none';
@@ -2500,7 +2985,9 @@ function showWizardSuccess(data) {
 
 // ============ CLOSE WIZARD SUCCESS ============
 function closeWizardSuccess() {
-    // Close the modal first
+    closeReceiptModal();
+
+    // Close the wizard (resets the form)
     closeRequestModal();
     
     // Reset wizard state for next request
@@ -3020,16 +3507,29 @@ function renderDocuments(documents) {
 }
 
 function closeRequestModal() {
-    document.getElementById('requestModal').style.display = 'none';
-    document.getElementById('documentRequestForm')?.reset();
-    document.getElementById('dynamicFieldsContainer').innerHTML = '';
-    
+    // Kill any in-flight payment poll
+    stopPaymentPolling();
+
+    const modal = document.getElementById('requestModal');
+    if (modal) modal.style.display = 'none';
+
+    const form = document.getElementById('documentRequestForm');
+    if (form) form.reset();
+
+    const dyn = document.getElementById('dynamicFieldsContainer');
+    if (dyn) dyn.innerHTML = '';
+
     DocumentModule.currentEditRequestId = null;
+
     const editInput = document.querySelector('input[name="edit_request_id"]');
     if (editInput) editInput.remove();
+
     const actionInput = document.querySelector('input[name="action"]');
     if (actionInput) actionInput.value = 'submit_request';
-    document.getElementById('id_document').required = true;
+
+    const idDoc = document.getElementById('id_document');
+    if (idDoc) idDoc.required = true;
+
     const submitBtn = document.querySelector('#documentRequestForm button[type="submit"]');
     if (submitBtn) submitBtn.innerHTML = '<i class="fas fa-paper-plane"></i> Submit Request';
 }
@@ -3112,7 +3612,6 @@ function renderHistory(requests) {
                         </label>
                        <select id="statusFilterSelect" style="width: 100%; padding: 10px 15px; border: 1px solid #ddd; border-radius: 8px; font-size: 14px;">
     <option value="all" selected>All Requests</option>
-    <option value="pending">Pending</option>
     <option value="approved">Approved</option>
     <option value="unclaimed">Unclaimed</option>
     <option value="claimed">Claimed</option>
@@ -3137,7 +3636,6 @@ function renderHistory(requests) {
             
             <div class="filter-buttons" style="margin-bottom: 20px;">
     <button class="filter-btn active" onclick="filterRequests('all')">All Requests</button>
-    <button class="filter-btn" onclick="filterRequests('pending')">Pending</button>
     <button class="filter-btn" onclick="filterRequests('approved')">Approved</button>
     <button class="filter-btn" onclick="filterRequests('unclaimed')">Unclaimed</button>
     <button class="filter-btn" onclick="filterRequests('claimed')">Claimed</button>
@@ -3275,11 +3773,11 @@ function generateRequestCardHtml(request) {
     
     let statusClass = '', statusIcon = '';
     switch(displayStatus) {
-        case 'pending':   statusClass = 'status-pending';   statusIcon = '<i class="fas fa-clock"></i> ';          break;
         case 'approved':  statusClass = 'status-approved';  statusIcon = '<i class="fas fa-check-circle"></i> ';   break;
         case 'rejected':  statusClass = 'status-rejected';  statusIcon = '<i class="fas fa-times-circle"></i> ';   break;
         case 'unclaimed': statusClass = 'status-unclaimed'; statusIcon = '<i class="fas fa-inbox"></i> ';          break;
         case 'claimed':   statusClass = 'status-claimed';   statusIcon = '<i class="fas fa-check-double"></i> ';   break;
+        default:          statusClass = 'status-approved';  statusIcon = '<i class="fas fa-check-circle"></i> ';   break;
     }
     
     const feeDisplay = request.fee == 0 ? '<span style="color:#ff9800; font-weight:bold;">FREE</span>' : `₱${request.fee.toFixed(2)}`;
@@ -3338,10 +3836,9 @@ function generateRequestCardHtml(request) {
         requestorName = request.custom_data['full name'];
     }
     
-    const canEdit = request.status === 'pending';
-    const cancelButton = canEdit ? `<button class="cancel-request-btn" data-id="${request.id}" onclick="showCancelConfirm(${request.id}, event)"><i class="fas fa-trash"></i> Cancel Request</button>` : '';
-    const editButton = canEdit ? `<button class="edit-request-btn" data-id="${request.id}" onclick="editRequest(${request.id}, event)"><i class="fas fa-edit"></i> Edit Request</button>` : '';
-    
+    const canEdit = false;
+    const cancelButton = '';
+    const editButton = '';   
     // Claim button removed - no manual claim
     
     const hasUnreadNotes = DocumentModule.currentUnreadNotes[request.id] === true;
@@ -4253,7 +4750,6 @@ async function loadDashboard() {
 
 function renderDashboard(stats) {
     const totalRequests = stats.total || 0;
-    const pendingRequests = stats.pending || 0;
     const approvedRequests = stats.approved || 0;   // only currently approved (not claimed)
     const rejectedRequests = stats.rejected || 0;
     const unclaimedRequests = stats.unclaimed || 0;
@@ -4315,11 +4811,11 @@ function renderDashboard(stats) {
                     
                     <div class="stat-card-modern">
                         <div class="stat-header">
-                            <span class="stat-label">Pending Documents</span>
-                            <div class="stat-icon-box stat-icon-orange"><i class="fas fa-clock"></i></div>
+                            <span class="stat-label">Awaiting Pickup</span>
+                            <div class="stat-icon-box stat-icon-orange"><i class="fas fa-inbox"></i></div>
                         </div>
-                        <div class="stat-number">${pendingRequests}</div>
-                        <div class="stat-change negative"><i class="fas fa-clock"></i> Awaiting approval</div>
+                        <div class="stat-number">${unclaimedRequests}</div>
+                        <div class="stat-change negative"><i class="fas fa-clock"></i> Not yet claimed</div>
                     </div>
                     
                     <div class="stat-card-modern">
@@ -4460,12 +4956,10 @@ function renderDashboard(stats) {
     <circle cx="50" cy="50" r="40" fill="none" stroke="#6c757d" stroke-width="12"
             stroke-dasharray="${totalDocuments > 0 ? (claimedRequests / totalDocuments) * 251.2 : 0} 251.2"
             stroke-dashoffset="${totalDocuments > 0 ? -(((approvedRequests + unclaimedRequests) / totalDocuments) * 251.2) : 0}" class="donut-segment"/>
-    <circle cx="50" cy="50" r="40" fill="none" stroke="#1565c0" stroke-width="12"
-            stroke-dasharray="${totalDocuments > 0 ? (pendingRequests / totalDocuments) * 251.2 : 0} 251.2"
-            stroke-dashoffset="${totalDocuments > 0 ? -(((approvedRequests + unclaimedRequests + claimedRequests) / totalDocuments) * 251.2) : 0}" class="donut-segment"/>
+
     <circle cx="50" cy="50" r="40" fill="none" stroke="#d32f2f" stroke-width="12"
             stroke-dasharray="${totalDocuments > 0 ? (rejectedRequests / totalDocuments) * 251.2 : 0} 251.2"
-            stroke-dashoffset="${totalDocuments > 0 ? -(((approvedRequests + unclaimedRequests + claimedRequests + pendingRequests) / totalDocuments) * 251.2) : 0}" class="donut-segment"/>
+    stroke-dashoffset="${totalDocuments > 0 ? -(((approvedRequests + unclaimedRequests + claimedRequests) / totalDocuments) * 251.2) : 0}" class="donut-segment"/>
 </svg>
                             </div>
                             <div class="donut-legend">
@@ -4481,10 +4975,7 @@ function renderDashboard(stats) {
         <span><span class="color-dot" style="background:#6c757d;"></span> Claimed</span>
         <span class="percent">${claimedRequests} (${totalDocuments > 0 ? Math.round((claimedRequests / totalDocuments) * 100) : 0}%)</span>
     </div>
-    <div class="donut-legend-item">
-        <span><span class="color-dot" style="background:#1565c0;"></span> Pending</span>
-        <span class="percent">${pendingRequests} (${totalDocuments > 0 ? Math.round((pendingRequests / totalDocuments) * 100) : 0}%)</span>
-    </div>
+
     <div class="donut-legend-item">
         <span><span class="color-dot" style="background:#d32f2f;"></span> Rejected</span>
         <span class="percent">${rejectedRequests} (${totalDocuments > 0 ? Math.round((rejectedRequests / totalDocuments) * 100) : 0}%)</span>
@@ -4523,7 +5014,7 @@ function renderDashboard(stats) {
                             </div>
                             <div class="quick-stat">
                                 <i class="fas fa-clock"></i>
-                                <span>${pendingRequests + equipmentPending} Pending</span>
+                                <span>${equipmentPending} Pending</span>
                             </div>
                         </div>
                     </div>
@@ -4899,10 +5390,201 @@ document.addEventListener('click', function(e) {
     }
 });
 
+// ============ RECEIPT MODAL (separate from the wizard) ============
+
+// Creates a standalone modal on top of the page and returns the element the
+// receipt HTML should be written into. Used for every successful request:
+// online payment, pay at claim, and free documents.
+function createReceiptModal() {
+    closeReceiptModal();
+
+    const overlay = document.createElement('div');
+    overlay.id = 'receiptModalOverlay';
+    overlay.style.cssText =
+        'position:fixed;inset:0;background:rgba(0,0,0,.6);backdrop-filter:blur(4px);' +
+        'z-index:10001;display:flex;align-items:center;justify-content:center;' +
+        'padding:16px;overflow-y:auto;';
+
+    const body = document.createElement('div');
+    body.id = 'receiptModalBody';
+    body.style.cssText = 'width:100%;max-width:440px;max-height:96vh;overflow-y:auto;border-radius:16px;';
+
+    overlay.appendChild(body);
+    document.body.appendChild(overlay);
+    return body;
+}
+
+function closeReceiptModal() {
+    const overlay = document.getElementById('receiptModalOverlay');
+    if (overlay) overlay.remove();
+}
+
+// Hide (not reset) the wizard so the receipt shows alone.
+// The form is reset later, when the person clicks Done.
+function hideWizardBehindReceipt() {
+    const wizard = document.getElementById('requestModal');
+    if (wizard) wizard.style.display = 'none';
+}
+
+window.createReceiptModal = createReceiptModal;
+window.closeReceiptModal = closeReceiptModal;
+
+// ============ PAYMENT TAB + FAILURE HANDLING ============
+
+// Close the payment tab we opened. close() is allowed even after the tab
+// navigated to GCash/Maya, so this works from the original tab.
+function closePaymentTab() {
+    try {
+        if (DocumentModule.paymentTab && !DocumentModule.paymentTab.closed) {
+            DocumentModule.paymentTab.close();
+        }
+    } catch (e) { /* ignore */ }
+    DocumentModule.paymentTab = null;
+}
+
+// Opens the GCash / Maya payment page. Called from a button click, so the
+// popup blocker allows it, and because it is opened by script the return page
+// can close it again afterwards.
+function openPaymentPage() {
+    const url = DocumentModule.paymentRedirectUrl;
+    if (!url) return;
+    try {
+        if (DocumentModule.paymentTab && !DocumentModule.paymentTab.closed) {
+            DocumentModule.paymentTab.location.href = url;
+            DocumentModule.paymentTab.focus();
+            return;
+        }
+    } catch (e) { /* fall through and open a new tab */ }
+
+    DocumentModule.paymentTab = window.open(url, '_blank');
+    if (!DocumentModule.paymentTab) {
+        showPaymentProblem('Your browser blocked the payment page. Please allow pop-ups for this site and click the button again.');
+    }
+}
+window.openPaymentPage = openPaymentPage;
+
+// Standalone modal for the "waiting for payment" screen and the failure screen.
+function createPaymentWaitModal() {
+    closePaymentWaitModal();
+
+    const overlay = document.createElement('div');
+    overlay.id = 'paymentWaitOverlay';
+    overlay.style.cssText =
+        'position:fixed;inset:0;background:rgba(0,0,0,.6);backdrop-filter:blur(4px);' +
+        'z-index:10001;display:flex;align-items:center;justify-content:center;' +
+        'padding:16px;overflow-y:auto;';
+
+    const body = document.createElement('div');
+    body.id = 'paymentWaitBody';
+    body.style.cssText = 'width:100%;max-width:440px;max-height:96vh;overflow-y:auto;border-radius:16px;';
+
+    overlay.appendChild(body);
+    document.body.appendChild(overlay);
+    return body;
+}
+
+function closePaymentWaitModal() {
+    const overlay = document.getElementById('paymentWaitOverlay');
+    if (overlay) overlay.remove();
+}
+
+function cancelPaymentWait() {
+    stopPaymentPolling();
+    closePaymentTab();
+    closePaymentWaitModal();
+}
+
+function retryPayment() {
+    closePaymentWaitModal();
+    showPaymentModal();
+}
+
+// Shows a problem on the waiting screen (e.g. the server could not save the request).
+function showPaymentProblem(message) {
+    const el = document.getElementById('paymentPollWarning');
+    if (!el || !message) return;
+    el.textContent = message;
+    el.style.display = 'block';
+}
+
+function handlePaymentFailed(reason) {
+    stopPaymentPolling();
+    closePaymentTab();
+
+    const messages = {
+        failed: 'Payment failed. Please try again.',
+        cancelled: 'Payment was cancelled. You can try again.',
+        expired: 'The payment expired. Please start a new payment.'
+    };
+    const msg = messages[reason] || messages.failed;
+
+    const body = createPaymentWaitModal();
+    body.innerHTML = `
+        <div style="background: #fff; border-radius: 16px; padding: 32px 24px; text-align: center; box-shadow: 0 4px 30px rgba(0,0,0,.08);">
+            <div style="font-size: 52px; color: #c62828;"><i class="fas fa-times-circle"></i></div>
+            <h3 style="margin: 12px 0 6px; color: #1a2b22;">Payment Not Completed</h3>
+            <p style="color: #666; font-size: 14px; margin: 0 0 20px;">${msg}</p>
+            <button onclick="retryPayment()" style="width: 100%; background: linear-gradient(135deg, #1a472a, #2e7d32); color: #fff; border: none; padding: 11px; border-radius: 8px; font-weight: 700; font-size: 14px; cursor: pointer; margin-bottom: 10px;">
+                <i class="fas fa-redo"></i> Try Again
+            </button>
+            <button onclick="closePaymentWaitModal()" style="width: 100%; background: transparent; border: 1px solid #ddd; color: #666; padding: 9px; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer;">
+                Close
+            </button>
+        </div>
+    `;
+}
+
+// One immediate status check (used when the person comes back to this tab
+// and when the return page pings us), so we don't wait for the next 3s poll.
+async function checkPaymentSilently() {
+    if (!__paymentPollActive || !__paymentPollToken) return;
+    const token = __paymentPollToken;
+    try {
+        const resp = await fetch(
+            `ajax_handler.php?action=check_payment_status&draft_token=${encodeURIComponent(token)}`
+        );
+        const data = await resp.json();
+        if (!__paymentPollActive || __paymentPollToken !== token) return;
+
+        if (data.success && data.payment_status === 'paid') {
+            showPaymentSuccess(data.request_id, data);
+        } else if (data.success && ['failed', 'cancelled', 'expired'].includes(data.payment_status)) {
+            handlePaymentFailed(data.payment_status);
+        } else if (data.success === false) {
+            showPaymentProblem(data.message);
+        }
+    } catch (err) { /* the poll will retry */ }
+}
+
+document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') checkPaymentSilently();
+});
+window.addEventListener('focus', checkPaymentSilently);
+
+// The return page (payment_return.php) pings this tab so it reacts instantly.
+// Same-origin only; the 3-second poll is the fallback.
+try {
+    const paymentChannel = new BroadcastChannel('brite-payment');
+    paymentChannel.onmessage = (e) => {
+        if (!__paymentPollActive || !__paymentPollToken) return;
+        const status = e.data && e.data.status;
+        if (status === 'failed' || status === 'cancelled') {
+            handlePaymentFailed(status);
+        } else if (status === 'success') {
+            checkPaymentSilently();
+        }
+    };
+} catch (e) { /* BroadcastChannel not supported */ }
+
+window.createPaymentWaitModal = createPaymentWaitModal;
+window.closePaymentWaitModal = closePaymentWaitModal;
+window.cancelPaymentWait = cancelPaymentWait;
+window.retryPayment = retryPayment;
+
 // ============ EXPORT FUNCTIONS ============
 window.openDocumentWizard = openDocumentWizard;
 window.goToWizardStep = goToWizardStep;
-window.selectPaymentMethod = selectPaymentMethod;
+
 window.submitWizardRequest = submitWizardRequest;
 window.loadWizardStep1 = loadWizardStep1;
 window.loadWizardStep2 = loadWizardStep2;
@@ -4956,10 +5638,10 @@ window.formatGenderDisplay = formatGenderDisplay;
 window.formatGenderForDatabase = formatGenderForDatabase;
 window.updateTotalAmount = updateTotalAmount;
 window.closePaymentModal = closePaymentModal;
-window.selectPaymentMethodModal = selectPaymentMethodModal;
+
 window.processPaymentModal = processPaymentModal;
 // ====== ADD THESE TWO NEW FUNCTIONS ======
 window.closeWizardSuccess = closeWizardSuccess;
-window.downloadQRCodeFromData = downloadQRCodeFromData;
+
 
 console.log('✅ Document Module with 2-Step Wizard loaded successfully!');

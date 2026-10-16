@@ -1,0 +1,148 @@
+[2026-10-16 00:58:47] ===== GET /BRITE/resident/resident_equipment_ajax.php?action=get_my_bookings =====
+[16-Oct-2026 00:58:47 Asia/Manila] Action received: get_my_bookings
+[2026-10-16 00:58:47] ===== GET /BRITE/resident/resident_equipment_ajax.php?action=get_my_bookings =====
+[16-Oct-2026 00:58:47 Asia/Manila] Action received: get_my_bookings
+[2026-10-16 00:59:08] ===== GET /BRITE/resident/resident_equipment_ajax.php?action=get_all_equipment =====
+[16-Oct-2026 00:59:08 Asia/Manila] Action received: get_all_equipment
+[2026-10-16 00:59:19] ===== POST /BRITE/resident/resident_equipment_ajax.php =====
+[16-Oct-2026 00:59:19 Asia/Manila] Action received: vehicle_draft_save
+[2026-10-16 00:59:19] ===== POST /BRITE/resident/resident_equipment_ajax.php =====
+[16-Oct-2026 00:59:19 Asia/Manila] Action received: vehicle_check
+[2026-10-16 00:59:19] ===== POST /BRITE/resident/resident_equipment_ajax.php =====
+[16-Oct-2026 00:59:19 Asia/Manila] Action received: vehicle_recommend
+[2026-10-16 00:59:22] ===== POST /BRITE/resident/resident_equipment_ajax.php =====
+[16-Oct-2026 00:59:22 Asia/Manila] Action received: vehicle_commit
+[2026-10-16 00:59:22] --- vehicle_commit called ---
+[2026-10-16 00:59:22] input: {"action":"vehicle_commit","token":"afa43cd26954391efd6ec9dd5dcabcb3","vehicle_global_id":"VE000008","slot_start":"04:30","slot_end":"06:30","slot_type":"open"}
+[2026-10-16 00:59:22] commitVehicleRequestV2: start
+[2026-10-16 00:59:22] draft: {"token":"afa43cd26954391efd6ec9dd5dcabcb3","resident_id":7,"reason_code":"medical_appointment","other_reason":"","destination":"Jbl Sto Tomas","pickup_location":"Barangay Hall","date":"2026-10-16","passengers":1,"special_requests":"","created_at":1792083559,"urgency":"flexible","reason_label":"Medical appointment or hospital checkup","household_id":6}
+[2026-10-16 00:59:22] chosen: {"vehicle":{"global_id":"VE000008","name":"Van","capacity":14},"slot":{"start":"04:30","end":"06:30","type":"open"}}
+[2026-10-16 00:59:22] transaction begun
+[2026-10-16 00:59:22] vehGlobal=VE000008 slotStart=04:30 slotEnd=06:30
+[2026-10-16 00:59:22] vehicle row: {"id":8,"capacity":14,"name":"Van","status":"available"}
+[2026-10-16 00:59:22] taken=0 capacity=14 passengers=1
+[2026-10-16 00:59:22] urgency=flexible noticeHours=2 departTs=1792096200 now=1792083562
+[2026-10-16 00:59:22] autoApprove=true status=approved
+[2026-10-16 00:59:22] INSERT requests: startDT=2026-10-16 04:30:00 endDT=2026-10-16 06:30:00 tripDate=2026-10-16 householdId=6
+[2026-10-16 00:59:22] requests INSERT OK, reqId=45
+[2026-10-16 00:59:22] vehicle_requests INSERT OK
+[2026-10-16 00:59:22] transaction committed
+[2026-10-16 00:59:22] result: {"success":true,"request_id":45,"reference":"VE000008-20261016005922-275","status":"approved","auto_approved":true,"slot_start":"04:30","slot_end":"06:30","vehicle":"Van"}
+[2026-10-16 00:59:24] ===== GET /BRITE/resident/resident_equipment_ajax.php?action=get_my_bookings =====
+[16-Oct-2026 00:59:24 Asia/Manila] Action received: get_my_bookings
+[2026-10-16 00:59:36] ===== GET /BRITE/resident/resident_equipment_ajax.php?action=get_all_equipment =====
+[16-Oct-2026 00:59:36 Asia/Manila] Action received: get_all_equipment
+[2026-10-16 00:59:49] ===== POST /BRITE/resident/resident_equipment_ajax.php =====
+[16-Oct-2026 00:59:49 Asia/Manila] Action received: vehicle_draft_save
+[2026-10-16 00:59:49] ===== POST /BRITE/resident/resident_equipment_ajax.php =====
+[16-Oct-2026 00:59:49 Asia/Manila] Action received: vehicle_check
+[2026-10-16 01:00:45] ===== POST /BRITE/resident/resident_equipment_ajax.php =====
+[16-Oct-2026 01:00:45 Asia/Manila] Action received: vehicle_draft_save
+[2026-10-16 01:00:45] ===== POST /BRITE/resident/resident_equipment_ajax.php =====
+[16-Oct-2026 01:00:45 Asia/Manila] Action received: vehicle_check
+[2026-10-16 01:00:45] ===== POST /BRITE/resident/resident_equipment_ajax.php =====
+[16-Oct-2026 01:00:45 Asia/Manila] Action received: vehicle_recommend
+[2026-10-16 01:01:17] ===== POST /BRITE/resident/resident_equipment_ajax.php =====
+[16-Oct-2026 01:01:17 Asia/Manila] Action received: vehicle_commit
+[2026-10-16 01:01:17] --- vehicle_commit called ---
+[2026-10-16 01:01:17] input: {"action":"vehicle_commit","token":"6fcc97a51b2834197c32143edea317df","vehicle_global_id":"VE000008","slot_start":"04:30","slot_end":"06:30","slot_type":"open"}
+[2026-10-16 01:01:17] commitVehicleRequestV2: start
+[2026-10-16 01:01:17] draft: {"token":"6fcc97a51b2834197c32143edea317df","resident_id":7,"reason_code":"medical_appointment","other_reason":"","destination":"Jbl Sto Tomas","pickup_location":"Barangay Hall","date":"2026-10-17","passengers":1,"special_requests":"","created_at":1792083645,"urgency":"flexible","reason_label":"Medical appointment or hospital checkup","household_id":6}
+[2026-10-16 01:01:17] chosen: {"vehicle":{"global_id":"VE000008","name":"Van","capacity":14},"slot":{"start":"04:30","end":"06:30","type":"open"}}
+[2026-10-16 01:01:17] transaction begun
+[2026-10-16 01:01:17] vehGlobal=VE000008 slotStart=04:30 slotEnd=06:30
+[2026-10-16 01:01:17] vehicle row: {"id":8,"capacity":14,"name":"Van","status":"available"}
+[2026-10-16 01:01:17] taken=0 capacity=14 passengers=1
+[2026-10-16 01:01:17] urgency=flexible noticeHours=2 departTs=1792182600 now=1792083677
+[2026-10-16 01:01:17] autoApprove=true status=approved
+[2026-10-16 01:01:17] INSERT requests: startDT=2026-10-17 04:30:00 endDT=2026-10-17 06:30:00 tripDate=2026-10-17 householdId=6
+[2026-10-16 01:01:17] requests INSERT OK, reqId=46
+[2026-10-16 01:01:17] vehicle_requests INSERT OK
+[2026-10-16 01:01:17] transaction committed
+[2026-10-16 01:01:17] result: {"success":true,"request_id":46,"reference":"VE000008-20261016010117-620","status":"approved","auto_approved":true,"slot_start":"04:30","slot_end":"06:30","vehicle":"Van"}
+[2026-10-16 01:01:18] ===== GET /BRITE/resident/resident_equipment_ajax.php?action=get_my_bookings =====
+[16-Oct-2026 01:01:18 Asia/Manila] Action received: get_my_bookings
+[2026-10-16 01:02:42] ===== GET /BRITE/resident/resident_equipment_ajax.php?action=get_all_equipment =====
+[16-Oct-2026 01:02:42 Asia/Manila] Action received: get_all_equipment
+[2026-10-16 01:02:53] ===== POST /BRITE/resident/resident_equipment_ajax.php =====
+[16-Oct-2026 01:02:53 Asia/Manila] Action received: vehicle_draft_save
+[2026-10-16 01:02:53] ===== POST /BRITE/resident/resident_equipment_ajax.php =====
+[16-Oct-2026 01:02:53 Asia/Manila] Action received: vehicle_check
+[2026-10-16 01:08:39] ===== GET /BRITE/resident/resident_equipment_ajax.php?action=get_my_bookings =====
+[16-Oct-2026 01:08:39 Asia/Manila] Action received: get_my_bookings
+[2026-10-16 01:08:39] ===== GET /BRITE/resident/resident_equipment_ajax.php?action=get_my_bookings =====
+[16-Oct-2026 01:08:39 Asia/Manila] Action received: get_my_bookings
+[2026-10-16 01:08:42] ===== GET /BRITE/resident/resident_equipment_ajax.php?action=get_all_equipment =====
+[16-Oct-2026 01:08:42 Asia/Manila] Action received: get_all_equipment
+[2026-10-16 01:08:51] ===== POST /BRITE/resident/resident_equipment_ajax.php =====
+[16-Oct-2026 01:08:51 Asia/Manila] Action received: vehicle_draft_save
+[2026-10-16 01:08:52] ===== POST /BRITE/resident/resident_equipment_ajax.php =====
+[16-Oct-2026 01:08:52 Asia/Manila] Action received: vehicle_check
+[2026-10-16 01:09:04] ===== GET /BRITE/resident/resident_equipment_ajax.php?action=get_my_bookings =====
+[16-Oct-2026 01:09:04 Asia/Manila] Action received: get_my_bookings
+[2026-10-16 01:09:05] ===== GET /BRITE/resident/resident_equipment_ajax.php?action=get_all_equipment =====
+[16-Oct-2026 01:09:05 Asia/Manila] Action received: get_all_equipment
+[2026-10-16 01:09:08] ===== GET /BRITE/resident/resident_equipment_ajax.php?action=get_all_equipment =====
+[16-Oct-2026 01:09:08 Asia/Manila] Action received: get_all_equipment
+[2026-10-16 01:09:08] ===== GET /BRITE/resident/resident_equipment_ajax.php?action=get_my_bookings =====
+[16-Oct-2026 01:09:08 Asia/Manila] Action received: get_my_bookings
+[2026-10-16 01:09:28] ===== GET /BRITE/resident/resident_equipment_ajax.php?action=get_all_equipment =====
+[16-Oct-2026 01:09:28 Asia/Manila] Action received: get_all_equipment
+[2026-10-16 01:23:10] ===== GET /BRITE/resident/resident_equipment_ajax.php?action=get_my_bookings =====
+[16-Oct-2026 01:23:10 Asia/Manila] Action received: get_my_bookings
+[2026-10-16 01:23:10] ===== GET /BRITE/resident/resident_equipment_ajax.php?action=get_my_bookings =====
+[16-Oct-2026 01:23:10 Asia/Manila] Action received: get_my_bookings
+[2026-10-16 01:23:13] ===== GET /BRITE/resident/resident_equipment_ajax.php?action=get_all_equipment =====
+[16-Oct-2026 01:23:13 Asia/Manila] Action received: get_all_equipment
+[2026-10-16 01:24:44] ===== POST /BRITE/resident/resident_equipment_ajax.php =====
+[16-Oct-2026 01:24:44 Asia/Manila] Action received: vehicle_draft_save
+[2026-10-16 01:24:44] ===== POST /BRITE/resident/resident_equipment_ajax.php =====
+[16-Oct-2026 01:24:44 Asia/Manila] Action received: vehicle_check
+[2026-10-16 01:25:13] ===== GET /BRITE/resident/resident_equipment_ajax.php?action=get_my_bookings =====
+[16-Oct-2026 01:25:13 Asia/Manila] Action received: get_my_bookings
+[2026-10-16 01:25:14] ===== GET /BRITE/resident/resident_equipment_ajax.php?action=get_all_equipment =====
+[16-Oct-2026 01:25:14 Asia/Manila] Action received: get_all_equipment
+[2026-10-16 01:38:54] ===== GET /BRITE/resident/resident_equipment_ajax.php?action=get_my_bookings =====
+[16-Oct-2026 01:38:54 Asia/Manila] Action received: get_my_bookings
+[2026-10-16 01:38:54] ===== GET /BRITE/resident/resident_equipment_ajax.php?action=get_my_bookings =====
+[16-Oct-2026 01:38:54 Asia/Manila] Action received: get_my_bookings
+[2026-10-16 01:38:57] ===== GET /BRITE/resident/resident_equipment_ajax.php?action=get_my_bookings =====
+[16-Oct-2026 01:38:57 Asia/Manila] Action received: get_my_bookings
+[2026-10-16 01:39:05] ===== POST /BRITE/resident/resident_equipment_ajax.php =====
+[16-Oct-2026 01:39:05 Asia/Manila] Action received: cancel_request
+[2026-10-16 01:39:11] ===== GET /BRITE/resident/resident_equipment_ajax.php?action=get_my_bookings =====
+[16-Oct-2026 01:39:11 Asia/Manila] Action received: get_my_bookings
+[2026-10-16 01:45:13] ===== GET /BRITE/resident/resident_equipment_ajax.php?action=get_my_bookings =====
+[16-Oct-2026 01:45:13 Asia/Manila] Action received: get_my_bookings
+[2026-10-16 01:45:13] ===== GET /BRITE/resident/resident_equipment_ajax.php?action=get_my_bookings =====
+[16-Oct-2026 01:45:13 Asia/Manila] Action received: get_my_bookings
+[2026-10-16 01:45:15] ===== GET /BRITE/resident/resident_equipment_ajax.php?action=get_my_bookings =====
+[16-Oct-2026 01:45:15 Asia/Manila] Action received: get_my_bookings
+[2026-10-16 01:45:22] ===== GET /BRITE/resident/resident_equipment_ajax.php?action=get_all_equipment =====
+[16-Oct-2026 01:45:22 Asia/Manila] Action received: get_all_equipment
+[2026-10-16 01:48:59] ===== GET /BRITE/resident/resident_equipment_ajax.php?action=get_my_bookings =====
+[16-Oct-2026 01:48:59 Asia/Manila] Action received: get_my_bookings
+[2026-10-16 01:49:00] ===== GET /BRITE/resident/resident_equipment_ajax.php?action=get_my_bookings =====
+[16-Oct-2026 01:49:00 Asia/Manila] Action received: get_my_bookings
+[2026-10-16 01:49:01] ===== GET /BRITE/resident/resident_equipment_ajax.php?action=get_my_bookings =====
+[16-Oct-2026 01:49:01 Asia/Manila] Action received: get_my_bookings
+[2026-10-16 01:49:02] ===== GET /BRITE/resident/resident_equipment_ajax.php?action=get_all_equipment =====
+[16-Oct-2026 01:49:02 Asia/Manila] Action received: get_all_equipment
+[2026-10-16 01:52:57] ===== GET /BRITE/resident/resident_equipment_ajax.php?action=get_all_equipment =====
+[16-Oct-2026 01:52:57 Asia/Manila] Action received: get_all_equipment
+[2026-10-16 01:53:33] ===== GET /BRITE/resident/resident_equipment_ajax.php?action=get_my_bookings =====
+[16-Oct-2026 01:53:33 Asia/Manila] Action received: get_my_bookings
+[2026-10-16 01:53:34] ===== GET /BRITE/resident/resident_equipment_ajax.php?action=get_my_bookings =====
+[16-Oct-2026 01:53:34 Asia/Manila] Action received: get_my_bookings
+[2026-10-16 01:53:35] ===== GET /BRITE/resident/resident_equipment_ajax.php?action=get_all_equipment =====
+[16-Oct-2026 01:53:35 Asia/Manila] Action received: get_all_equipment
+[2026-10-16 01:53:44] ===== GET /BRITE/resident/resident_equipment_ajax.php?action=get_my_bookings =====
+[16-Oct-2026 01:53:44 Asia/Manila] Action received: get_my_bookings
+[2026-10-16 03:51:45] ===== GET /BRITE/resident/resident_equipment_ajax.php?action=get_my_bookings =====
+[16-Oct-2026 03:51:45 Asia/Manila] Action received: get_my_bookings
+[2026-10-16 03:51:45] ===== GET /BRITE/resident/resident_equipment_ajax.php?action=get_my_bookings =====
+[16-Oct-2026 03:51:45 Asia/Manila] Action received: get_my_bookings
+[2026-10-16 09:01:49] ===== GET /BRITE/resident/resident_equipment_ajax.php?action=get_my_bookings =====
+[16-Oct-2026 09:01:49 Asia/Manila] Action received: get_my_bookings
+[2026-10-16 09:01:49] ===== GET /BRITE/resident/resident_equipment_ajax.php?action=get_my_bookings =====
+[16-Oct-2026 09:01:49 Asia/Manila] Action received: get_my_bookings

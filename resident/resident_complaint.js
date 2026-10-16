@@ -13,10 +13,422 @@ let userInteractedWithSubject = false;
 
 // Role-aware tabs
 let currentComplaintTab = 'complainant';
-let currentStatusFilter = 'all';  // 'all' | specific status
+let currentStageFilter = 'all';   // 'all' | stage key from COMPLAINT_STAGES
 let cachedComplaints = { as_complainant: [], as_respondent: [] };
 
 let __liveTimerInterval = null;
+
+const COMPLAINT_STAGES = {
+    all: {
+        label: 'All', icon: 'fa-list', color: '#2E7D32',
+        description: 'All complaints', statuses: null,
+    },
+
+    intake: {
+        label: 'Under Review', icon: 'fa-file-alt', color: '#f57c00',
+        description: 'Filed and awaiting Captain\'s decision',
+        statuses: ['pending_review', 'pending_captain_action', 'pending_captain_review'],
+        actor: 'Secretary / Captain', forRole: 'both',
+    },
+
+    // Complainant receives a NOTICE (KP #8) — role-aware
+    notice_issued: {
+        label: 'Notice Issued', icon: 'fa-envelope', color: '#1565c0',
+        description: 'Notice of Hearing issued — schedule pending',
+        statuses: ['summoned'],
+        actor: 'Captain', forRole: 'complainant',
+    },
+
+    // Respondent receives a SUMMONS (KP #9) — role-aware
+    summoned: {
+        label: 'Summoned', icon: 'fa-envelope-open-text', color: '#1565c0',
+        description: 'Summons issued by Captain — you must appear',
+        statuses: ['summoned'],
+        actor: 'Captain', forRole: 'respondent',
+    },
+
+    mediation: {
+        label: 'Mediation', icon: 'fa-handshake', color: '#6a1b9a',
+        description: 'Lupon mediation in progress',
+        // in_mediation included here — it's the same phase
+        statuses: ['for_mediation', 'mediation_scheduled', 'in_mediation'],
+        actor: 'Captain / Lupon', forRole: 'both',
+    },
+
+    pangkat_constitution: {
+        label: 'Pangkat Forming', icon: 'fa-users-cog', color: '#4a148c',
+        description: 'Captain is constituting the Pangkat ng Tagapagkasundo',
+        statuses: ['pangkat_constitution_scheduled', 'pangkat_constituted'],
+        actor: 'Captain', forRole: 'both',
+    },
+
+    pangkat_conciliation: {
+        label: 'Pangkat Hearing', icon: 'fa-gavel', color: '#00838f',
+        description: 'Pangkat ng Tagapagkasundo is hearing the case',
+        statuses: ['pangkat_scheduled'],
+        actor: 'Pangkat', forRole: 'both',
+    },
+
+        // ── 10-day repudiation window on a signed settlement ──
+    settled_pending: {
+        label: 'Settlement Pending', icon: 'fa-hourglass-half', color: '#2e7d32',
+        description: 'Amicable settlement signed — 10-day repudiation window',
+        statuses: ['settled_pending'],
+        actor: 'Barangay', forRole: 'both',
+    },
+
+    // ── 5-day repudiation window on an Agreement for Arbitration ──
+    arbitration_pending: {
+        label: 'Arbitration Pending', icon: 'fa-hourglass-half', color: '#e65100',
+        description: 'Agreement for Arbitration signed — 5-day repudiation window',
+        statuses: ['arbitration_pending'],
+        actor: 'Barangay', forRole: 'both',
+    },
+        // ── Combined view: anything currently in a repudiation window ──
+    repudiable: {
+        label: 'Repudiation Open', icon: 'fa-gavel', color: '#c62828',
+        description: 'Complaints whose repudiation window is still open',
+        statuses: null,          // ← computed dynamically
+        actor: 'Barangay', forRole: 'both',
+    },
+
+    resolved: {
+        label: 'Resolved', icon: 'fa-check-double', color: '#1b5e20',
+        description: 'Settled / released / certificate issued',
+        statuses: ['settled', 'released', 'certificate_issued'],
+        actor: 'Captain / Pangkat', forRole: 'both',
+    },
+
+    // Terminal failure — NOT `failed_mediation` (that's a transition, not a fail)
+    failed: {
+        label: 'Unresolved', icon: 'fa-times-circle', color: '#b71c1c',
+        description: 'Mediation and conciliation both failed — Certificate to File Action issued',
+        statuses: ['unresolved'],        // ← only the FINAL state
+        actor: 'Pangkat', forRole: 'both',
+    },
+
+    referred: {
+        label: 'Referred', icon: 'fa-paper-plane', color: '#8e24aa',
+        description: 'Referred to proper agency (outside KP jurisdiction)',
+        statuses: ['referred_dispatched', 'escalated', 'referred'],
+        actor: 'Barangay / PNP / Court', forRole: 'both',
+    },
+
+    dismissed: {
+        label: 'Dismissed', icon: 'fa-ban', color: '#555',
+        description: 'Withdrawn or dropped',
+        statuses: ['dismissed'],
+        actor: 'Complainant / Barangay', forRole: 'both',
+    },
+};
+
+const STATUS_TO_STAGE = (() => {
+    const map = {};
+    for (const [key, stage] of Object.entries(COMPLAINT_STAGES)) {
+        if (!stage.statuses) continue;
+        for (const s of stage.statuses) {
+            if (!map[s]) map[s] = key;
+        }
+    }
+       // Explicit fallbacks for ambiguous statuses
+    map['summoned']              = map['summoned']              || 'summoned';
+    map['failed_mediation']      = map['failed_mediation']      || 'pangkat_constitution';
+    map['failed_conciliation_final'] = 'failed';
+    map['referred']              = 'referred';
+
+    // New repudiation-driven statuses
+    map['arbitration_pending']    = 'arbitration_pending';
+    map['arbitration_repudiated'] = 'failed';   // or a new stage if you prefer
+
+    return map;
+
+    return map;
+})();
+
+
+
+// ============================================================
+// SECTION 0: VALIDATION HELPERS (mirror of server-side rules)
+// ============================================================
+
+function _placeholders() {
+    return [
+        'test','testing','tester','sample','n/a','na','none','null','nil',
+        'anonymous','anon','asdf','asdfasdf','asdfgh','qwerty','qwertyuiop',
+        'zxcvbn','zxcvbnm','hjkl','xxx','xxxx','aaaa','bbbb','cccc',
+        'abc','abcd','abcde','abcdef','123','1234','12345','name','fullname',
+        'firstname','lastname','first name','last name','no name','noname',
+        'unknown','noone','nobody','john doe','jane doe','juan dela cruz',
+        'juandelacruz','juandc','juan d','juan','pedro','pedro penduko',
+        'lorem ipsum','lorem','ipsum','placeholder','tbd','tba','todo',
+        'asdfasdfasdf','asdasd','asdasdasd','hahaha','hahahaha','hehehe',
+        'jejeje','lol','lmao','wtf','test test','test name','name here'
+    ];
+}
+function _junkTokens() {
+    return ['test','testing','sample','asdf','asdfasdf','asdfgh','qwerty','zxcvbn',
+            'hjkl','123','1234','12345','aaaa','bbbb','cccc','dddd','abc','abcd',
+            'abcde','lorem','ipsum','none','n/a','na','null','xxx','yyy','zzz'];
+}
+
+function validateContactNumberJS(v) {
+    v = (v || '').trim();
+    if (!/^\d+$/.test(v)) return false;
+    if (v.length !== 11) return false;
+    if (!v.startsWith('09')) return false;
+    return true;
+}
+
+function validateEmailOrEmptyJS(v) {
+    v = (v || '').trim();
+    if (v === '') return true;
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
+}
+
+function validatePersonNameJS(name) {
+    name = (name || '').trim();
+    if (!name) return { ok: false, msg: 'Name is required.' };
+
+    if (!/^[A-Za-zÀ-ÿÑñ\s'\.\-]+$/u.test(name)) {
+        return { ok: false, msg: 'Name must contain letters only — no numbers or symbols.' };
+    }
+    if (name.length < 3) return { ok: false, msg: 'Name is too short.' };
+
+    // 3+ identical in a row
+    if (/(.)\1{2,}/u.test(name)) return { ok: false, msg: 'Name looks invalid — please type your real name.' };
+    if (/^(.)\1+$/u.test(name))   return { ok: false, msg: 'Name looks invalid — please type your real name.' };
+
+    // Gibberish checks
+    const flat = name.toLowerCase().replace(/[^a-zñáéíóú]/g, '');
+    if (!flat) return { ok: false, msg: 'Name looks invalid — please type your real name.' };
+
+    // No vowels anywhere
+    if (!/[aeiouyáéíóú]/i.test(flat)) {
+        return { ok: false, msg: 'Name looks invalid — please type your real name.' };
+    }
+
+    // Consonant run of 4+
+    if (/[bcdfghjklmnpqrstvwxzñ]{4,}/i.test(flat)) {
+        return { ok: false, msg: 'Name looks invalid — please type your real name.' };
+    }
+
+    // Vowel ratio < 15% in 6+ char string
+    if (flat.length >= 6) {
+        const vowelCount = (flat.match(/[aeiouyáéíóú]/gi) || []).length;
+        if (vowelCount / flat.length < 0.15) {
+            return { ok: false, msg: 'Name looks invalid — please type your real name.' };
+        }
+    }
+
+    // Triple same letter
+    if (/(.)\1\1/u.test(name)) {
+        return { ok: false, msg: 'Name looks invalid — please type your real name.' };
+    }
+
+    // Placeholders
+    const norm = name.toLowerCase().replace(/\s+/g, ' ').trim();
+    const normNoSpace = norm.replace(/\s/g, '');
+    const ph = _placeholders();
+    if (ph.includes(norm) || ph.includes(normNoSpace)) {
+        return { ok: false, msg: 'Please enter a real name — placeholders like "test" are not allowed.' };
+    }
+
+    // Keyboard mashes
+    const mash = ['asdf','asdfg','asdfgh','asdfghj','qwerty','qwertyu','qwertyui',
+                  'zxcvb','zxcvbn','hjkl','fghj','dfgh','sdfg','sdfgh','sdfghj',
+                  'hjklm','xcvbn','xcvbnm','ghjkl'];
+    for (const word of norm.split(' ')) {
+        if (mash.includes(word)) return { ok: false, msg: 'Name looks invalid — please type your real name.' };
+    }
+
+    return { ok: true, msg: '' };
+}
+
+function validateWordingJS(text, minLen, fieldLabel) {
+    text = (text || '').trim();
+    if (!text) return { ok: false, msg: fieldLabel + ' is required.' };
+    if (text.length < minLen) return { ok: false, msg: `${fieldLabel} is too short (minimum ${minLen} characters).` };
+    if (/(.)\1{3,}/u.test(text)) return { ok: false, msg: `${fieldLabel} contains repeated characters — please describe properly.` };
+
+    let norm = text.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
+    const stripped = norm.replace(/\s/g, '');
+    const junk = _junkTokens();
+    if (junk.includes(norm) || junk.includes(stripped)) {
+        return { ok: false, msg: `${fieldLabel} looks invalid — please describe your complaint.` };
+    }
+    if (!/[aeiouáéíóú]/i.test(text)) {
+        return { ok: false, msg: `${fieldLabel} looks invalid — please describe your complaint.` };
+    }
+    const tokens = norm.split(' ');
+    if (tokens.length >= 4) {
+        let run = 1, maxRun = 1, prev = tokens[0];
+        for (let i = 1; i < tokens.length; i++) {
+            if (tokens[i] === prev) { run++; maxRun = Math.max(maxRun, run); }
+            else { run = 1; prev = tokens[i]; }
+        }
+        if (maxRun >= 4) return { ok: false, msg: `${fieldLabel} repeats the same word — please describe properly.` };
+    }
+    const profanity = ['bobo','tanga','gago','gaga','tarantado','tarantada','putangina',
+        'putang ina','puta','pakyu','fuck','fuckyou','shit','bitch','bastard',
+        'asshole','dick','pussy','ulol','engot','inutil','lintik','hayop ka',
+        'leche','punyeta','peste','pokpok','burat','titi','puke','kantot',
+        'jakol','bilat','bayag','pekpek'];
+    const words = norm.split(' ').filter(w => w !== '');
+    if (words.length > 0) {
+        const allProfane = words.every(w => profanity.some(p => w.includes(p) || w === p));
+        if (allProfane) return { ok: false, msg: `${fieldLabel} contains only profanity — please describe your complaint.` };
+    }
+    return { ok: true, msg: '' };
+}
+
+// ============================================================
+// SECTION 0B: AUTO-PRIORITY ENGINE (mirror of server-side)
+// ============================================================
+
+function _vulnerableVictimHarmedJS(desc) {
+    desc = (desc || '').toLowerCase();
+
+    const vuln = [
+        // ── Tagalog ──
+        'bata','batang','anak','sanggol','menor','minor','musmos','paslit',
+        'estudyante','baby','newborn',
+        'matanda','lolo','lola','senior','elderly','gurang',
+        'babae','asawa','nanay','ina','ate','dalaga','dalagita',
+        'pwd','may kapansanan','disabled','wheelchair','bulag','bingi','pilay',
+        // ── English ──
+        'child','kid','kids','children','minor','minors','baby','infant',
+        'toddler','son','daughter','student','pupil',
+        'elderly','old man','old woman','senior citizen','grandma','grandpa',
+        'grandmother','grandfather',
+        'woman','women','wife','mother','sister','girlfriend','partner','spouse',
+        'pwd','disabled','handicapped','wheelchair-bound','blind','deaf','mute','lame'
+    ];
+
+    const harm = [
+        // ── Tagalog ──
+        'sinaktan','sinasaktan','binugbog','binubugbog','sinuntok','sinusuntok',
+        'sinipa','sinisipa','sinampal','sinasampal','pinalo','pinapalo',
+        'tinulak','tinutulak','sinakal','sinasakal','tinali','tinatali',
+        'sinabunutan','sinasabunutan','kinalmot','kinakalmot','kinagat','kinakagat',
+        'nasugatan','nasusugatan','nasaktan','nasasaktan',
+        'pinagbantaan','pinagbabantaan','tinakot','tinatakot',
+        'pinilit','pinipilit','sinapilitan','sinasapilitan',
+        'iniwan','pinabayaan','pinapabayaan','inabandona','iniiwan',
+        'pinagmamalupitan','namalupit','nambubugbog','nangmamalupit',
+        'rape','ginahasa','gahasa','nirape',
+        'inabuso','binabastos','nambabastos',
+        'pinasok ang ari','pinagsamantalahan','pinilit kahit ayaw',
+        'hindi pinapakain','hindi pinapaaral','hindi inaalagaan',
+        // ── English ──
+        'punched','punching','hit','hitting','slapped','slapping','kicked','kicking',
+        'beaten','beat','beating','choked','choking','strangled','strangling',
+        'pushed','pushing','grabbed','grabbing','dragged','dragging',
+        'wounded','wounding','injured','injuring','hurt','hurting',
+        'threatened','threatening','threat','threats',
+        'forced','forcing','coerced','coercing','coercion',
+        'abused','abusing','abuse','molested','molesting','harassed','harassing',
+        'raped','raping','sexual assault','sexual abuse',
+        'neglected','neglecting','neglect','abandoned','abandoning',
+        'starved','starving','denied food','denied care','not fed','not cared for',
+        'bullied','bullying','harassment',
+        'shoved','shoving','assaulted','assaulting','assault',
+        'attacked','attacking','struck','striking','suffocated','suffocating',
+        'verbally abused','physically abused','emotionally abused'
+    ];
+
+    for (const v of vuln) {
+        if (!desc.includes(v)) continue;
+        for (const h of harm) { if (desc.includes(h)) return true; }
+    }
+    return false;
+}
+
+function classifyAutoPriorityJS(description, subject, isEscalated) {
+    const desc = (description || '').toLowerCase();
+    const subj = (subject || '').toLowerCase().trim();
+
+    if (isEscalated) return 'urgent';
+    if (_vulnerableVictimHarmedJS(desc)) return 'high';
+
+    const highSubjects = [
+        'physical altercation','threat/intimidation','violence against women (vawc)',
+        'child protection concern','drug related issue'
+    ];
+    if (highSubjects.includes(subj)) return 'high';
+
+    const medSubjects = ['theft/robbery','illegal gambling','illegal structure'];
+    if (medSubjects.includes(subj)) return 'medium';
+
+    const lowSubjects = [
+        'abandoned vehicle','obstruction on public way','noise complaint',
+        'waste management','water supply issue','electrical problem',
+        'animal complaint'
+    ];
+    if (lowSubjects.includes(subj)) return 'low';
+
+    return 'medium';
+}
+
+function priorityMetaJS(p) {
+    const map = {
+        urgent: { label: 'URGENT', color: '#c62828', bg: '#ffebee', icon: 'fa-exclamation-triangle' },
+        high:   { label: 'HIGH',   color: '#e65100', bg: '#fff3e0', icon: 'fa-arrow-up' },
+        medium: { label: 'MEDIUM', color: '#f9a825', bg: '#fffde7', icon: 'fa-minus' },
+        low:    { label: 'LOW',    color: '#43a047', bg: '#e8f5e9', icon: 'fa-arrow-down' }
+    };
+    return map[p] || map.medium;
+}
+
+
+let __priorityUpdateTimeout = null;
+
+function updateAutoPriorityBadge() {
+    if (__priorityUpdateTimeout) clearTimeout(__priorityUpdateTimeout);
+    __priorityUpdateTimeout = setTimeout(() => {
+        const descEl    = document.getElementById('complaintDescription');
+        const subjectEl = document.getElementById('complaintSubject');
+        const badgeEl   = document.getElementById('autoPriorityBadge');
+        if (!badgeEl) return;
+
+        const desc    = descEl ? descEl.value : '';
+        const subject = subjectEl ? subjectEl.value : '';
+        const escalation = detectEscalation(desc);
+        const isEscalated = !!escalation;
+
+        const p = classifyAutoPriorityJS(desc, subject, isEscalated);
+        const meta = priorityMetaJS(p);
+
+        let reason = '';
+        if (isEscalated) {
+            reason = `non-jurisdictional — ${ESCALATION_LABELS[escalation] || 'escalated case'}`;
+        } else if (_vulnerableVictimHarmedJS(desc)) {
+            reason = 'a vulnerable person is involved';
+        } else if (['physical altercation','threat/intimidation','violence against women (vawc)','child protection concern','drug related issue'].includes(subject.toLowerCase().trim())) {
+            reason = `serious subject — ${subject}`;
+        } else if (['abandoned vehicle','obstruction on public way','noise complaint','waste management','water supply issue','electrical problem','animal complaint'].includes(subject.toLowerCase().trim())) {
+            reason = `nuisance-level — ${subject}`;
+        } else {
+            reason = 'standard case';
+        }
+
+        badgeEl.innerHTML = `
+            <div style="display:flex;align-items:center;gap:10px;padding:10px 14px;
+                        background:${meta.bg};border-left:4px solid ${meta.color};border-radius:10px;">
+                <i class="fas ${meta.icon}" style="color:${meta.color};font-size:1.1rem;"></i>
+                <div style="flex:1;min-width:0;">
+                    <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:0.4px;font-weight:800;color:${meta.color};">
+                        Auto-Priority
+                    </div>
+                    <div style="font-weight:800;color:${meta.color};font-size:0.95rem;">
+                        ${meta.label}
+                    </div>
+                    <div style="font-size:0.78rem;color:#555;margin-top:2px;">
+                        ${escapeHtml(reason)}
+                    </div>
+                </div>
+            </div>`;
+    }, 250);
+}
 
 // ============================================================
 // SECTION 1: THE 45 LAWS
@@ -1852,12 +2264,46 @@ function renderIncidentsList() {
     if (incidentsList.length === 0) incidentsList = [{ incident_date: '', incident_time: '', location: '', description: '', evidence_files: [] }];
     return incidentsList.map((incident, index) => `
         <div class="incident-card" data-incident-index="${index}">
-            <div class="incident-header"><strong><i class="fas fa-calendar-alt"></i> Incident ${index + 1}</strong><div><button type="button" class="add-evidence-btn" onclick="addIncidentEvidence(${index})"><i class="fas fa-paperclip"></i> Add Evidence</button>${incidentsList.length > 1 ? `<button type="button" class="remove-incident-btn" onclick="removeIncident(${index})"><i class="fas fa-trash"></i> Remove</button>` : ''}</div></div>
+            <div class="incident-header">
+                <strong><i class="fas fa-calendar-alt"></i> Incident ${index + 1}</strong>
+                <div>
+                    <button type="button" class="add-evidence-btn" onclick="addIncidentEvidence(${index})">
+                        <i class="fas fa-paperclip"></i> Add Evidence
+                    </button>
+                    ${incidentsList.length > 1 ? `<button type="button" class="remove-incident-btn" onclick="removeIncident(${index})"><i class="fas fa-trash"></i> Remove</button>` : ''}
+                </div>
+            </div>
             <div class="incident-body">
-                <div class="form-row"><div class="form-group"><label>Date of Incident <span style="color:red;">*</span></label><input type="date" class="incident-date" data-incident-index="${index}" value="${incident.incident_date || ''}"></div><div class="form-group"><label>Time of Incident</label><input type="time" class="incident-time" data-incident-index="${index}" value="${incident.incident_time || ''}"></div></div>
-                <div class="form-group"><label>Location of Incident <span style="color:red;">*</span></label><input type="text" class="incident-location" data-incident-index="${index}" value="${escapeHtml(incident.location || '')}" placeholder="e.g., Blk 12 Lot 5, Purok 3"></div>
-                <div class="form-group"><label>Incident Description <span style="color:red;">*</span></label><textarea class="incident-description" data-incident-index="${index}" rows="3" placeholder="Describe what happened...">${escapeHtml(incident.description || '')}</textarea></div>
-                <div class="evidence-section"><label><i class="fas fa-paperclip"></i> Evidence</label><div class="evidence-files-container" id="evidence-files-${index}">${renderEvidenceFiles(incident.evidence_files, index)}</div><input type="file" class="evidence-file-input" data-incident-index="${index}" multiple accept=".jpg,.jpeg,.png,.pdf,.mp4" style="display:none;"></div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Date of Incident <span style="color:red;">*</span></label>
+                        <input type="date" class="incident-date" data-incident-index="${index}"
+                               data-role="incident_date_${index}"
+                               value="${incident.incident_date || ''}" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Time of Incident</label>
+                        <input type="time" class="incident-time" data-incident-index="${index}"
+                               value="${incident.incident_time || ''}">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>Location of Incident <span style="color:red;">*</span></label>
+                    <input type="text" class="incident-location" data-incident-index="${index}"
+                           data-role="incident_location_${index}"
+                           value="${escapeHtml(incident.location || '')}" placeholder="e.g., Blk 12 Lot 5, Purok 3" required>
+                </div>
+                <div class="form-group">
+                    <label>Incident Description <span style="color:red;">*</span></label>
+                    <textarea class="incident-description" data-incident-index="${index}"
+                              data-role="incident_description_${index}"
+                              rows="3" placeholder="Describe what happened..." required>${escapeHtml(incident.description || '')}</textarea>
+                </div>
+                <div class="evidence-section" data-role="incidents_evidence_${index}">
+                    <label><i class="fas fa-paperclip"></i> Evidence <span style="color:red;">*</span> <small style="color:#666;font-weight:400;">(at least 1 required)</small></label>
+                    <div class="evidence-files-container" id="evidence-files-${index}">${renderEvidenceFiles(incident.evidence_files, index)}</div>
+                    <input type="file" class="evidence-file-input" data-incident-index="${index}" multiple accept=".jpg,.jpeg,.png,.pdf,.mp4" style="display:none;">
+                </div>
             </div>
         </div>`).join('');
 }
@@ -1914,12 +2360,92 @@ function handleIncidentFileUpload(e) {
 // ============================================================
 function renderComplainantsList() {
     if (complainantsList.length === 0) return '<div class="empty-list">No complainants yet.</div>';
-    return complainantsList.map((p, i) => `<div class="party-card" data-index="${i}" data-type="complainant"><div class="party-header"><strong><i class="fas fa-user"></i> Complainant ${i+1}</strong><button type="button" class="remove-party-btn" onclick="removeComplainant(${i})"><i class="fas fa-trash"></i> Remove</button></div><div class="party-body"><div class="form-row"><div class="form-group"><label>Full Name <span style="color:red;">*</span></label><input type="text" class="party-name" data-index="${i}" data-field="full_name" value="${escapeHtml(p.full_name)}" required></div><div class="form-group"><label>Contact Number</label><input type="tel" class="party-contact" data-index="${i}" data-field="contact_number" value="${escapeHtml(p.contact_number || '')}"></div></div><div class="form-row"><div class="form-group"><label>Email</label><input type="email" class="party-email" data-index="${i}" data-field="email" value="${escapeHtml(p.email || '')}"></div><div class="form-group"><label>Address</label><input type="text" class="party-address" data-index="${i}" data-field="address" value="${escapeHtml(p.address || '')}"></div></div></div></div>`).join('');
+    return complainantsList.map((p, i) => `
+        <div class="party-card" data-index="${i}" data-type="complainant">
+            <div class="party-header">
+                <strong><i class="fas fa-user"></i> Complainant ${i+1}</strong>
+                ${i > 0 ? `<button type="button" class="remove-party-btn" onclick="removeComplainant(${i})"><i class="fas fa-trash"></i> Remove</button>` : ''}
+            </div>
+            <div class="party-body">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Full Name <span style="color:red;">*</span></label>
+                        <input type="text" class="party-name" data-index="${i}" data-field="full_name"
+                               data-role="complainant_name_${i}"
+                               value="${escapeHtml(p.full_name)}" required>
+                    </div>
+                    <div class="form-group">
+    <label>Contact Number <span style="color:red;">*</span></label>
+    <input type="text" class="party-contact" data-index="${i}" data-field="contact_number"
+           data-role="complainant_contact_${i}"
+           value="${escapeHtml(p.contact_number || '')}"
+           maxlength="11" 
+           inputmode="numeric"
+           oninput="this.value = this.value.replace(/[^0-9]/g, '')"
+           placeholder="09XXXXXXXXX" required>
+</div>
+
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Email (optional)</label>
+                        <input type="email" class="party-email" data-index="${i}" data-field="email"
+                               data-role="complainant_email_${i}"
+                               value="${escapeHtml(p.email || '')}">
+                    </div>
+                    <div class="form-group">
+                        <label>Address <span style="color:red;">*</span></label>
+                        <input type="text" class="party-address" data-index="${i}" data-field="address"
+                               data-role="complainant_address_${i}"
+                               value="${escapeHtml(p.address || '')}" required>
+                    </div>
+                </div>
+            </div>
+        </div>`).join('');
 }
 
 function renderRespondentsList() {
     if (respondentsList.length === 0) return '<div class="empty-list">No respondents yet.</div>';
-    return respondentsList.map((p, i) => `<div class="party-card" data-index="${i}" data-type="respondent"><div class="party-header"><strong><i class="fas fa-user-friends"></i> Respondent ${i+1}</strong><button type="button" class="remove-party-btn" onclick="removeRespondent(${i})"><i class="fas fa-trash"></i> Remove</button></div><div class="party-body"><div class="form-row"><div class="form-group"><label>Full Name <span style="color:red;">*</span></label><input type="text" class="party-name" data-index="${i}" data-field="full_name" value="${escapeHtml(p.full_name)}" required></div><div class="form-group"><label>Contact Number</label><input type="tel" class="party-contact" data-index="${i}" data-field="contact_number" value="${escapeHtml(p.contact_number || '')}"></div></div><div class="form-row"><div class="form-group"><label>Address</label><input type="text" class="party-address" data-index="${i}" data-field="address" value="${escapeHtml(p.address || '')}"></div><div class="form-group"><label>Relationship</label><input type="text" class="party-relationship" data-index="${i}" data-field="relationship" value="${escapeHtml(p.relationship || '')}" placeholder="e.g., Neighbor"></div></div></div></div>`).join('');
+    return respondentsList.map((p, i) => `
+        <div class="party-card" data-index="${i}" data-type="respondent">
+            <div class="party-header">
+                <strong><i class="fas fa-user-friends"></i> Respondent ${i+1}</strong>
+                <button type="button" class="remove-party-btn" onclick="removeRespondent(${i})"><i class="fas fa-trash"></i> Remove</button>
+            </div>
+            <div class="party-body">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Full Name <span style="color:red;">*</span></label>
+                        <input type="text" class="party-name" data-index="${i}" data-field="full_name"
+                               data-role="respondent_name_${i}"
+                               value="${escapeHtml(p.full_name)}" required>
+                    </div>
+                    <div class="form-group">
+    <label>Contact Number (optional)</label>
+    <input type="text" class="party-contact" data-index="${i}" data-field="contact_number"
+           data-role="respondent_contact_${i}"
+           value="${escapeHtml(p.contact_number || '')}"
+           maxlength="11" 
+           inputmode="numeric" 
+           oninput="this.value = this.value.replace(/[^0-9]/g, '')"
+           placeholder="09XXXXXXXXX">
+</div>
+
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Address (optional)</label>
+                        <input type="text" class="party-address" data-index="${i}" data-field="address"
+                               value="${escapeHtml(p.address || '')}">
+                    </div>
+                    <div class="form-group">
+                        <label>Relationship (optional)</label>
+                        <input type="text" class="party-relationship" data-index="${i}" data-field="relationship"
+                               value="${escapeHtml(p.relationship || '')}" placeholder="e.g., Neighbor">
+                    </div>
+                </div>
+            </div>
+        </div>`).join('');
 }
 
 function renderWitnessesList() {
@@ -1961,12 +2487,15 @@ function updatePartyField(e) {
 // ============================================================
 async function submitComplaint(event) {
     event.preventDefault();
-    const titleEl = document.getElementById('complaintTitle');
-    const descEl = document.getElementById('complaintDescription');
+
+    clearAllFieldErrors();
+
+    const titleEl   = document.getElementById('complaintTitle');
+    const descEl    = document.getElementById('complaintDescription');
     const subjectEl = document.getElementById('complaintSubject');
-    const title = titleEl.value.trim();
-    const desc = descEl.value.trim();
-    const subject = subjectEl.value;
+    const title     = titleEl.value.trim();
+    const desc      = descEl.value.trim();
+    const subject   = subjectEl.value;
     const escalation = detectEscalation(desc);
     const isEscalated = !!escalation;
     const referToShort = isEscalated ? (ESCALATION_REFER_TO_SHORT[escalation] || 'Proper Government Agency') : '';
@@ -1976,34 +2505,116 @@ async function submitComplaint(event) {
         subjectEl.value = mappedSubject;
     }
 
-    clearAllFieldErrors();
-    let firstInvalidEl = null;
-    let errorCount = 0;
-    if (!subject) { markFieldError(subjectEl, 'Please select a complaint subject.'); if (!firstInvalidEl) firstInvalidEl = subjectEl; errorCount++; }
-    if (!title) { markFieldError(titleEl, 'Complaint title is required.'); if (!firstInvalidEl) firstInvalidEl = titleEl; errorCount++; }
-    if (!desc) { markFieldError(descEl, 'Description is required.'); if (!firstInvalidEl) firstInvalidEl = descEl; errorCount++; }
-    else if (desc.length < 10) { markFieldError(descEl, 'Description must be at least 10 characters.'); if (!firstInvalidEl) firstInvalidEl = descEl; errorCount++; }
-    if (complainantsList.length === 0 || !(complainantsList[0].full_name || '').trim()) { const card = document.querySelector('#complainantsContainer .party-card'); if (card) { markGroupError(card, 'At least one complainant with full name is required.'); const nameInput = card.querySelector('.party-name'); if (nameInput) { nameInput.classList.add('field-error'); if (!firstInvalidEl) firstInvalidEl = nameInput; } } errorCount++; }
-    if (respondentsList.length === 0 || !(respondentsList[0].full_name || '').trim()) { const card = document.querySelector('#respondentsContainer .party-card'); if (card) { markGroupError(card, 'At least one respondent with full name is required.'); const nameInput = card.querySelector('.party-name'); if (nameInput) { nameInput.classList.add('field-error'); if (!firstInvalidEl) firstInvalidEl = nameInput; } } errorCount++; }
+    let firstError = null;
 
+    // Subject
+    if (!subject) {
+        markFieldError(subjectEl, 'Please select a complaint subject.');
+        firstError = firstError || subjectEl;
+    }
+    // Title
+    {
+        const r = validateWordingJS(title, 5, 'Title');
+        if (!r.ok) { markFieldError(titleEl, r.msg); firstError = firstError || titleEl; }
+    }
+    // Description
+    {
+        const r = validateWordingJS(desc, 15, 'Description');
+        if (!r.ok) { markFieldError(descEl, r.msg); firstError = firstError || descEl; }
+    }
+
+    // Complainants
+    if (complainantsList.length === 0) {
+        const card = document.querySelector('#complainantsContainer .party-card');
+        if (card) { markGroupError(card, 'At least one complainant is required.'); firstError = firstError || card; }
+    }
+    complainantsList.forEach((p, i) => {
+        const card = document.querySelector(`#complainantsContainer .party-card[data-index="${i}"]`);
+        if (!card) return;
+        const nameInput    = card.querySelector('.party-name');
+        const contactInput = card.querySelector('.party-contact');
+        const addrInput    = card.querySelector('.party-address');
+        const emailInput   = card.querySelector('.party-email');
+
+        const nameR = validatePersonNameJS(p.full_name);
+        if (!nameR.ok) { markFieldError(nameInput, nameR.msg); firstError = firstError || nameInput; }
+
+        if (!validateContactNumberJS(p.contact_number)) {
+            markFieldError(contactInput, 'Contact must be 11 digits starting with 09.');
+            firstError = firstError || contactInput;
+        }
+        if (!(p.address || '').trim()) {
+            markFieldError(addrInput, 'Address is required.');
+            firstError = firstError || addrInput;
+        }
+        if (!validateEmailOrEmptyJS(p.email)) {
+            markFieldError(emailInput, 'Invalid email address.');
+            firstError = firstError || emailInput;
+        }
+    });
+
+    // Respondents — only name is required; contact must follow rule if present
+    respondentsList.forEach((p, i) => {
+        const card = document.querySelector(`#respondentsContainer .party-card[data-index="${i}"]`);
+        if (!card) return;
+        const nameInput    = card.querySelector('.party-name');
+        const contactInput = card.querySelector('.party-contact');
+
+        const nameR = validatePersonNameJS(p.full_name);
+        if (!nameR.ok) { markFieldError(nameInput, nameR.msg); firstError = firstError || nameInput; }
+        if ((p.contact_number || '').trim() !== '' && !validateContactNumberJS(p.contact_number)) {
+            markFieldError(contactInput, 'Contact must be 11 digits starting with 09.');
+            firstError = firstError || contactInput;
+        }
+    });
+
+    // Incidents
     let hasValidIncident = false;
-    let invalidIncidentCount = 0;
     incidentsList.forEach((inc, idx) => {
         const card = document.querySelector(`.incident-card[data-incident-index="${idx}"]`);
         if (!card) return;
-        const dateInput = card.querySelector('.incident-date');
-        const locInput = card.querySelector('.incident-location');
-        const descInput = card.querySelector('.incident-description');
-        let incValid = true;
-        if (!inc.incident_date) { if (dateInput) markFieldError(dateInput, 'Date required.'); incValid = false; }
-        if (!inc.location) { if (locInput) markFieldError(locInput, 'Location required.'); incValid = false; }
-        if (!inc.description) { if (descInput) markFieldError(descInput, 'Description required.'); incValid = false; }
-        if (incValid) hasValidIncident = true;
-        else { invalidIncidentCount++; markGroupError(card, 'Please complete this incident.'); if (!firstInvalidEl) firstInvalidEl = card; }
-    });
-    if (!hasValidIncident) { errorCount += (invalidIncidentCount || 1); const firstCard = document.querySelector('#incidentsContainer .incident-card'); if (firstCard && invalidIncidentCount === 0) { markGroupError(firstCard, 'Please add at least one complete incident.'); if (!firstInvalidEl) firstInvalidEl = firstCard; } }
-    if (errorCount > 0) { if (firstInvalidEl) firstInvalidEl.scrollIntoView({ behavior: 'smooth', block: 'center' }); attachFieldAutoClear(); return; }
+        const dateInput  = card.querySelector('.incident-date');
+        const locInput   = card.querySelector('.incident-location');
+        const descInput  = card.querySelector('.incident-description');
+        let ok = true;
 
+        if (!inc.incident_date) { markFieldError(dateInput, 'Date is required.'); ok = false; firstError = firstError || dateInput; }
+        if (!(inc.location || '').trim()) { markFieldError(locInput, 'Location is required.'); ok = false; firstError = firstError || locInput; }
+        {
+            const r = validateWordingJS(inc.description, 10, `Incident ${idx+1} description`);
+            if (!r.ok) { markFieldError(descInput, r.msg); ok = false; firstError = firstError || descInput; }
+        }
+        // Evidence per incident
+        if (!(inc.evidence_files && inc.evidence_files.length)) {
+            const section = card.querySelector('.evidence-section');
+            if (section) {
+                section.style.border = '2px solid #e53935';
+                section.style.borderRadius = '10px';
+                section.style.padding = '10px';
+                section.style.background = '#fff5f5';
+                const msg = document.createElement('span');
+                msg.className = 'field-error-msg';
+                msg.innerHTML = '<i class="fas fa-exclamation-circle"></i>At least one evidence file is required.';
+                section.appendChild(msg);
+                ok = false;
+                firstError = firstError || section;
+            }
+        }
+        if (ok) hasValidIncident = true;
+    });
+
+    if (!hasValidIncident && !firstError) {
+        const firstCard = document.querySelector('#incidentsContainer .incident-card');
+        if (firstCard) { markGroupError(firstCard, 'Please complete at least one incident.'); firstError = firstCard; }
+    }
+
+    if (firstError) {
+        firstError.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        attachFieldAutoClear();
+        return;
+    }
+
+    // ---------- SEND TO SERVER ----------
     const submitBtn = document.querySelector('#complaintForm button[type="submit"]');
     if (submitBtn) { submitBtn.disabled = true; submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Submitting...'; }
 
@@ -2015,37 +2626,41 @@ async function submitComplaint(event) {
     formData.append('title', title);
     formData.append('description', desc);
     formData.append('complaint_subject', subject);
-    formData.append('priority', isEscalated ? 'urgent' : document.getElementById('priority').value);
+    const computedPriority = classifyAutoPriorityJS(desc, subject, isEscalated);
+    formData.append('priority', computedPriority);
+    formData.append('auto_priority', computedPriority);
     formData.append('additional_notes', document.getElementById('additionalNotes').value);
     formData.append('complainants', JSON.stringify(complainantsList));
     formData.append('respondents', JSON.stringify(respondentsList));
     if (witnessesList.length) formData.append('witnesses', JSON.stringify(witnessesList));
-    if (isEscalated) { formData.append('escalation_type', escalation); formData.append('escalation_refer_to', referToShort); formData.append('escalation_note', escalationNote); }
+    if (isEscalated) {
+        formData.append('escalation_type', escalation);
+        formData.append('escalation_refer_to', referToShort);
+        formData.append('escalation_note', escalationNote);
+    }
 
-    const anonGroup = document.getElementById('anonymityGroup');
+    const anonGroup    = document.getElementById('anonymityGroup');
     const anonCheckbox = document.getElementById('isAnonymous');
-    const anonVisible = anonGroup && anonGroup.style.display !== 'none';
-    const isAnonymousValue = (anonVisible && anonCheckbox && anonCheckbox.checked) ? 1 : 0;
-    formData.append('is_anonymous', isAnonymousValue);
+    const anonVisible  = anonGroup && anonGroup.style.display !== 'none';
+    formData.append('is_anonymous', (anonVisible && anonCheckbox && anonCheckbox.checked) ? 1 : 0);
 
-    const incidentsData = incidentsList.map(inc => ({ incident_date: inc.incident_date, incident_time: inc.incident_time, location: inc.location, description: inc.description }));
+    const incidentsData = incidentsList.map(inc => ({
+        incident_date: inc.incident_date,
+        incident_time: inc.incident_time,
+        location: inc.location,
+        description: inc.description,
+    }));
     formData.append('incidents', JSON.stringify(incidentsData));
 
-    for (let i = 0; i < incidentsList.length; i++) { const evFiles = incidentsList[i].evidence_files; if (evFiles && evFiles.length) { for (const f of evFiles) { if (f.file) formData.append(`incident_evidence_${i}[]`, f.file); } } }
+    for (let i = 0; i < incidentsList.length; i++) {
+        const evFiles = incidentsList[i].evidence_files;
+        if (evFiles && evFiles.length) {
+            for (const f of evFiles) { if (f.file) formData.append(`incident_evidence_${i}[]`, f.file); }
+        }
+    }
 
-    showLoading(isEscalated ? 'Saving escalated case...' : 'Submitting complaint...');
-    try {
-        const resp = await fetch('complaint_ajax.php', { method: 'POST', body: formData });
-        const text = await resp.text();
-        let data;
-        try { data = JSON.parse(text); } catch (parseErr) { throw new Error('Server returned invalid response.'); }
-        hideLoading();
-        if (submitBtn) { submitBtn.disabled = false; submitBtn.innerHTML = '<i class="fas fa-paper-plane"></i> Submit Complaint'; }
-        if (data.success) {
-            if (isEscalated) showEscalationSuccessModal(data.reference_number, escalation, isAnonymousValue === 1);
-            else showComplaintSuccessModal(data.reference_number, () => { resetComplaintForm(); showMyComplaints(); });
-        } else showErrorModal(data.message || 'Failed to submit');
-    } catch (err) { hideLoading(); if (submitBtn) { submitBtn.disabled = false; submitBtn.innerHTML = '<i class="fas fa-paper-plane"></i> Submit Complaint'; } showErrorModal('An error occurred: ' + err.message); }
+       // Single submission attempt — _doSubmitComplaint handles everything
+    await _doSubmitComplaint(formData, { isEscalated, anonVisible, anonCheckbox, submitBtn, escalation });
 }
 
 function showEscalationSuccessModal(referenceNumber, escalationType, isAnonymous) {
@@ -2145,16 +2760,149 @@ function getSubmitComplaintForm() {
                 <div id="witnessesContainer">${renderWitnessesList()}</div>
             </div>
             <div class="form-section">
-                <h3><i class="fas fa-flag"></i> Priority & Additional Notes</h3>
-                <div class="form-group"><label>Priority Level</label><select id="priority" class="form-control"><option value="low">Low - Minor issue</option><option value="medium" selected>Medium - Moderate concern</option><option value="high">High - Urgent attention</option><option value="urgent">Urgent - Immediate action</option></select></div>
-                <div class="form-group"><label>Additional Notes</label><textarea id="additionalNotes" class="form-control" rows="2" placeholder="Any other information..."></textarea></div>
+    <h3><i class="fas fa-flag"></i> Auto-Priority & Additional Notes</h3>
+    <div id="autoPriorityBadge" style="margin-bottom:14px;">
+        <div style="display:flex;align-items:center;gap:10px;padding:10px 14px;
+                    background:#fffde7;border-left:4px solid #f9a825;border-radius:10px;">
+            <i class="fas fa-minus" style="color:#f9a825;font-size:1.1rem;"></i>
+            <div style="flex:1;min-width:0;">
+                <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:0.4px;font-weight:800;color:#f9a825;">Auto-Priority</div>
+                <div style="font-weight:800;color:#f9a825;font-size:0.95rem;">MEDIUM</div>
+                <div style="font-size:0.78rem;color:#555;margin-top:2px;">standard case</div>
             </div>
+        </div>
+    </div>
+    <div class="form-group"><label>Additional Notes</label><textarea id="additionalNotes" class="form-control" rows="2" placeholder="Any other information..."></textarea></div>
+</div>
             <div class="form-actions">
                 <button type="submit" class="btn-verify"><i class="fas fa-paper-plane"></i> Submit Complaint</button>
                 <button type="button" class="btn-close" onclick="resetComplaintForm()"><i class="fas fa-eraser"></i> Reset Form</button>
             </div>
         </form>
     `;
+}
+
+async function _doSubmitComplaint(formData, opts) {
+    const { isEscalated, anonVisible, anonCheckbox, submitBtn, escalation } = opts;
+
+    showLoading(isEscalated ? 'Saving escalated case...' : 'Submitting complaint...');
+
+    try {
+        const resp = await fetch('complaint_ajax.php', { method: 'POST', body: formData });
+        const text = await resp.text();
+        let data;
+        try { data = JSON.parse(text); }
+        catch (parseErr) { throw new Error('Server returned invalid response.'); }
+
+        hideLoading();
+        if (submitBtn) { submitBtn.disabled = false; submitBtn.innerHTML = '<i class="fas fa-paper-plane"></i> Submit Complaint'; }
+
+        // ── Possible duplicate → show warn-and-decide dialog ──
+        // ── BLOCKING duplicate → hard stop, no override ──
+        if (!data.success && data.code === 'duplicate_blocked' && data.possible_duplicate) {
+            const dup = data.possible_duplicate;
+
+            await Swal.fire({
+                title: 'Duplicate Complaint Detected',
+                html: `
+                    <div style="text-align:left;font-size:0.9rem;line-height:1.55;">
+                        <p style="margin:0 0 12px;">You already filed this exact complaint. To avoid duplicate cases, you cannot file it again.</p>
+                        <div style="background:#fff5f5;border:1px solid #ffcdd2;border-left:4px solid #c62828;border-radius:10px;padding:12px 14px;margin-bottom:14px;">
+                            <div style="font-weight:800;color:#1a2b22;font-size:0.95rem;margin-bottom:4px;">${escapeHtml(dup.title || 'Untitled')}</div>
+                            <div style="font-family:monospace;font-weight:700;color:#c62828;margin-bottom:6px;">${escapeHtml(dup.reference_number)}</div>
+                            <div style="font-size:0.78rem;color:#555;">
+                                <div><strong>Status:</strong> ${escapeHtml((dup.status || '').replace(/_/g,' '))}</div>
+                                <div><strong>Filed:</strong> ${new Date(dup.created_at).toLocaleString('en-US',{dateStyle:'medium',timeStyle:'short'})}</div>
+                                <div><strong>Matched on:</strong> ${escapeHtml(dup.reason)}</div>
+                                <div style="margin-top:4px;color:#c62828;font-weight:700;">${dup.confidence}% match</div>
+                            </div>
+                        </div>
+                        <p style="margin:0;font-size:0.82rem;color:#666;">If you need to add information, open your existing complaint and add a note instead.</p>
+                    </div>`,
+                width: 560,
+                showCancelButton: true,
+                confirmButtonText: '<i class="fas fa-eye"></i> View My Complaint',
+                cancelButtonText:  'Close',
+                confirmButtonColor: '#1565c0',
+                cancelButtonColor:  '#6c757d',
+                reverseButtons: true,
+                allowOutsideClick: false,
+            }).then((result) => {
+                if (result.isConfirmed) {
+                    resetComplaintForm();
+                    showMyComplaints();
+                    // Optionally auto-open the existing complaint:
+                    setTimeout(() => viewComplaintDetails(dup.id), 400);
+                }
+            });
+
+            return;
+        }
+
+        // ── WARNING duplicate → warn-and-decide dialog ──
+        if (!data.success && data.code === 'possible_duplicate' && data.possible_duplicate) {
+            const dup = data.possible_duplicate;
+
+            const choice = await Swal.fire({
+                title: 'Similar Complaint Found',
+                html: `
+                    <div style="text-align:left;font-size:0.9rem;line-height:1.55;">
+                        <p style="margin:0 0 12px;">You already filed a complaint that looks similar:</p>
+                        <div style="background:#f8faf8;border:1px solid #e2efe8;border-left:4px solid #f9a825;border-radius:10px;padding:12px 14px;margin-bottom:14px;">
+                            <div style="font-weight:800;color:#1a2b22;font-size:0.95rem;margin-bottom:4px;">${escapeHtml(dup.title || 'Untitled')}</div>
+                            <div style="font-family:monospace;font-weight:700;color:#2E7D32;margin-bottom:6px;">${escapeHtml(dup.reference_number)}</div>
+                            <div style="font-size:0.78rem;color:#555;">
+                                <div><strong>Status:</strong> ${escapeHtml((dup.status || '').replace(/_/g,' '))}</div>
+                                <div><strong>Filed:</strong> ${new Date(dup.created_at).toLocaleString('en-US',{dateStyle:'medium',timeStyle:'short'})}</div>
+                                <div><strong>Matched on:</strong> ${escapeHtml(dup.reason)}</div>
+                                <div style="margin-top:4px;color:#f57c00;font-weight:700;">${dup.confidence}% match</div>
+                            </div>
+                        </div>
+                        <p style="margin:0;font-size:0.82rem;color:#666;">If this is a different incident, you can continue filing a new complaint.</p>
+                    </div>`,
+                width: 560,
+                showCancelButton: true,
+                showDenyButton: true,
+                confirmButtonText: '<i class="fas fa-paper-plane"></i> File Anyway',
+                denyButtonText:    '<i class="fas fa-eye"></i> View Existing',
+                cancelButtonText:  'Cancel',
+                confirmButtonColor: '#2E7D32',
+                denyButtonColor:    '#1565c0',
+                cancelButtonColor:  '#6c757d',
+                reverseButtons: true,
+            });
+
+            if (choice.isDenied) {
+                viewComplaintDetails(dup.id);
+                return;
+            }
+            if (!choice.isConfirmed) return; // Cancel → keep form as-is
+
+            // ── File Anyway → re-submit with force_duplicate=1 ──
+            const retry = new FormData();
+            for (const [k, v] of formData.entries()) retry.append(k, v);
+            retry.set('force_duplicate', '1');
+
+            if (submitBtn) { submitBtn.disabled = true; submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Submitting...'; }
+            await _doSubmitComplaint(retry, opts);
+            return;
+        }
+        // ── Normal success / errors ──
+        if (data.success) {
+            if (isEscalated) showEscalationSuccessModal(data.reference_number, escalation, anonVisible && anonCheckbox.checked);
+            else showComplaintSuccessModal(data.reference_number, () => { resetComplaintForm(); showMyComplaints(); });
+        } else {
+            if (data.error_field) {
+                highlightField(data.error_field, data.message || 'Please fix this field.');
+            } else {
+                showErrorModal(data.message || 'Failed to submit');
+            }
+        }
+    } catch (err) {
+        hideLoading();
+        if (submitBtn) { submitBtn.disabled = false; submitBtn.innerHTML = '<i class="fas fa-paper-plane"></i> Submit Complaint'; }
+        showErrorModal('An error occurred: ' + err.message);
+    }
 }
 
 // ============================================================
@@ -2170,7 +2918,7 @@ async function showMyComplaints() {
         if (data.success) {
             cachedComplaints.as_complainant = data.as_complainant || [];
             cachedComplaints.as_respondent  = data.as_respondent  || [];
-            currentStatusFilter = 'all';
+                      currentStageFilter = 'all';
             renderComplaintsWithTabs();
         } else {
             container.innerHTML = `<div class="empty-state"><i class="fas fa-folder-open fa-3x"></i><p>No complaints yet.</p><button class="btn-verify" onclick="showSubmitComplaintForm()"><i class="fas fa-plus"></i> File a Complaint</button></div>`;
@@ -2180,10 +2928,94 @@ async function showMyComplaints() {
     }
 }
 
-function computeStatusCounts(list) {
+
+
+// ============================================================
+// STAGE FILTERING HELPERS (role-aware)
+// ============================================================
+
+function resolveStageForComplaint(c, role) {
+    const status = c.status;
+   
+
+    const inRepudiationWindow =
+        (status === 'settled_pending'      && Number(c.amicable_repudiated    || 0) === 0 && c.repudiation_deadline) ||
+        (status === 'arbitration_pending'  && Number(c.arbitration_repudiated || 0) === 0 && c.repudiation_deadline);
+
+ let baseStage = STATUS_TO_STAGE[status] || 'intake';
+    // ── "summoned" is ambiguous — resolve by hearing context + role ──
+    if (status === 'summoned') {
+        const sessionType = c.next_hearing_type || c.hearing_type || null;
+        if (sessionType === 'conciliation') return 'pangkat_conciliation';
+        if (sessionType === 'mediation')    return 'mediation';
+        return role === 'respondent' ? 'summoned' : 'notice_issued';
+    }
+
+    // ── "failed_mediation" is a TRANSITION, not a terminal state ──
+    // The case is moving from Lupon (mediation) → Pangkat (conciliation).
+    if (status === 'failed_mediation') {
+        const sessionType = c.next_hearing_type || null;
+        // Pangkat hearing already scheduled → show it as the Pangkat Hearing stage
+        if (sessionType === 'conciliation') return 'pangkat_conciliation';
+        // Otherwise the Captain is still forming the Pangkat
+        return 'pangkat_constitution';
+    }
+
+    // ── Promote to Pangkat Hearing if the next hearing is conciliation ──
+    if ((baseStage === 'mediation' || baseStage === 'pangkat_constitution')
+        && c.next_hearing_type === 'conciliation') {
+        return 'pangkat_conciliation';
+    }
+   
+    return baseStage;
+}
+
+function computeStageCounts(list, role) {
     const counts = { all: list.length };
-    list.forEach(c => { counts[c.status] = (counts[c.status] || 0) + 1; });
+    for (const key of Object.keys(COMPLAINT_STAGES)) {
+        if (key === 'all') continue;
+        counts[key] = 0;
+    }
+
+    // Per-status counts
+    list.forEach(c => {
+        const stageKey = resolveStageForComplaint(c, role);
+        if (counts[stageKey] !== undefined) counts[stageKey]++;
+    });
+
+    // Synthetic "Repudiation Open" count
+    counts.repudiable = list.filter(c => {
+        const s = c.status;
+        const inSettle = (s === 'settled_pending'
+                          && Number(c.amicable_repudiated || 0) === 0
+                          && !!c.repudiation_deadline);
+        const inArb    = (s === 'arbitration_pending'
+                          && Number(c.arbitration_repudiated || 0) === 0
+                          && !!c.repudiation_deadline);
+        return inSettle || inArb;
+    }).length;
+
     return counts;
+}
+
+function filterByStage(list, stageKey, role) {
+    if (stageKey === 'all') return list;
+
+    // ── Synthetic stage: Repudiation Open ──
+    if (stageKey === 'repudiable') {
+        return list.filter(c => {
+            const s = c.status;
+            const inSettle = (s === 'settled_pending'
+                              && Number(c.amicable_repudiated || 0) === 0
+                              && !!c.repudiation_deadline);
+            const inArb    = (s === 'arbitration_pending'
+                              && Number(c.arbitration_repudiated || 0) === 0
+                              && !!c.repudiation_deadline);
+            return inSettle || inArb;
+        });
+    }
+
+    return list.filter(c => resolveStageForComplaint(c, role) === stageKey);
 }
 
 function renderComplaintsWithTabs() {
@@ -2191,9 +3023,11 @@ function renderComplaintsWithTabs() {
     const asC = cachedComplaints.as_complainant || [];
     const asR = cachedComplaints.as_respondent  || [];
     const currentList = currentComplaintTab === 'complainant' ? asC : asR;
-    const statusCounts = computeStatusCounts(currentList);
+    const currentRole = currentComplaintTab === 'complainant' ? 'complainant' : 'respondent';
 
-    // Tab buttons
+    const stageCounts = computeStageCounts(currentList, currentRole);
+
+    // ── Tabs ──
     const tabsHtml = `
         <div style="display:flex;gap:8px;margin-bottom:18px;flex-wrap:wrap;align-items:center;">
             <button type="button" onclick="switchComplaintTab('complainant')"
@@ -2216,73 +3050,93 @@ function renderComplaintsWithTabs() {
         </div>
     `;
 
-    // Filter chips
-    const filterDefs = [
-        { key: 'all',                            label: 'All',                  icon: 'fa-list' },
-        { key: 'pending_review',                 label: 'Pending Review',       icon: 'fa-clock' },
-        { key: 'pending_captain_action',         label: 'Awaiting Captain',     icon: 'fa-hourglass-half' },
-        { key: 'summoned',                       label: 'Summoned',             icon: 'fa-envelope-open-text' },
-        { key: 'for_mediation',                  label: 'For Mediation',        icon: 'fa-gavel' },
-        { key: 'mediation_scheduled',            label: 'Mediation Scheduled',  icon: 'fa-calendar-check' },
-        { key: 'pangkat_constitution_scheduled', label: 'Pangkat Scheduled',    icon: 'fa-users-cog' },
-        { key: 'pangkat_constituted',            label: 'Pangkat Constituted',  icon: 'fa-users' },
-        { key: 'pangkat_scheduled',              label: 'Conciliation Set',     icon: 'fa-calendar-check' },
-        { key: 'settled',                        label: 'Settled',              icon: 'fa-handshake' },
-        { key: 'failed_mediation',               label: 'Mediation Failed',     icon: 'fa-times-circle' },
-        { key: 'failed_conciliation_final',      label: 'Conciliation Failed',  icon: 'fa-times-circle' },
-        { key: 'certificate_issued',             label: 'Certificate Issued',   icon: 'fa-certificate' },
-        { key: 'released',                       label: 'Released',             icon: 'fa-check-double' },
-        { key: 'referred_dispatched',            label: 'Referred',             icon: 'fa-paper-plane' },
-        { key: 'pending_captain_review',         label: 'Captain Review',       icon: 'fa-user-tie' },
-        { key: 'escalated',                      label: 'Escalated',            icon: 'fa-exclamation-triangle' },
-        { key: 'dismissed',                      label: 'Dismissed',            icon: 'fa-ban' },
-    ];
+    // ── STAGE CHIPS (role-filtered) ──
+    const visibleStages = Object.entries(COMPLAINT_STAGES).filter(([key, stage]) => {
+        if (key === 'all') return true;
+        if (stage.forRole && stage.forRole !== 'both' && stage.forRole !== currentRole) return false;
+          if (key === 'repudiable') return true;   // always visible
+        return (stageCounts[key] || 0) > 0;
+    });
 
-    const visibleFilters = filterDefs.filter(f => f.key === 'all' || (statusCounts[f.key] && statusCounts[f.key] > 0));
-
-    const filterChipsHtml = `
-        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;padding:12px 14px;background:#f8faf8;border-radius:12px;border:1px solid #e2efe8;">
+    const stageChipsHtml = `
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;padding:12px 14px;
+                    background:#f8faf8;border-radius:12px;border:1px solid #e2efe8;">
             <div style="display:flex;align-items:center;gap:6px;color:#666;font-size:0.78rem;font-weight:700;margin-right:6px;">
-                <i class="fas fa-filter"></i> Filter:
+                <i class="fas fa-layer-group"></i> Stage:
             </div>
-            ${visibleFilters.map(f => {
-                const isActive = currentStatusFilter === f.key;
-                const cnt = statusCounts[f.key] || 0;
-                return `<button type="button" onclick="setStatusFilter('${f.key}')"
-                               style="padding:6px 12px;border-radius:20px;border:1.5px solid ${isActive ? '#2E7D32' : '#e2efe8'};
-                                      background:${isActive ? '#2E7D32' : '#fff'};
+            ${visibleStages.map(([key, stage]) => {
+                const isActive = currentStageFilter === key;
+                const cnt = stageCounts[key] || 0;
+                const tooltip = stage.description
+                    ? ` title="${escapeHtml(stage.description)}${stage.actor ? ` — Handled by: ${stage.actor}` : ''}"`
+                    : '';
+                return `<button type="button" onclick="setStageFilter('${key}')"${tooltip}
+                               style="padding:7px 13px;border-radius:20px;
+                                      border:1.5px solid ${isActive ? stage.color : '#e2efe8'};
+                                      background:${isActive ? stage.color : '#fff'};
                                       color:${isActive ? '#fff' : '#555'};
                                       font-size:0.75rem;font-weight:700;cursor:pointer;
-                                      display:inline-flex;align-items:center;gap:6px;transition:all .15s;">
-                    <i class="fas ${f.icon}"></i> ${f.label}
-                    <span style="background:${isActive ? 'rgba(255,255,255,0.3)' : '#f0f0f0'};padding:1px 7px;border-radius:10px;font-size:0.68rem;">${cnt}</span>
+                                      display:inline-flex;align-items:center;gap:6px;
+                                      transition:all .15s;">
+                    <i class="fas ${stage.icon}"></i> ${stage.label}
+                    <span style="background:${isActive ? 'rgba(255,255,255,0.3)' : '#f0f0f0'};
+                                 padding:1px 7px;border-radius:10px;font-size:0.68rem;">${cnt}</span>
                 </button>`;
             }).join('')}
         </div>
     `;
 
-    // Filtered list
-    const filteredList = currentStatusFilter === 'all'
-        ? currentList
-        : currentList.filter(c => c.status === currentStatusFilter);
+    // ── Legend (collapsible) ──
+    const legendHtml = `
+        <details style="margin-bottom:16px;padding:10px 14px;background:#fafbfa;border-radius:10px;border:1px solid #e2efe8;">
+            <summary style="cursor:pointer;font-size:0.8rem;font-weight:700;color:#555;">
+                <i class="fas fa-info-circle"></i> What do these stages mean?
+            </summary>
+            <div style="margin-top:10px;font-size:0.78rem;color:#666;line-height:1.7;">
+                ${Object.entries(COMPLAINT_STAGES)
+                    .filter(([k, s]) => k !== 'all' && (!s.forRole || s.forRole === 'both' || s.forRole === currentRole))
+                    .map(([k, s]) => `
+                        <div style="display:flex;gap:10px;margin-bottom:8px;align-items:flex-start;">
+                            <i class="fas ${s.icon}" style="color:${s.color};width:18px;margin-top:3px;flex-shrink:0;"></i>
+                            <div style="flex:1;">
+                                <div>
+                                    <strong style="color:${s.color};">${s.label}</strong>
+                                    <span style="color:#999;"> — ${escapeHtml(s.description)}</span>
+                                </div>
+                                ${s.actor ? `<div style="font-size:0.72rem;color:#888;margin-top:2px;">
+                                    <i class="fas fa-user-tie"></i> Handled by: <strong>${escapeHtml(s.actor)}</strong>
+                                </div>` : ''}
+                            </div>
+                        </div>
+                    `).join('')}
+            </div>
+        </details>
+    `;
+
+    // ── Filtered list ──
+    const filteredList = filterByStage(currentList, currentStageFilter, currentRole);
 
     let bodyHtml = '';
     if (!filteredList.length) {
+        const stageInfo = COMPLAINT_STAGES[currentStageFilter];
         bodyHtml = `
             <div class="empty-state">
-                <i class="fas fa-folder-open fa-3x"></i>
-                <p>${currentStatusFilter === 'all'
-                    ? (currentComplaintTab === 'complainant' ? "You haven't filed any complaints yet." : "No complaints have named you as respondent yet.")
-                    : `No complaints with status "${currentStatusFilter.replace(/_/g,' ')}".`}</p>
-                ${currentStatusFilter !== 'all' ? `<button type="button" class="btn-verify" onclick="setStatusFilter('all')" style="margin-top:12px;"><i class="fas fa-list"></i> Show All</button>` : ''}
+                <i class="fas ${stageInfo ? stageInfo.icon : 'fa-folder-open'} fa-3x"></i>
+                <p>${currentStageFilter === 'all'
+                    ? (currentComplaintTab === 'complainant'
+                        ? "You haven't filed any complaints yet."
+                        : "No complaints have named you as respondent yet.")
+                    : `No complaints in the "${stageInfo.label}" stage.`}</p>
+                ${currentStageFilter !== 'all'
+                    ? `<button type="button" class="btn-verify" onclick="setStageFilter('all')" style="margin-top:12px;">
+                           <i class="fas fa-list"></i> Show All
+                       </button>`
+                    : ''}
             </div>`;
     } else {
-        // ── SPLIT INTO UPCOMING vs OTHERS ──
         const { upcoming, others } = splitByUpcomingHearing(filteredList);
-
         const gridStyle = `display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:16px;align-items:start;`;
 
-        // Section header helper
         const sectionHeader = (icon, label, count, color = '#2E7D32') => `
             <div style="display:flex;align-items:center;gap:10px;margin:0 0 14px;padding:10px 14px;
                         background:${color}0D;border-left:4px solid ${color};border-radius:10px;">
@@ -2293,7 +3147,6 @@ function renderComplaintsWithTabs() {
                 <span style="background:${color};color:#fff;padding:2px 10px;border-radius:12px;font-size:0.7rem;font-weight:800;">${count}</span>
             </div>`;
 
-        // Divider between sections
         const divider = `
             <div style="display:flex;align-items:center;gap:12px;margin:28px 0 20px;">
                 <div style="flex:1;height:1px;background:linear-gradient(to right, transparent, #cfd8dc, transparent);"></div>
@@ -2306,31 +3159,29 @@ function renderComplaintsWithTabs() {
             </div>`;
 
         let html = '';
-
-        // ── 1. UPCOMING HEARINGS SECTION (only if any) ──
         if (upcoming.length) {
             html += sectionHeader('fa-calendar-check', 'Upcoming Hearings', upcoming.length, '#6a1b9a');
             html += `<div style="${gridStyle}">
                 ${upcoming.map(c => renderComplaintCard(c, currentComplaintTab)).join('')}
             </div>`;
         }
-
-        // ── 2. DIVIDER + OTHERS SECTION (only if any) ──
         if (others.length) {
             if (upcoming.length) html += divider;
             if (!upcoming.length) {
-                // When there are no upcoming hearings, only show "All Complaints" header
-                html += sectionHeader('fa-folder-open', 'All Complaints', others.length, '#2E7D32');
+                const stageInfo = COMPLAINT_STAGES[currentStageFilter];
+                const label = currentStageFilter === 'all' ? 'All Complaints' : `${stageInfo.label} Complaints`;
+                const icon  = currentStageFilter === 'all' ? 'fa-folder-open' : stageInfo.icon;
+                const color = currentStageFilter === 'all' ? '#2E7D32' : stageInfo.color;
+                html += sectionHeader(icon, label, others.length, color);
             }
             html += `<div style="${gridStyle}">
                 ${others.map(c => renderComplaintCard(c, currentComplaintTab)).join('')}
             </div>`;
         }
-
         bodyHtml = html;
     }
 
-    container.innerHTML = tabsHtml + filterChipsHtml + bodyHtml;
+    container.innerHTML = tabsHtml + stageChipsHtml + legendHtml + bodyHtml;
     startLiveCountdowns();
 }
 
@@ -2371,39 +3222,431 @@ function splitByUpcomingHearing(list) {
 
 function switchComplaintTab(tab) {
     currentComplaintTab = tab;
-    currentStatusFilter = 'all';
+    currentStageFilter = 'all';
     renderComplaintsWithTabs();
 }
 
-function setStatusFilter(key) {
-    currentStatusFilter = key;
+function setStageFilter(stageKey) {
+    if (stageKey !== 'all' && !COMPLAINT_STAGES[stageKey]) return;
+    currentStageFilter = stageKey;
     renderComplaintsWithTabs();
+}
+
+// Legacy shim — in case old code still calls setStatusFilter
+function setStatusFilter(key) {
+const legacyMap = {
+    'all': 'all',
+    'pending_review': 'intake',
+    'pending_captain_action': 'intake',
+    'pending_captain_review': 'intake',
+    'summoned': 'summoned',
+    'for_mediation': 'mediation',
+    'mediation_scheduled': 'mediation',
+    'in_mediation': 'mediation',                    // ← NEW
+    'pangkat_constitution_scheduled': 'pangkat_constitution',
+    'pangkat_constituted': 'pangkat_constitution',
+    'pangkat_scheduled': 'pangkat_conciliation',
+    'settled_pending': 'settled_pending',           // ← NEW
+    'settled': 'resolved',
+    'released': 'resolved',
+    'certificate_issued': 'resolved',
+    'failed_mediation': 'pangkat_constitution',     // ← transition, not failed
+    'failed_conciliation_final': 'failed',          // legacy
+    'unresolved': 'failed',                         // ← your new name
+    'referred': 'referred',                         // ← NEW
+    'referred_dispatched': 'referred',
+    'escalated': 'referred',
+    'dismissed': 'dismissed',
+};
+    setStageFilter(legacyMap[key] || 'all');
 }
 
 function getStatusBadgeInfo(s) {
     const map = {
-        'pending_review':                 { label: 'Pending Review',       color: '#f57c00', bg: '#fff8e1', icon: 'fa-clock' },
-        'pending_captain_action':         { label: 'Awaiting Captain',     color: '#f57c00', bg: '#fff8e1', icon: 'fa-hourglass-half' },
-        'summoned':                       { label: 'Summoned',             color: '#1565c0', bg: '#e3f2fd', icon: 'fa-envelope-open-text' },
-        'for_mediation':                  { label: 'For Mediation',        color: '#6a1b9a', bg: '#f3e5f5', icon: 'fa-gavel' },
-        'mediation_scheduled':            { label: 'Mediation Scheduled',  color: '#6a1b9a', bg: '#f3e5f5', icon: 'fa-calendar-check' },
-        'settled':                        { label: 'Settled',              color: '#1b5e20', bg: '#e8f5e9', icon: 'fa-handshake' },
-        'failed_mediation':               { label: 'Mediation Failed',     color: '#b71c1c', bg: '#ffebee', icon: 'fa-times-circle' },
-        'failed_conciliation_final':      { label: 'Conciliation Failed',  color: '#b71c1c', bg: '#ffebee', icon: 'fa-times-circle' },
-        'escalated':                      { label: 'Escalated',            color: '#c62828', bg: '#ffebee', icon: 'fa-exclamation-triangle' },
-        'dismissed':                      { label: 'Dismissed',            color: '#555',    bg: '#e0e0e0', icon: 'fa-ban' },
-        'pangkat_constitution_scheduled': { label: 'Pangkat Scheduled',    color: '#4a148c', bg: '#f3e5f5', icon: 'fa-users-cog' },
-        'pangkat_constituted':            { label: 'Pangkat Constituted',  color: '#4a148c', bg: '#f3e5f5', icon: 'fa-users' },
-        'pangkat_scheduled':              { label: 'Conciliation Set',     color: '#4a148c', bg: '#f3e5f5', icon: 'fa-calendar-check' },
-        'certificate_issued':             { label: 'Certificate Issued',   color: '#1b5e20', bg: '#e8f5e9', icon: 'fa-certificate' },
-        'released':                       { label: 'Released',             color: '#1b5e20', bg: '#e8f5e9', icon: 'fa-check-double' },
-        'referred_dispatched':            { label: 'Referred',             color: '#8e24aa', bg: '#f3e5f5', icon: 'fa-paper-plane' },
-        'pending_captain_review':         { label: 'Captain Review',       color: '#f57c00', bg: '#fff8e1', icon: 'fa-user-tie' },
+        // ── Intake ──
+        'pending_review':                 { label: 'Pending Review',                 color: '#f57c00', bg: '#fff8e1', icon: 'fa-clock' },
+        'pending_captain_action':         { label: 'Awaiting Captain Action',        color: '#f57c00', bg: '#fff8e1', icon: 'fa-hourglass-half' },
+
+        // ── Summons / Notice ──
+        'summoned':                       { label: 'Summons Issued',                 color: '#1565c0', bg: '#e3f2fd', icon: 'fa-envelope-open-text' },
+
+        // ── Mediation ──
+        'for_mediation':                  { label: 'For Mediation',                  color: '#6a1b9a', bg: '#f3e5f5', icon: 'fa-gavel' },
+        'mediation_scheduled':            { label: 'Mediation Hearing Scheduled',    color: '#6a1b9a', bg: '#f3e5f5', icon: 'fa-calendar-check' },
+        'in_mediation':                   { label: 'In Mediation',                   color: '#6a1b9a', bg: '#f3e5f5', icon: 'fa-handshake' },
+
+        // ── Pangkat Formation (Captain's domain) ──
+        'failed_mediation':               { label: 'Awaiting Pangkat Constitution',  color: '#4a148c', bg: '#f3e5f5', icon: 'fa-hourglass-half' },
+        'pangkat_constitution_scheduled': { label: 'Constitution Meeting Set',       color: '#4a148c', bg: '#f3e5f5', icon: 'fa-calendar-check' },
+        'pangkat_constituted':            { label: 'Awaiting Position Assignment',   color: '#4a148c', bg: '#f3e5f5', icon: 'fa-users-cog' },
+
+        // ── Pangkat Hearing (Chairperson's domain) ──
+        'pangkat_scheduled':              { label: 'Conciliation Hearing Scheduled', color: '#00838f', bg: '#e0f7fa', icon: 'fa-gavel' },
+
+        // ── Settlement Pending (10-day repudiation) ──
+        'settled_pending':                { label: 'Awaiting Repudiation Window',    color: '#2e7d32', bg: '#e8f5e9', icon: 'fa-hourglass-half' },
+
+        // ── Resolved ──
+        'settled':                        { label: 'Settled — Executory',            color: '#1b5e20', bg: '#e8f5e9', icon: 'fa-handshake' },
+        'certificate_issued':             { label: 'Certificate Issued',             color: '#1b5e20', bg: '#e8f5e9', icon: 'fa-certificate' },
+        'released':                       { label: 'Released to Complainant',        color: '#1565c0', bg: '#e3f2fd', icon: 'fa-check-double' },
+
+            // ── Arbitration Pending (5-day repudiation) ──
+    'arbitration_pending':            { label: 'Arbitration — Awaiting Repudiation', color: '#e65100', bg: '#fff3e0', icon: 'fa-gavel' },
+    'arbitration_repudiated':         { label: 'Arbitration Repudiated',             color: '#c62828', bg: '#ffebee', icon: 'fa-file-signature' },
+    'amicable_repudiated':            { label: 'Settlement Repudiated',              color: '#c62828', bg: '#ffebee', icon: 'fa-file-signature' },
+
+        // ── Unresolved ──
+        'unresolved':                     { label: 'Unresolved — For Certification', color: '#b71c1c', bg: '#ffebee', icon: 'fa-file-certificate' },
+        'failed_conciliation_final':      { label: 'Unresolved — For Certification', color: '#b71c1c', bg: '#ffebee', icon: 'fa-file-certificate' },
+
+
+
+        // ── Escalated / Referred ──
+        'escalated':                      { label: 'ESCALATED — Non-Jurisdictional', color: '#c62828', bg: '#ffebee', icon: 'fa-exclamation-triangle' },
+        'pending_captain_review':         { label: 'Awaiting Captain Signature',     color: '#f57c00', bg: '#fff8e1', icon: 'fa-signature' },
+        'referred_dispatched':            { label: 'For Release to Complainant',     color: '#8e24aa', bg: '#f3e5f5', icon: 'fa-inbox' },
+        'referred':                       { label: 'Referred to Agency',             color: '#8e24aa', bg: '#f3e5f5', icon: 'fa-paper-plane' },
+
+        // ── Dismissed ──
+        'dismissed':                      { label: 'Dismissed',                      color: '#555',    bg: '#e0e0e0', icon: 'fa-ban' },
     };
-    return map[s] || { label: s.replace(/_/g, ' '), color: '#666', bg: '#f0f0f0', icon: 'fa-info-circle' };
+    return map[s] || { label: (s || '').replace(/_/g, ' '), color: '#666', bg: '#f0f0f0', icon: 'fa-info-circle' };
 }
+
+
+function getRoleAwareBadgeInfo(c, roleTab) {
+    // Ambiguous statuses → resolve by hearing context + role, then use the
+    // *stage* label (e.g. `summoned` on the respondent side → "Summoned",
+    //  on the complainant side → "Notice Issued"; `failed_mediation` →
+    //  "Pangkat Forming" or "Pangkat Hearing" depending on hearing context).
+    const ambiguous = ['summoned', 'failed_mediation'];
+    if (ambiguous.includes(c.status)) {
+        const stageKey = resolveStageForComplaint(c, roleTab);
+        const stage = COMPLAINT_STAGES[stageKey];
+        if (stage) {
+            return {
+                label: stage.label,
+                color: stage.color,
+                bg:    stage.color + '15',
+                icon:  stage.icon,
+            };
+        }
+    }
+    return getStatusBadgeInfo(c.status);
+}
+
+
+
+// ============================================================
+// REPUDIATION MODAL — handles BOTH settlement & arbitration
+// ============================================================
+async function openRepudiationModal(complaintId) {
+    // 1. Fetch state
+    Swal.fire({ title: 'Loading…', allowOutsideClick: false, didOpen: () => Swal.showLoading() });
+
+    let state;
+    try {
+        const r = await fetch(`complaint_ajax.php?action=get_repudiation_state&complaint_id=${complaintId}`);
+        state = await r.json();
+    } catch (e) {
+        Swal.close();
+        showErrorModal('Could not load the repudiation details.');
+        return;
+    }
+    Swal.close();
+
+    if (!state || !state.success) {
+        showErrorModal(state?.message || 'Could not load the repudiation details.');
+        return;
+    }
+
+    // 2. Already filed
+    if (state.already_filed) {
+        const filedDate = new Date(state.already_filed.filed_at.replace(' ', 'T'))
+            .toLocaleString('en-US', { dateStyle: 'long', timeStyle: 'short' });
+        const agreementLabel = (state.already_filed.repudiated_agreement === 'amicable_settlement')
+            ? 'Amicable Settlement (KP #16)'
+            : 'Agreement for Arbitration (KP #14)';
+        await Swal.fire({
+            icon: 'info',
+            title: 'Repudiation Already Filed',
+            html: `<div style="text-align:left;font-size:0.9rem;line-height:1.6;">
+                <p>You already filed a repudiation for this complaint on <strong>${escapeHtml(filedDate)}</strong>.</p>
+                <p><strong>Agreement:</strong> ${escapeHtml(agreementLabel)}</p>
+                <p><strong>Ground:</strong> ${escapeHtml(state.already_filed.ground)}</p>
+                <p><strong>Reason:</strong> ${escapeHtml(state.already_filed.reason_text)}</p>
+                ${state.already_filed.kp17_pdf_path ? `
+                    <a href="../${escapeHtml(state.already_filed.kp17_pdf_path)}" target="_blank"
+                       style="display:inline-block;margin-top:10px;padding:8px 14px;
+                              background:#c62828;color:#fff;border-radius:8px;text-decoration:none;
+                              font-size:0.8rem;font-weight:700;">
+                        <i class="fas fa-file-pdf"></i> View KP Form #17
+                    </a>` : ''}
+            </div>`,
+            confirmButtonColor: '#2E7D32'
+        });
+        return;
+    }
+
+    // 3. Not open
+    if (!state.window_open) {
+        await Swal.fire({
+            icon: 'warning',
+            title: 'Window Closed',
+            text: 'The repudiation window for this agreement has already closed.',
+            confirmButtonColor: '#2E7D32'
+        });
+        return;
+    }
+
+    // 4. Build the modal
+    const isSettlement = (state.agreement === 'amicable_settlement');
+    const agreementLabel = isSettlement
+        ? 'Amicable Settlement (KP Form #16)'
+        : 'Agreement for Arbitration (KP Form #14)';
+
+    const headerBg     = isSettlement
+        ? 'linear-gradient(135deg,#2E7D32,#43a047)'
+        : 'linear-gradient(135deg,#e65100,#f57c00)';
+    const headerIcon   = isSettlement ? 'fa-file-signature' : 'fa-gavel';
+    const windowBlurb  = isSettlement
+        ? 'You have 10 days from the date the Amicable Settlement was signed to file this repudiation.'
+        : 'You have 5 days from the date the Agreement for Arbitration was signed to file this repudiation.';
+    const effectBlurb  = isSettlement
+        ? 'The settlement will become <strong>void</strong>. The case will proceed to <strong>Certification to File Action (KP #20 / #21)</strong> so either party may file it in court.'
+        : 'The arbitration agreement will become <strong>void</strong>. The case will <strong>fall back to mediation</strong> before the Punong Barangay.';
+
+    const niceDeadline = new Date(state.deadline.replace(' ', 'T')).toLocaleString('en-US', {
+        weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit'
+    });
+    const daysLabel = state.days_left > 1
+        ? `${state.days_left} days left`
+        : (state.days_left === 1 ? '1 day left' : 'Less than a day left');
+
+    const result = await Swal.fire({
+        title: '',
+        html: `
+        <div style="text-align:left;font-family:'Segoe UI',Roboto,sans-serif;">
+            <div style="background:${headerBg};color:#fff;padding:18px 22px;
+                        display:flex;justify-content:space-between;align-items:center;gap:14px;border-radius:14px 14px 0 0;">
+                <div style="display:flex;align-items:center;gap:14px;">
+                    <i class="fas ${headerIcon}" style="font-size:1.8rem;opacity:0.9;"></i>
+                    <div>
+                        <div style="font-size:1.1rem;font-weight:700;">File Repudiation (KP Form #17)</div>
+                        <div style="font-size:0.78rem;opacity:0.9;margin-top:2px;">Complaint #${escapeHtml(state.reference_number)}</div>
+                    </div>
+                </div>
+                <div style="text-align:right;">
+                    <div style="font-size:0.65rem;text-transform:uppercase;letter-spacing:1px;opacity:0.8;">Days Left</div>
+                    <div style="font-size:1rem;font-weight:800;margin-top:2px;">${escapeHtml(daysLabel)}</div>
+                </div>
+            </div>
+
+            <div style="padding:20px 22px;background:#fff;border:1px solid #eee;border-top:none;border-radius:0 0 14px 14px;">
+                <div style="background:#f8faf8;border-left:4px solid ${isSettlement ? '#2E7D32' : '#f57c00'};
+                            border-radius:10px;padding:12px 14px;margin-bottom:16px;">
+                    <div style="font-size:0.72rem;text-transform:uppercase;letter-spacing:0.5px;
+                                font-weight:800;color:${isSettlement ? '#2E7D32' : '#e65100'};margin-bottom:4px;">
+                        Agreement Being Repudiated
+                    </div>
+                    <div style="font-size:0.95rem;font-weight:700;color:#1a2b22;">${escapeHtml(agreementLabel)}</div>
+                    <div style="font-size:0.78rem;color:#555;margin-top:6px;">${escapeHtml(windowBlurb)}</div>
+                    <div style="font-size:0.75rem;color:#c62828;font-weight:800;margin-top:8px;">
+                        <i class="fas fa-hourglass-half"></i> Deadline: ${escapeHtml(niceDeadline)}
+                    </div>
+                </div>
+
+                <div style="background:#ffebee;border-left:4px solid #c62828;border-radius:10px;
+                            padding:12px 14px;margin-bottom:16px;font-size:0.8rem;color:#b71c1c;line-height:1.55;">
+                    <strong style="display:block;margin-bottom:4px;">
+                        <i class="fas fa-exclamation-triangle"></i> This action cannot be undone.
+                    </strong>
+                    ${effectBlurb}
+                </div>
+
+                <div style="margin-bottom:14px;">
+                    <label style="display:block;font-size:0.85rem;font-weight:700;color:#1a472a;margin-bottom:8px;">
+                        Ground for Repudiation <span style="color:#c62828;">*</span>
+                    </label>
+                    <div id="repudGroundGroup" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+                        ${[
+                            { v: 'fraud',         label: 'Fraud',         icon: 'fa-user-secret' },
+                            { v: 'violence',      label: 'Violence',      icon: 'fa-hand-fist' },
+                            { v: 'intimidation',  label: 'Intimidation',  icon: 'fa-bullhorn' },
+                            { v: 'other',         label: 'Other',         icon: 'fa-ellipsis-h' },
+                        ].map(g => `
+                            <label class="repud-ground" data-value="${g.v}"
+                                   style="display:flex;align-items:center;gap:10px;padding:10px 12px;
+                                          border:2px solid #e2efe8;border-radius:10px;background:#fff;
+                                          cursor:pointer;font-size:0.85rem;font-weight:600;color:#333;transition:all .15s;">
+                                <input type="radio" name="repud_ground" value="${g.v}" style="margin:0;">
+                                <i class="fas ${g.icon}" style="color:#666;width:16px;text-align:center;"></i>
+                                ${escapeHtml(g.label)}
+                            </label>
+                        `).join('')}
+                    </div>
+                </div>
+
+                <div style="margin-bottom:14px;">
+                    <label style="display:block;font-size:0.85rem;font-weight:700;color:#1a472a;margin-bottom:6px;">
+                        Reason for Repudiation <span style="color:#c62828;">*</span>
+                        <span style="font-weight:400;color:#888;font-size:0.75rem;">(minimum 20 characters)</span>
+                    </label>
+                    <textarea id="repudReason" rows="4"
+                              placeholder="Explain in detail what happened — who did what, when, and why you believe the agreement should be repudiated."
+                              style="width:100%;padding:10px 12px;border:1.5px solid #cfd8dc;border-radius:8px;
+                                     font-size:0.9rem;font-family:inherit;box-sizing:border-box;resize:vertical;"></textarea>
+                    <div id="repudReasonCount" style="font-size:0.72rem;color:#888;margin-top:4px;">0 / 20</div>
+                </div>
+
+                <div style="margin-bottom:6px;">
+                    <label style="display:block;font-size:0.85rem;font-weight:700;color:#1a472a;margin-bottom:6px;">
+                        Evidence <span style="color:#888;font-weight:400;font-size:0.75rem;">(optional — PDF, JPG, PNG, WEBP, max 10 MB)</span>
+                    </label>
+                    <input type="file" id="repudEvidence" accept=".pdf,.jpg,.jpeg,.png,.webp"
+                           style="font-size:0.82rem;color:#555;">
+                </div>
+
+                <div id="repudError" style="display:none;margin-top:12px;padding:10px 12px;
+                                            background:#ffebee;border-left:4px solid #c62828;
+                                            border-radius:8px;font-size:0.82rem;color:#b71c1c;"></div>
+            </div>
+        </div>`,
+        width: 640,
+        showCancelButton: true,
+        confirmButtonText: '<i class="fas fa-gavel"></i> File Repudiation',
+        confirmButtonColor: '#c62828',
+        cancelButtonText: 'Cancel',
+        cancelButtonColor: '#6c757d',
+        reverseButtons: true,
+        allowOutsideClick: false,
+        didOpen: () => {
+            const reasonEl = document.getElementById('repudReason');
+            const countEl  = document.getElementById('repudReasonCount');
+            reasonEl.addEventListener('input', () => {
+                const n = reasonEl.value.trim().length;
+                countEl.textContent = `${n} / 20`;
+                countEl.style.color = n >= 20 ? '#2E7D32' : '#888';
+            });
+            // Radio card styling
+            document.querySelectorAll('.repud-ground').forEach(card => {
+                card.addEventListener('click', () => {
+                    document.querySelectorAll('.repud-ground').forEach(c => {
+                        c.style.borderColor = '#e2efe8';
+                        c.style.background  = '#fff';
+                        c.querySelector('i').style.color = '#666';
+                    });
+                    card.style.borderColor = '#c62828';
+                    card.style.background  = '#fff5f5';
+                    card.querySelector('i').style.color = '#c62828';
+                });
+            });
+        },
+        preConfirm: () => {
+            const groundEl = document.querySelector('input[name="repud_ground"]:checked');
+            const reason   = document.getElementById('repudReason').value.trim();
+            const errEl    = document.getElementById('repudError');
+
+            const fail = (msg) => {
+                errEl.textContent = msg;
+                errEl.style.display = 'block';
+                errEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                return false;
+            };
+
+            if (!groundEl) return fail('Please select a ground for the repudiation.');
+            if (reason.length < 20) return fail('Please write at least 20 characters explaining your reason.');
+
+            errEl.style.display = 'none';
+            return {
+                ground: groundEl.value,
+                reason,
+                file: document.getElementById('repudEvidence').files[0] || null,
+            };
+        }
+    });
+
+    if (!result.isConfirmed || !result.value) return;
+
+    // 5. Confirm again — this is destructive
+    const confirmAgain = await Swal.fire({
+        icon: 'warning',
+        title: 'Confirm Repudiation',
+        html: `<div style="text-align:left;font-size:0.9rem;line-height:1.6;">
+            <p>You are about to <strong>formally repudiate</strong> the <strong>${escapeHtml(agreementLabel)}</strong>
+               for complaint <strong>#${escapeHtml(state.reference_number)}</strong>.</p>
+            <p style="margin-top:8px;">${effectBlurb}</p>
+            <p style="margin-top:8px;color:#c62828;font-weight:700;">This cannot be undone.</p>
+        </div>`,
+        showCancelButton: true,
+        confirmButtonText: '<i class="fas fa-check"></i> Yes, File Repudiation',
+        confirmButtonColor: '#c62828',
+        cancelButtonText: 'Cancel',
+        cancelButtonColor: '#6c757d',
+        reverseButtons: true,
+    });
+    if (!confirmAgain.isConfirmed) return;
+
+    // 6. Submit
+    Swal.fire({ title: 'Filing repudiation…', allowOutsideClick: false, didOpen: () => Swal.showLoading() });
+
+    const fd = new FormData();
+    fd.append('action',       'file_repudiation');
+    fd.append('complaint_id', complaintId);
+    fd.append('ground',       result.value.ground);
+    fd.append('reason_text',  result.value.reason);
+    if (result.value.file) fd.append('evidence', result.value.file);
+
+    let resp;
+    try {
+        const r = await fetch('complaint_ajax.php', { method: 'POST', body: fd });
+        resp = await r.json();
+    } catch (e) {
+        Swal.close();
+        showErrorModal('Network error while filing the repudiation.');
+        return;
+    }
+    Swal.close();
+
+    if (!resp || !resp.success) {
+        showErrorModal(resp?.message || 'Could not file the repudiation.');
+        return;
+    }
+
+    // 7. Success
+    await Swal.fire({
+        icon: 'success',
+        title: 'Repudiation Filed',
+        html: `<div style="text-align:left;font-size:0.9rem;line-height:1.6;">
+            <p>Your repudiation has been filed and <strong>KP Form #17</strong> has been issued.</p>
+            <div style="margin-top:12px;padding:12px 14px;background:#ffebee;border-left:4px solid #c62828;border-radius:8px;font-size:0.83rem;color:#b71c1c;">
+                <strong>${isSettlement ? 'The Amicable Settlement is now void.' : 'The Agreement for Arbitration is now void.'}</strong><br>
+                ${isSettlement
+                    ? 'The case will proceed to Certification to File Action. You may claim it at the Barangay Hall.'
+                    : 'The case will return to mediation before the Punong Barangay.'}
+            </div>
+            ${resp.kp17_pdf_path ? `
+                <a href="../${escapeHtml(resp.kp17_pdf_path)}" target="_blank"
+                   style="display:inline-block;margin-top:12px;padding:8px 14px;
+                          background:#c62828;color:#fff;border-radius:8px;text-decoration:none;
+                          font-size:0.8rem;font-weight:700;">
+                    <i class="fas fa-file-pdf"></i> View KP Form #17
+                </a>` : ''}
+        </div>`,
+        confirmButtonText: '<i class="fas fa-check"></i> Done',
+        confirmButtonColor: '#2E7D32',
+        width: 560,
+    });
+
+    // 8. Refresh the list
+    if (typeof showMyComplaints === 'function') showMyComplaints();
+}
+
+// Export so the inline onclick can find it
+window.openRepudiationModal = openRepudiationModal;
 function renderComplaintCard(c, roleTab) {
-    const st = getStatusBadgeInfo(c.status);
+    const st = getRoleAwareBadgeInfo(c, roleTab);
     const isRespondent = roleTab === 'respondent';
     const isAnonymous  = c.is_anonymous == 1;
     const roleStripeColor = isRespondent ? '#e65100' : '#2E7D32';
@@ -2415,16 +3658,168 @@ function renderComplaintCard(c, roleTab) {
     const priorityColors = { urgent: '#c62828', high: '#e65100', medium: '#f9a825', low: '#43a047' };
     const priorityColor  = priorityColors[c.priority] || '#888';
 
-    // ── Hearing preview block (UPCOMING / ACTIVE ONLY) ────────
-    // Past hearings are hidden — no block is rendered.
-    let hearingBlock = '';
-    if (c.hearing_date) {
-        const hDateTime = c.hearing_date + (c.hearing_time ? ' ' + c.hearing_time : ' 00:00:00');
-        const hearingTs = new Date(hDateTime.replace(' ', 'T')).getTime();
-        const isPast    = !isNaN(hearingTs) && hearingTs < Date.now();
+    // ── Repudiation action blocks (settlement OR arbitration) ──
+// ── Repudiation action block (settlement OR arbitration) ──
+let repudiationBlock = '';
 
-        // ⬇️ Only render if hearing is in the FUTURE (upcoming/active)
-        if (!isPast) {
+const buildRepudiationBlock = (opts) => {
+    const { deadlineIso, color, borderColor, bg, headerIcon, headerText,
+            explainer, newStatusLine, complaintId } = opts;
+    const dt = new Date(deadlineIso.replace(' ', 'T'));
+    if (isNaN(dt.getTime())) return '';
+
+    const isOpen = dt.getTime() > Date.now();
+    const niceDeadline = dt.toLocaleDateString('en-US', {
+        weekday: 'long', month: 'long', day: 'numeric', year: 'numeric'
+    });
+
+    // Everything that used to be printed on the card now lives in tooltips.
+    const blockTooltip  = `${headerText}\n\n${explainer}`;
+    const buttonTooltip = isOpen
+        ? `${newStatusLine}\n\nDeadline: ${niceDeadline}`
+        : 'The repudiation window has closed.';
+
+    return `
+        <div title="${escapeHtml(blockTooltip)}"
+             style="margin-top:12px;padding:10px 12px;border-radius:10px;
+                    background:${bg};border-left:4px solid ${borderColor};">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+                <span title="${escapeHtml(blockTooltip)}"
+                      style="display:inline-flex;align-items:center;gap:6px;
+                             font-size:0.72rem;font-weight:800;text-transform:uppercase;
+                             letter-spacing:0.4px;color:${color};">
+                    <i class="fas ${headerIcon}"></i> ${escapeHtml(headerText)}
+                </span>
+                <span style="display:inline-flex;align-items:center;gap:6px;
+                             font-size:0.72rem;color:#555;">
+                    <i class="fas fa-stopwatch" style="color:${color};"></i>
+                    <span class="live-countdown" data-deadline="${escapeHtml(deadlineIso)}"
+                          style="font-family:'Courier New',monospace;font-weight:800;
+                                 font-size:0.78rem;color:${color};">…</span>
+                </span>
+            </div>
+            ${isOpen ? `
+                <button type="button"
+                        title="${escapeHtml(buttonTooltip)}"
+                        onclick="event.stopPropagation(); openRepudiationModal(${complaintId})"
+                        style="margin-top:10px;width:100%;padding:9px 12px;border:none;
+                               border-radius:10px;background:linear-gradient(135deg,#c62828,#e53935);
+                               color:#fff;font-size:0.82rem;font-weight:800;cursor:pointer;
+                               display:inline-flex;align-items:center;justify-content:center;gap:8px;
+                               box-shadow:0 3px 10px rgba(198,40,40,0.25);">
+                    <i class="fas fa-gavel"></i> File Repudiation (KP #17)
+                </button>` : `
+                <div title="${escapeHtml(buttonTooltip)}"
+                     style="margin-top:8px;padding:7px 10px;background:#ffebee;
+                            border-left:3px solid #c62828;border-radius:6px;
+                            font-size:0.72rem;font-weight:700;color:#b71c1c;
+                            display:inline-flex;align-items:center;gap:6px;">
+                    <i class="fas fa-lock"></i> Window closed
+                </div>`}
+        </div>`;
+};
+
+// ── Amicable Settlement window (10 days) ──
+if (c.status === 'settled_pending'
+    && c.repudiation_deadline
+    && Number(c.amicable_repudiated || 0) === 0) {
+    repudiationBlock = buildRepudiationBlock({
+        complaintId:   c.id,
+        deadlineIso:   c.repudiation_deadline,
+        color:         '#2e7d32',
+        borderColor:   '#2e7d32',
+        bg:            'linear-gradient(135deg,#e8f5e9 0%,#f1f8e9 100%)',
+        headerIcon:    'fa-file-signature',
+        headerText:    'Settlement — 10-Day Repudiation Window',
+        explainer:     'Grounds: fraud, violence, or intimidation. If repudiated, the settlement is void and the case proceeds to Certification to File Action.',
+        newStatusLine: 'Filing a repudiation will void the settlement and send the case to Certification to File Action.',
+    });
+}
+
+// ── Agreement for Arbitration window (5 days) ──
+if (c.status === 'arbitration_pending'
+    && c.repudiation_deadline
+    && Number(c.arbitration_repudiated || 0) === 0) {
+    repudiationBlock = buildRepudiationBlock({
+        complaintId:   c.id,
+        deadlineIso:   c.repudiation_deadline,
+        color:         '#e65100',
+        borderColor:   '#f57c00',
+        bg:            'linear-gradient(135deg,#fff8e1 0%,#ffecb3 100%)',
+        headerIcon:    'fa-gavel',
+        headerText:    'Arbitration — 5-Day Repudiation Window',
+        explainer:     'Grounds: fraud, violence, or intimidation. If repudiated, the arbitration is void and the case returns to mediation.',
+        newStatusLine: 'Filing a repudiation will void the arbitration agreement and send the case back to mediation.',
+    });
+}
+
+// ── Repudiation already filed — informational banner ──
+let repudiationFiledBlock = '';
+
+if (Number(c.amicable_repudiated || 0) === 1) {
+    repudiationFiledBlock = `
+        <div style="margin-top:12px;padding:10px 12px;border-radius:10px;
+                    background:#ffebee;border-left:4px solid #c62828;">
+            <div style="display:inline-flex;align-items:center;gap:6px;
+                        font-size:0.72rem;font-weight:800;text-transform:uppercase;
+                        letter-spacing:0.4px;color:#c62828;">
+                <i class="fas fa-file-signature"></i> Settlement Repudiated (KP #17)
+            </div>
+            <div style="font-size:0.78rem;color:#555;margin-top:6px;line-height:1.5;">
+                The <strong>Amicable Settlement (KP #16)</strong> was repudiated
+                by the <strong>${escapeHtml(c.amicable_repudiated_by_party || 'party')}</strong>.
+                The case will proceed to Certification to File Action.
+            </div>
+            ${c.kp17_pdf_path ? `
+                <a href="../${escapeHtml(c.kp17_pdf_path)}" target="_blank" rel="noopener"
+                   style="display:inline-block;margin-top:8px;padding:5px 12px;
+                          background:#c62828;color:#fff;border-radius:6px;
+                          text-decoration:none;font-size:0.72rem;font-weight:700;">
+                    <i class="fas fa-file-pdf"></i> View KP Form #17
+                </a>` : ''}
+        </div>`;
+} else if (Number(c.arbitration_repudiated || 0) === 1) {
+    repudiationFiledBlock = `
+        <div style="margin-top:12px;padding:10px 12px;border-radius:10px;
+                    background:#ffebee;border-left:4px solid #c62828;">
+            <div style="display:inline-flex;align-items:center;gap:6px;
+                        font-size:0.72rem;font-weight:800;text-transform:uppercase;
+                        letter-spacing:0.4px;color:#c62828;">
+                <i class="fas fa-gavel"></i> Arbitration Repudiated (KP #17)
+            </div>
+            <div style="font-size:0.78rem;color:#555;margin-top:6px;line-height:1.5;">
+                The <strong>Agreement for Arbitration (KP #14)</strong> was repudiated
+                by the <strong>${escapeHtml(c.arbitration_repudiated_by_party || 'party')}</strong>.
+                The case has fallen back to mediation.
+            </div>
+            ${c.kp17_pdf_path ? `
+                <a href="../${escapeHtml(c.kp17_pdf_path)}" target="_blank" rel="noopener"
+                   style="display:inline-block;margin-top:8px;padding:5px 12px;
+                          background:#c62828;color:#fff;border-radius:6px;
+                          text-decoration:none;font-size:0.72rem;font-weight:700;">
+                    <i class="fas fa-file-pdf"></i> View KP Form #17
+                </a>` : ''}
+        </div>`;
+}
+
+let hearingBlock = '';
+
+
+// ── Only show the hearing countdown while the case is still in an
+//    active hearing phase AND the hearing hasn't started yet.
+const HEARING_ACTIVE_STATUSES = [
+    'for_mediation', 'mediation_scheduled', 'in_mediation',
+    'pangkat_constitution_scheduled',
+    'pangkat_constituted', 'pangkat_scheduled',
+];
+const isHearingPhaseActive = HEARING_ACTIVE_STATUSES.includes(c.status);
+
+if (c.hearing_date && isHearingPhaseActive) {
+    const hDateTime = c.hearing_date + (c.hearing_time ? ' ' + c.hearing_time : ' 00:00:00');
+    const hearingTs = new Date(hDateTime.replace(' ', 'T')).getTime();
+    const isPast    = !isNaN(hearingTs) && hearingTs < Date.now();
+
+    if (!isPast) {
             const niceDate = new Date(c.hearing_date).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
             const niceTime = c.hearing_time ? formatTime12(c.hearing_time) : '';
             const loc      = c.hearing_location || 'Barangay Hall';
@@ -2523,8 +3918,20 @@ function renderComplaintCard(c, roleTab) {
                         <i class="fas fa-flag"></i> ${(c.priority || 'medium').toUpperCase()}
                     </span>
                 </div>
+                ${c.status === 'failed_mediation' ? `
+                    <div style="margin-top:10px;padding:10px 12px;background:#f3e5f5;border-left:3px solid #4a148c;border-radius:8px;font-size:0.75rem;color:#4a148c;line-height:1.5;">
+                        <i class="fas fa-info-circle"></i>
+                        <strong>Mediation ended.</strong> The Punong Barangay is now preparing the Pangkat ng Tagapagkasundo.
+                    </div>` : ''}
 
+                ${c.status === 'pangkat_constituted' ? `
+                    <div style="margin-top:10px;padding:10px 12px;background:#f3e5f5;border-left:3px solid #4a148c;border-radius:8px;font-size:0.75rem;color:#4a148c;line-height:1.5;">
+                        <i class="fas fa-info-circle"></i>
+                        The <strong>Chairperson</strong> will assign positions and schedule the conciliation hearing.
+                    </div>` : ''}
                 ${hearingBlock}
+                ${repudiationFiledBlock}
+                ${repudiationBlock}
             </div>
             <div style="padding:11px 16px;background:#f8faf8;border-top:1px solid #e2efe8;display:flex;gap:8px;align-items:center;">
                 <button type="button" onclick="event.stopPropagation(); viewComplaintDetails(${c.id})"
@@ -2733,7 +4140,7 @@ function renderComplaintDetails(data) {
                         ${ev.length ? `<div style="margin-top:10px;padding-top:10px;border-top:1px dashed #cfd8dc;">
                             <div style="font-size:0.72rem;font-weight:800;color:#666;text-transform:uppercase;letter-spacing:0.4px;margin-bottom:6px;"><i class="fas fa-paperclip"></i> Evidence (${ev.length})</div>
                             <div style="display:flex;flex-wrap:wrap;gap:6px;">
-                                ${ev.map(e => `<a href="../../${escapeHtml(e.file_path)}" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;gap:5px;padding:5px 10px;background:#e3f2fd;color:#1565c0;border-radius:6px;font-size:0.72rem;font-weight:600;text-decoration:none;"><i class="fas fa-file"></i> ${escapeHtml(e.file_name)}</a>`).join('')}
+                                ${ev.map(e => `<a href="../${escapeHtml(e.file_path)}" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;gap:5px;padding:5px 10px;background:#e3f2fd;color:#1565c0;border-radius:6px;font-size:0.72rem;font-weight:600;text-decoration:none;"><i class="fas fa-file"></i> ${escapeHtml(e.file_name)}</a>`).join('')}
                             </div>
                         </div>` : ''}
                     </div>`;
@@ -2754,7 +4161,7 @@ function renderComplaintDetails(data) {
                         <div style="font-size:0.78rem;color:#555;margin-top:2px;">${escapeHtml(f.event || '')}</div>
                         ${f.issued_at ? `<div style="font-size:0.7rem;color:#888;margin-top:4px;"><i class="fas fa-clock"></i> Issued ${new Date(f.issued_at.replace(' ','T')).toLocaleDateString('en-US',{dateStyle:'medium'})}</div>` : ''}
                     </div>
-                    ${f.pdf_path ? `<a href="../../${escapeHtml(f.pdf_path)}" target="_blank" rel="noopener" style="padding:8px 14px;background:#1565c0;color:#fff;text-decoration:none;border-radius:8px;font-size:0.78rem;font-weight:700;display:inline-flex;align-items:center;gap:6px;"><i class="fas fa-file-pdf"></i> Open PDF</a>` : ''}
+                    ${f.pdf_path ? `<a href="../${escapeHtml(f.pdf_path)}" target="_blank" rel="noopener" style="padding:8px 14px;background:#1565c0;color:#fff;text-decoration:none;border-radius:8px;font-size:0.78rem;font-weight:700;display:inline-flex;align-items:center;gap:6px;"><i class="fas fa-file-pdf"></i> Open PDF</a>` : ''}
                 </div>
             `).join('')}
         </div>
@@ -2943,6 +4350,19 @@ function showSubmitComplaintForm() {
         container.innerHTML = getSubmitComplaintForm();
         attachIncidentEventListeners();
         attachPartyEventListeners();
+        attachLiveValidation();
+        // Auto-priority live updater
+const descEl2 = document.getElementById('complaintDescription');
+const subjectEl2 = document.getElementById('complaintSubject');
+if (descEl2) {
+    descEl2.removeEventListener('input', updateAutoPriorityBadge);
+    descEl2.addEventListener('input', updateAutoPriorityBadge);
+}
+if (subjectEl2) {
+    subjectEl2.removeEventListener('change', updateAutoPriorityBadge);
+    subjectEl2.addEventListener('change', updateAutoPriorityBadge);
+}
+updateAutoPriorityBadge();
         ensureFieldErrorStyles();
         attachFieldAutoClear();
         const descInput = document.getElementById('complaintDescription');
@@ -2985,6 +4405,7 @@ function resetComplaintForm() {
     const anonGroup = document.getElementById('anonymityGroup');
     if (anonGroup) anonGroup.style.display = 'none';
     toggleAnonymityWarning();
+    updateAutoPriorityBadge();
 }
 
 function ensureComplaintContainer() {
@@ -3072,6 +4493,181 @@ function showComplaintSuccessModal(referenceNumber, onClose) {
 // ============================================================
 // SECTION 18: FIELD-LEVEL VALIDATION
 // ============================================================
+
+function attachLiveValidation() {
+    // 150ms debounce for a snappy-but-not-flickery feel
+    const debounce = (fn, ms = 150) => {
+        let t;
+        return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+    };
+
+    document.querySelectorAll('.party-name').forEach(input => {
+        const run = debounce(() => liveNameCheck(input, false));
+        input.addEventListener('input', run);
+        input.addEventListener('blur', () => liveNameCheck(input, true));
+    });
+
+    document.querySelectorAll('.party-contact').forEach(input => {
+        const run = debounce(() => liveContactCheck(input, false));
+        input.addEventListener('input', run);
+        input.addEventListener('blur', () => liveContactCheck(input, true));
+    });
+
+    document.querySelectorAll('.party-email').forEach(input => {
+        const run = debounce(() => liveEmailCheck(input, false));
+        input.addEventListener('input', run);
+        input.addEventListener('blur', () => liveEmailCheck(input, true));
+    });
+
+    document.querySelectorAll('.party-address').forEach(input => {
+        const run = debounce(() => liveAddressCheck(input, false));
+        input.addEventListener('input', run);
+        input.addEventListener('blur', () => liveAddressCheck(input, true));
+    });
+
+    document.querySelectorAll('.incident-description').forEach(input => {
+        const run = debounce(() => liveWordingCheck(input, 10, 'Incident description', false));
+        input.addEventListener('input', run);
+        input.addEventListener('blur', () => liveWordingCheck(input, 10, 'Incident description', true));
+    });
+
+    document.querySelectorAll('.incident-location').forEach(input => {
+        const run = debounce(() => liveRequiredCheck(input, 'Location is required.', false));
+        input.addEventListener('input', run);
+        input.addEventListener('blur', () => liveRequiredCheck(input, 'Location is required.', true));
+    });
+
+    document.querySelectorAll('.incident-date').forEach(input => {
+        input.addEventListener('change', () => liveRequiredCheck(input, 'Date is required.', true));
+        input.addEventListener('blur',   () => liveRequiredCheck(input, 'Date is required.', true));
+    });
+}
+
+function _setLiveError(input, msg) {
+    input.classList.add('field-error');
+    let next = input.nextElementSibling;
+    if (!(next && next.classList && next.classList.contains('field-error-msg'))) {
+        const s = document.createElement('span');
+        s.className = 'field-error-msg';
+        input.parentNode.insertBefore(s, input.nextSibling);
+        next = s;
+    }
+    next.innerHTML = '<i class="fas fa-exclamation-circle"></i>' + msg;
+}
+function _clearLiveError(input) {
+    input.classList.remove('field-error');
+    const next = input.nextElementSibling;
+    if (next && next.classList && next.classList.contains('field-error-msg')) next.remove();
+}
+
+function liveNameCheck(input, force = false) {
+    const v = input.value.trim();
+
+    // Don't scream at the user for the first 2 characters
+    if (v.length < 2) {
+        if (force && v === '') _setLiveError(input, 'Name is required.');
+        else _clearLiveError(input);
+        return;
+    }
+
+    const { ok, msg } = validatePersonNameJS(v);
+    if (ok) _clearLiveError(input);
+    else    _setLiveError(input, msg);
+}
+
+function liveContactCheck(input, force = false) {
+    const v = input.value.trim();
+    if (v === '') {
+        if (force && input.hasAttribute('required')) _setLiveError(input, 'Contact number is required.');
+        else _clearLiveError(input);
+        return;
+    }
+    if (validateContactNumberJS(v)) _clearLiveError(input);
+    else _setLiveError(input, 'Contact must be 11 digits starting with 09.');
+}
+
+function liveEmailCheck(input, force = false) {
+    const v = input.value.trim();
+    if (v === '') { _clearLiveError(input); return; }
+    if (validateEmailOrEmptyJS(v)) _clearLiveError(input);
+    else _setLiveError(input, 'Invalid email address.');
+}
+
+function liveAddressCheck(input, force = false) {
+    const v = input.value.trim();
+    if (v === '') {
+        if (force && input.hasAttribute('required')) _setLiveError(input, 'Address is required.');
+        else _clearLiveError(input);
+        return;
+    }
+    _clearLiveError(input);
+}
+
+function liveWordingCheck(input, minLen, label, force = false) {
+    const v = input.value.trim();
+    if (v === '') {
+        if (force && input.hasAttribute('required')) _setLiveError(input, label + ' is required.');
+        else _clearLiveError(input);
+        return;
+    }
+    const { ok, msg } = validateWordingJS(v, minLen, label);
+    if (ok) _clearLiveError(input); else _setLiveError(input, msg);
+}
+
+function liveRequiredCheck(input, msg, force = false) {
+    const v = (input.value || '').trim();
+    if (v === '') {
+        if (force) _setLiveError(input, msg);
+        else _clearLiveError(input);
+        return;
+    }
+    _clearLiveError(input);
+}
+
+function highlightField(role, message) {
+    // Try data-role first
+    let el = document.querySelector(`[data-role="${role}"]`);
+
+    // Fallback: direct ID
+    if (!el) el = document.getElementById(role);
+
+    if (!el) {
+        // Last resort: scroll top + popup
+        showErrorModal(message);
+        return;
+    }
+
+    // If role targets an evidence section (no input), highlight its container
+    if (role.startsWith('incidents_evidence')) {
+        const section = document.querySelector(`[data-role="${role}"]`);
+        if (section) {
+            section.style.border = '2px solid #e53935';
+            section.style.borderRadius = '10px';
+            section.style.padding = '10px';
+            section.style.background = '#fff5f5';
+            setTimeout(() => { section.style.border = ''; section.style.padding = ''; section.style.background = ''; }, 4000);
+            section.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            const msgEl = document.createElement('span');
+            msgEl.className = 'field-error-msg';
+            msgEl.innerHTML = '<i class="fas fa-exclamation-circle"></i>' + message;
+            section.appendChild(msgEl);
+            setTimeout(() => msgEl.remove(), 5000);
+        }
+        return;
+    }
+
+    el.classList.add('field-error');
+    let next = el.nextElementSibling;
+    if (!(next && next.classList && next.classList.contains('field-error-msg'))) {
+        const msgEl = document.createElement('span');
+        msgEl.className = 'field-error-msg';
+        el.parentNode.insertBefore(msgEl, el.nextSibling);
+        next = msgEl;
+    }
+    next.innerHTML = '<i class="fas fa-exclamation-circle"></i>' + message;
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    attachFieldAutoClear();
+}
 function ensureFieldErrorStyles() {
     if (document.getElementById('fieldErrorStyle')) return;
     const style = document.createElement('style');
@@ -3144,7 +4740,10 @@ window.initComplaintModule = initComplaintModule;
 window.showSubmitComplaintForm = showSubmitComplaintForm;
 window.showMyComplaints = showMyComplaints;
 window.switchComplaintTab = switchComplaintTab;
-window.setStatusFilter = setStatusFilter;
+window.setStageFilter = setStageFilter;
+window.getStageForStatus = (s) => STATUS_TO_STAGE[s] || 'intake';
+window.resolveStageForComplaint = resolveStageForComplaint;
+window.COMPLAINT_STAGES = COMPLAINT_STAGES;
 window.submitComplaint = submitComplaint;
 window.viewComplaintDetails = viewComplaintDetails;
 window.addComplaintNote = addComplaintNote;
