@@ -452,56 +452,35 @@ function escapeRegex(str) { return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 
 function countKeywordMatches(description, keywords) {
     const W = window.KEYWORD_WEIGHTS || {};
-    const wSingle      = W.single         ?? 1;
-    const wPhrase2     = W.phrase2        ?? 3;
-    const wPhrase3plus = W.phrase3plus    ?? 5;
-    const maxOcc       = W.maxOccurrences ?? 3;
-
-    if (!keywords || keywords.length === 0) {
-        return { score: 0, hits: 0, phraseHits: 0, matchedKeywords: [] };
-    }
+    const wSingle = W.single ?? 1;
+    const wPhrase2 = W.phrase2 ?? 4;
+    const wPhrase3plus = W.phrase3plus ?? 7;
+    const maxOcc = W.maxOccurrences ?? 2;
+    if (!keywords || !keywords.length) return { score: 0, hits: 0, phraseHits: 0, matchedKeywords: [] };
 
     let score = 0, hits = 0, phraseHits = 0;
     const matchedKeywords = [];
-
-    for (const kw of keywords) {
-        const k = kw.toLowerCase();
-
-        let count = 0;
-
-        if (k.includes(' ')) {
-            let idx = 0;
-            while (count < maxOcc) {
-                const pos = description.indexOf(k, idx);
-                if (pos === -1) break;
-                count++;
-                idx = pos + k.length;
-            }
-        } else {
-            const re = new RegExp(`\\b${escapeRegex(k)}\\b`, 'gi');
-            const m = description.match(re);
-            if (m) count = Math.min(m.length, maxOcc);
-        }
-
-        if (count === 0) continue;
-
-        const wordCount = k.trim().split(/\s+/).length;
-        const weight = wordCount >= 3 ? wPhrase3plus
-                     : wordCount === 2 ? wPhrase2
-                     : wSingle;
-
+    const seen = new Set();
+    for (const raw of keywords) {
+        const kw = normalizeText(raw);
+        if (!kw || seen.has(kw)) continue;
+        seen.add(kw);
+        const parts = kw.split(/\s+/);
+        const escaped = escapeRegex(kw).replace(/\ /g, '\\s+');
+        const re = new RegExp(`(?:^|\\s)${escaped}(?=$|\\s)`, 'g');
+        const matches = description.match(re);
+        const count = matches ? Math.min(matches.length, maxOcc) : 0;
+        if (!count) continue;
+        const wordCount = parts.length;
+        const weight = wordCount >= 3 ? wPhrase3plus : wordCount === 2 ? wPhrase2 : wSingle;
         const points = weight * count;
-
         score += points;
         hits++;
         if (wordCount >= 2) phraseHits++;
-
-        matchedKeywords.push({ kw: kw, weight, count, points });
+        matchedKeywords.push({ kw: raw, weight, count, points });
     }
-
     return { score, hits, phraseHits, matchedKeywords };
 }
-
 function lawVictimBonus(law, victimCtx) {
     if (!law.victim || law.victim.length === 0) return 0;
     let bonus = 0;
@@ -536,7 +515,8 @@ function classifyDescriptionMulti(description) {
         };
     });
 
-    const withHits = allScored.filter(x => x.hits > 0 && x.score >= minScore);
+    // Require a contextual phrase or at least two distinct keyword clues.
+    const withHits = allScored.filter(x => x.hits > 0 && (x.phraseHits > 0 || x.hits >= 2) && x.score >= minScore);
     if (withHits.length === 0) return [];
 
     withHits.sort((a, b) => {

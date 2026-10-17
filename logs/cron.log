@@ -1798,3 +1798,63 @@
 [2026-10-18 03:35:03] OK   unclaimed_document — sent=0 (0.8ms)
 [2026-10-18 03:35:03] OK   vehicle_trip_reminder — sent=0 (2.2ms)
 [2026-10-18 03:35:03] === RUN END — total_sent=0 failed=1 ===
+[2026-10-18 03:40:01] === RUN START (2026-10-18 03:40:01) — 7 task(s) ===
+[2026-10-18 03:40:01] OK   equipment_return_reminder — sent=0 (6ms)
+[2026-10-18 03:40:02] OK   hearing_reminder — sent=0 (57.7ms)
+[2026-10-18 03:40:02] FAIL pickup_reminder — Call to undefined function cronWasNotificationSentToday() (1.8ms)
+[2026-10-18 03:40:02] equipment_overdue: SKIPPED resident=7 request=48 (last sent 0.5h ago)
+[2026-10-18 03:40:02] equipment_overdue: SKIPPED resident=7 request=49 (last sent 0.5h ago)
+[2026-10-18 03:40:02] equipment_overdue: SKIPPED resident=7 request=50 (last sent 0.5h ago)
+[2026-10-18 03:40:02] OK   return_reminder — sent=0 (7.1ms)
+[2026-10-18 03:40:02] OK   same_day_reminder — sent=0 (1.3ms)
+[2026-10-18 03:40:02] OK   unclaimed_document — sent=0 (3.8ms)
+[2026-10-18 03:40:02] OK   vehicle_trip_reminder — sent=0 (5.8ms)
+[2026-10-18 03:40:02] === RUN END — total_sent=0 failed=1 ===
+[2026-10-18 03:45:03] === RUN START (2026-10-18 03:45:03) — 7 task(s) ===
+[2026-10-18 03:45:03] OK   equipment_return_reminder — sent=0 (4.9ms)
+[2026-10-18 03:45:03] OK   hearing_reminder — sent=0 (13.9ms)
+[2026-10-18 03:45:03] FAIL pickup_reminder — Call to undefined function cronWasNotificationSentToday() (2.1ms)
+[2026-10-18 03:45:03] equipment_overdue: SKIPPED resident=7 request=48 (last sent 0.5h ago)
+[2026-10-18 03:45:03] equipment_overdue: SKIPPED resident=7 request=49 (last sent 0.5h ago)
+[2026-10-18 03:45:03] equipment_overdue: SKIPPED resident=7 request=50 (last sent 0.5h ago)
+[2026-10-18 03:45:03] OK   return_reminder — sent=0 (4.4ms)
+[2026-10-18 03:45:03] OK   same_day_reminder — sent=0 (0.6ms)
+[2026-10-18 03:45:03] OK   unclaimed_document — sent=0 (1.8ms)
+[2026-10-18 03:45:03] OK   vehicle_trip_reminder — sent=0 (3.9ms)
+[2026-10-18 03:45:03] === RUN END — total_sent=0 failed=1 ===
+[2026-10-18 03:50:02] === RUN START (2026-10-18 03:50:02) — 7 task(s) ===
+[2026-10-18 03:50:02] OK   equipment_return_reminder — sent=0 (3.9ms)
+[2026-10-18 03:50:02] OK   hearing_reminder — sent=0 (12ms)
+[2026-10-18 03:50:02] FAIL pickup_reminder — Call to undefined function cronWasNotificationSentToday() (3ms)
+[2026-10-18 03:50:02] equipment_overdue: SKIPPED resident=7 request=48 (last sent 0.6h ago)
+[2026-10-18 03:50:02] equipment_overdue: SKIPPED resident=7 request=49 (last sent 0.6h ago)
+[2026-10-18 03:50:02] equipment_overdue: SKIPPED resident=7 request=50 (last sent 0.6h ago)
+[2026-10-18 03:50:02] OK   return_reminder — sent=0 (3ms)
+[2026-10-18 03:50:02] OK   same_day_reminder — sent=0 (1ms)
+[2026-10-18 03:50:02] OK   unclaimed_document — sent=0 (0.6ms)
+[2026-10-18 03:50:02] OK   vehicle_trip_reminder — sent=0 (2.4ms)
+[2026-10-18 03:50:02] === RUN END — total_sent=0 failed=1 ===
+[2026-10-18 03:55:02] === RUN START (2026-10-18 03:55:02) — 7 task(s) ===
+[2026-10-18 03:55:02] OK   equipment_return_reminder — sent=0 (5.7ms)
+[2026-10-18 03:55:02] OK   hearing_reminder — sent=0 (34.3ms)
+[2026-10-18 03:55:02] FAIL pickup_reminder — Call to undefined function cronWasNotificationSentToday() (3.7ms)
+[2026-10-18 03:55:02] equipment_overdue: SKIPPED resident=7 request=48 (last sent 0.7h ago)
+[2026-10-18 03:55:02] equipment_overdue: SKIPPED resident=7 request=49 (last sent 0.7h ago)
+[2026-10-18 03:55:02] equipment_overdue: SKIPPED resident=7 request=50 (last sent 0.7h ago)
+[2026-10-18 03:55:02] OK   return_reminder — sent=0 (8.2ms)
+[2026-10-18 03:55:02] OK   same_day_reminder — sent=0 (2ms)
+[2026-10-18 03:55:02] OK   unclaimed_document — sent=0 (1.3ms)
+[2026-10-18 03:55:02] OK   vehicle_trip_reminder — sent=0 (3.2ms)
+[2026-10-18 03:55:02] === RUN END — total_sent=0 failed=1 ===
+[2026-10-18 04:00:05] === RUN START (2026-10-18 04:00:05) — 7 task(s) ===
+[2026-10-18 04:00:05] OK   equipment_return_reminder — sent=0 (15.1ms)
+[2026-10-18 04:00:05] OK   hearing_reminder — sent=0 (39.5ms)
+[2026-10-18 04:00:05] FAIL pickup_reminder — Call to undefined function cronWasNotificationSentToday() (33.3ms)
+[2026-10-18 04:00:05] equipment_overdue: SKIPPED resident=7 request=48 (last sent 0.8h ago)
+[2026-10-18 04:00:05] equipment_overdue: SKIPPED resident=7 request=49 (last sent 0.8h ago)
+[2026-10-18 04:00:05] equipment_overdue: SKIPPED resident=7 request=50 (last sent 0.8h ago)
+[2026-10-18 04:00:05] OK   return_reminder — sent=0 (19.8ms)
+[2026-10-18 04:00:05] OK   same_day_reminder — sent=0 (2.1ms)
+[2026-10-18 04:00:05] OK   unclaimed_document — sent=0 (4ms)
+[2026-10-18 04:00:05] OK   vehicle_trip_reminder — sent=0 (6.7ms)
+[2026-10-18 04:00:05] === RUN END — total_sent=0 failed=1 ===

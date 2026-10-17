@@ -617,14 +617,12 @@ window.BARANGAY_LAWS = [
         article: 'Art. 310', title: 'Qualified Theft (Value ≤ P500)', victim: ['any','property'],
         keywords: [
             'qualified theft','qualified thefts','mabigat na pagnanakaw',
-            'qualified','grave theft','aggravated theft',
-            'pinasok ang bahay','pumasok sa bahay',
-            'akyat bahay','akyat-bahay','nag-akyat bahay',
-            'umakyat sa bahay','umakyat sa bubong','umakyat sa bintana',
-            'pinasok ang bintana','pinasok ang pintuan',
+            'grave theft','aggravated theft',
+            'akyat bahay na may pagsira ng bintana','akyat-bahay na may pagbasag ng pinto',
+            'umakyat sa bubong at sinira ang bintana','pinasok sa pamamagitan ng pagsira ng bintana',
+            'sinira ang bintana para makapasok','sinira ang pintuan para makapasok',
             'sinira ang bintana at nagnakaw','sinira ang pinto at nagnakaw',
-            'pinasok ang bahay at nagnakaw','pumasok sa bahay at nagnakaw',
-            'pagnanakaw sa bahay','pagnanakaw na may pananakit',
+            'pagnanakaw sa pamamagitan ng pagbasag ng bintana','pagnanakaw matapos sirain ang pinto','pagnanakaw na may pananakit',
             'below 500','less than 500','500 piso','500 pesos','limandaang piso'
         ]
     },
@@ -972,26 +970,130 @@ window.BARANGAY_LAWS = [
     {
         article: 'PD 1612', title: 'Fencing of Stolen Properties (Value ≤ P50)', victim: ['any','property'],
         keywords: [
-            'fencing','fence','fences','fencing of stolen property',
-            'fencing of stolen properties','fence stolen','fence stolen property',
-            'stolen property','stolen properties','stolen goods','stolen item',
-            'stolen items','stolen thing','stolen things','stolen stuff',
-            'nakaw na gamit','nakaw na bagay','nakaw na mga gamit',
-            'nakaw na mga bagay','nakaw na','nakaw','nagnakaw',
-            'bumili ng nakaw','bumibili ng nakaw','bibili ng nakaw',
-            'tumanggap ng nakaw','tumatanggap ng nakaw','tatanggap ng nakaw',
+            'fencing','fencing of stolen property','fencing of stolen properties',
+            'fence stolen property','fencing operation','stolen goods dealer',
+            'nakaw na gamit na ibinenta','nakaw na bagay na ibinenta',
+            'bumili ng alam na nakaw','bumili ng alam niyang nakaw',
+            'bumibili ng alam na nakaw','bibili ng alam na nakaw',
+            'tumanggap ng nakaw para ibenta','tumatanggap ng nakaw para ibenta',
+            'tinanggap ang nakaw para ibenta','binili ang nakaw para ibenta',
             'pinagbentahan ng nakaw','pinagbebentahan ng nakaw',
-            'nagtago ng nakaw','nagtatago ng nakaw','itinago ang nakaw',
-            'itinatago ang nakaw','itinago','itinatago',
-            'kinupkop','kinukupkop','nagkupkop','nagkukupkop',
-            'tinanggap','tinatanggap','tumanggap','tumatanggap',
-            'binili','binibili','bumili','bumibili',
-            'fence','fencer','fencing operation','stolen goods dealer',
-            'dealer ng nakaw','tindero ng nakaw','nagtitinda ng nakaw',
-            'nagbebenta ng nakaw','nagbebenta','nagtitinda'
+            'nagtinda ng nakaw na gamit','nagtitinda ng nakaw na gamit',
+            'nagbebenta ng nakaw na gamit','nagbebenta ng ninakaw na gamit',
+            'dealer ng ninakaw na gamit','tindero ng ninakaw na gamit',
+            'knowingly bought stolen goods','knowingly received stolen property',
+            'received stolen goods for resale','selling goods known to be stolen'
         ]
     }
 ];
+
+// Additional contextual variants; generic single words do not identify an article.
+const ARTICLE_KEYWORD_EXPANSIONS = {
+    'Art. 154': ['ipinost ang paninira','nagkalat ng maling pahayag online','mapanirang post sa social media','false statement on social media','defamatory online post','nagpakalat ng maling balita'],
+    'Art. 155': ['istorbo sa kapitbahay dahil sa ingay','noise disturbance at night','malakas na videoke tuwing gabi','nagpatugtog nang malakas','panggugulo sa pampublikong lugar','public nuisance noise'],
+    'Art. 175': ['gumamit ng pekeng sertipiko','nagharap ng huwad na dokumento','presented a fake certificate','used a falsified document','pekeng medical certificate'],
+    'Art. 178': ['gumamit ng ibang pangalan','nagpakilalang ibang tao','using a false identity','nagbigay ng maling pagkakakilanlan'],
+    'Art. 179': ['nagkunwaring pulis','nagsuot ng unipormeng pulis kahit hindi pulis','unauthorized police uniform','ginamit ang insignia ng pulis'],
+    'Art. 265': ['matagal na paggaling sa sugat','injury requiring medical treatment','nasaktan at hindi nakapagtrabaho','physical injury with medical certificate'],
+    'Art. 266': ['sinaktan ako','sinampal ako','tinulak ako','minor physical injury','light physical injuries','pambubugbog na walang malubhang sugat','pananakit sa katawan'],
+    'Art. 280': ['pumasok siya sa bahay ko','pumasok sa bahay ko','pumasok sa bahay namin','pumasok sa bahay nila','pumasok siya sa loob ng bahay','pinasok niya ang bahay ko','pinasok ang bahay ko','pumasok nang walang pahintulot sa bahay','pumasok sa bahay nang walang pahintulot','pumasok sa bahay nang walang paalam','pumasok sa tirahan nang walang pahintulot','pumasok habang wala kami','pumasok kahit bawal','sapilitang pumasok sa bahay','intruded into dwelling','pilit na pumasok sa tirahan','ayaw umalis sa loob ng bahay'],
+    'Art. 281': ['pumasok sa bakuran nang walang pahintulot','unlawful entry into property','pumasok sa pribadong lupa','trespassing on private property'],
+    'Art. 283': ['nagbanta na mananakit','threatened to harm me','banta na gagawa ng krimen','nagbanta ng masama sa akin'],
+    'Art. 285': ['banta na walang kondisyon','threatened to cause harm','nagbanta nang pabiro ngunit nakakatakot'],
+    'Art. 286': ['pinilit akong gawin laban sa kalooban ko','pinagbantaan para sumunod','forced me against my will','pinigilan akong umalis'],
+    'Art. 287': ['pinilit akong magbayad gamit ang dahas','kinuha ang gamit sa pamamagitan ng pamimilit','coerced me to pay','sapilitang paniningil ng utang'],
+    'Art. 309': ['nagnakaw ng pera','nagnakaw siya ng pera','nagnakaw ng pera sa bahay','nagnakaw ng gamit sa bahay','nagnakaw ng cellphone','nagnakaw ng wallet','nagnakaw ng alahas','ninakaw ang pera ko','ninakaw ang pera namin','ninakaw ang gamit ko','ninakaw ang gamit namin','kinuha ang pera nang walang pahintulot','kinuha ang gamit nang walang pahintulot','stole money from my house','stole money from me','stole my property','ninakaw ang cellphone','nawalang gamit dahil kinuha','pagnanakaw ng pera'],
+    'Art. 310': ['qualified theft by employee','pagnanakaw ng pinagkatiwalaang gamit','ninakaw ng empleyado ang pinagkatiwalaang pera','ninakaw ng kasambahay ang gamit ng amo','ninakaw ng tauhan ang pera ng employer','theft by abuse of confidence','ninakaw habang ginagamit ang katungkulan','pagnanakaw na sinamantala ang tiwala','ninakaw sa panahon ng kalamidad','ninakaw ang malaking alagang hayop','ninakaw ang gamit ng amo'],
+    'Art. 312': ['inaangkin ang lupa ng iba','pinapalayas sa sariling lupa','occupied my land without permission','sapilitang pag-okupa ng lupa'],
+    'Art. 313': ['inilipat ang bakod sa hangganan','binago ang palatandaan ng lupa','moved the property boundary','inilipat ang mohon'],
+    'Art. 315': ['niloko para magbigay ng pera','scammed me out of money','nangako pero hindi tinupad matapos magbayad','panloloko sa pera'],
+    'Art. 316': ['ibinenta ang bagay na hindi kanya','sold property that was not theirs','panlilinlang sa bentahan ng lupa'],
+    'Art. 318': ['panloloko sa transaksyon','deceived me in a transaction','mapanlinlang na pangako para makakuha ng pera'],
+    'Art. 329': ['sinira ang gamit ng kapitbahay','damaged my property','sinadyang pagsira ng ari-arian','sinira ang halaman o bakod'],
+    'BP 22': ['talbog na tseke','bounced check','check returned for insufficient funds','nag-issue ng tseke na walang pondo'],
+    'PD 1612': ['bumili ng alam niyang nakaw','bumili ng alam na nakaw na gamit','binili ang ninakaw na cellphone para ibenta','binili ang ninakaw na alahas para ibenta','binili ang ninakaw na gamit para ibenta','nagbenta ng ninakaw na gamit','nagbebenta ng ninakaw na gamit','tinanggap para ibenta ang nakaw','tumatanggap ng nakaw para ibenta','nag-iingat ng ninakaw para ibenta','ipinagbili ang ninakaw na ari-arian','knowingly bought stolen goods','knowingly received stolen property','received stolen goods for resale','selling goods known to be stolen']
+// Further natural-language descriptions for articles with fewer everyday variants.
+Object.assign(ARTICLE_KEYWORD_EXPANSIONS, {
+    'Art. 154': ['nag-upload ng mapanirang pahayag','nag-share ng maling paratang online','nag-post ng mapanirang komento tungkol sa akin','ipinakalat sa internet ang maling impormasyon tungkol sa akin','published an insulting statement online','posted defamatory claims about me'],
+    'Art. 155': ['nagpatugtog ng videoke nang madaling araw','nag-iingay sa tapat ng bahay namin gabi-gabi','malakas na speaker na nakakaistorbo sa kapitbahay','nagpaputok at nanggulo sa kalye','disturbing neighbors with loud music','shouting and causing a disturbance in public'],
+    'Art. 175': ['nagpasa ng pekeng barangay clearance','gumamit ng pekeng medical certificate','nagpakita ng huwad na sertipiko','presented a fake government certificate','used a forged certificate to obtain a benefit'],
+    'Art. 178': ['gumamit ng alyas para itago ang tunay na pangalan','nagpakilalang may ibang pangalan','nagbigay ng pekeng pangalan sa opisyal','used an alias to conceal identity','concealed their true name from authorities'],
+    'Art. 179': ['nagkunwaring sundalo gamit ang uniporme','nagsuot ng pekeng uniporme ng opisyal','gumamit ng pekeng badge o insignia','wore an unauthorized uniform and insignia'],
+    'Art. 252': ['nasugatan habang nag-aaway ang grupo','nasaktan sa rambulan ng maraming tao','injured during a tumultuous group fight'],
+    'Art. 253': ['tinulungan siyang magpakamatay','nagbigay ng tulong para tapusin ang sariling buhay','assisted another person in a suicide attempt'],
+    'Art. 260': ['naghamon siya ng duelo','nagkasundo silang magduelo','challenged another person to a duel'],
+    'Art. 265': ['kinailangan magpagamot dahil sa pananakit','ilang araw bago gumaling ang sugat','injury required medical attention and recovery time'],
+    'Art. 266': ['sinuntok ako sa mukha','sinipa ako at nagkapasa','sinampal sa harap ng mga kapitbahay','minor injury after being hit','sinaktan ngunit walang malubhang pinsala'],
+    'Art. 269': ['dinakip ako kahit walang awtoridad','ikinulong nang walang legal na basehan','pinigil at dinala nang labag sa batas','unlawfully arrested and detained me'],
+    'Art. 271': ['hinikayat ang anak ko na tumakas','tinulungan ang menor na umalis sa bahay','persuaded a minor to leave their home'],
+    'Art. 275': ['iniwan ang naaksidenteng tao nang walang tulong','pinabayaan ang taong nasa panganib','failed to help an injured person in danger'],
+    'Art. 276': ['iniwan ang batang wala pang pitong taong gulang','pinabayaan ang sanggol sa bahay','left a child under seven without care'],
+    'Art. 277': ['pinabayaan ng magulang ang menor na anak','hindi inalagaan ng guardian ang bata','parent failed to care for a child','guardian neglected a minor in their custody'],
+    'Art. 280': ['pumasok siya sa bahay ko at walang pahintulot','pinasok ang aming tirahan kahit pinagbawalan','pumasok sa bahay habang wala ang may-ari','pilit na pumasok sa loob ng bahay ko','entered our home despite being told not to','entered my dwelling without permission'],
+    'Art. 281': ['pumasok sa bakuran ko nang walang paalam','pumasok sa pribadong lote kahit pinagbawalan','nagpunta sa pribadong lugar nang walang pahintulot','entered private property after being warned'],
+    'Art. 283': ['nagbanta siyang mananakit kung hindi susunod','nagbanta na gagawa ng krimen laban sa akin','threatened to commit a crime unless I complied'],
+    'Art. 285': ['nagbanta na mananakit sa gitna ng pagtatalo','nagbitiw ng banta laban sa akin','made a threat during an argument'],
+    'Art. 286': ['pinilit akong sumama kahit ayaw ko','pinagbantaan ako para gawin ang isang bagay','sapilitang pinigilan akong umalis','forced me to act against my will through intimidation'],
+    'Art. 287': ['sapilitang kinuha ang bayad sa utang','pinilit akong magbayad sa pamamagitan ng dahas','gumamit ng dahas para maningil ng utang','used force to collect a debt'],
+    'Art. 288': ['pinilit ang empleyado na magtrabaho sa pamamagitan ng banta','pinagbantaan ang manggagawa para sumunod','coerced a worker through violence or threats'],
+    'Art. 289': ['pinagbantaan dahil sumali sa samahan ng manggagawa','pinigilan ang pagbuo ng labor group gamit ang dahas','threatened workers to stop organizing'],
+    'Art. 290': ['binasa o binuksan ang pribadong sulat ko','kinuha ang liham at binuksan nang walang pahintulot','opened my sealed letter without permission'],
+    'Art. 291': ['ibinunyag ng opisyal ang lihim na nalaman sa trabaho','inilabas ang confidential na impormasyon dahil sa posisyon','official disclosed a secret learned through their office'],
+    'Art. 309': ['pumasok siya sa bahay ko at nagnakaw ng pera','nagnakaw siya ng pera sa loob ng bahay','kinuha ang pera at gamit nang walang pahintulot','ninakaw ang pera sa pitaka ko','stole cash from inside my home','took my belongings without permission'],
+    'Art. 310': ['ninakaw ang gamit matapos sirain ang kandado','binasag ang bintana para makapagnakaw','ninakaw ang ari-arian sa pamamagitan ng pagbasag ng pinto','broke the window to steal property','stole property by breaking a door or window'],
+    'Art. 312': ['sapilitang inangkin ang lupa ng iba','pinalayas ako sa lupang pag-aari ko','kinuha ang karapatan sa lupa sa pamamagitan ng dahas','forcibly occupied another person’s land'],
+    'Art. 313': ['inilipat ang mohon para palakihin ang lote','binago ang hangganan sa pagitan ng lupa','inalis ang palatandaan ng property boundary','moved a land marker to change a boundary'],
+    'Art. 315': ['nangako ng bayad pero niloko ako para makuha ang pera','nagkunwaring may negosyo para makahingi ng puhunan','false pretenses to obtain money from me','deceived me into handing over money'],
+    'Art. 316': ['isinangla ang gamit na hindi pag-aari niya','ibinenta ang lupang hindi naman kanya','fraudulently sold property belonging to another'],
+    'Art. 317': ['niloko ang menor para makuha ang pera niya','defrauded a child or minor of money'],
+    'Art. 318': ['gumamit ng huwad na pangako para makakuha ng pera','niloko ako sa kasunduan at kinuha ang bayad','used deceit to obtain money or property'],
+    'Art. 319': ['ibinenta ang sasakyang nakasangla','isinangla ang ari-arian at ibinenta pa rin','sold property that was already mortgaged'],
+    'Art. 328': ['sinira ang bakod habang may kaguluhan','sinira ang pananim o gusali sa espesyal na pagkakataon','deliberately damaged property under special circumstances'],
+    'Art. 329': ['sinadyang sirain ang gamit ng kapitbahay','sinira ang pananim o bakod namin','damaged my fence, plants, or belongings on purpose'],
+    'Art. 338': ['nilinlang ang dalaga para makipagtalik','seduced a woman by deceit'],
+    'Art. 339': ['gumawa ng malaswang kilos na pumayag ang kabilang panig','lewd act committed with the other person’s consent'],
+    'Art. 356': ['nagbanta na ilalathala ang lihim para manghingi ng pera','nagbanta na ikakalat ang pribadong impormasyon maliban kung magbayad','threatened publication to demand money'],
+    'Art. 357': ['ipinagbawal ilathala ang detalye ng opisyal na paglilitis','pinagbawalan ang pag-uulat tungkol sa court proceedings','prohibited publication of details of official proceedings'],
+    'Art. 363': ['sadyang idinawit ang inosente sa krimen','naglagay ng ebidensya para pagbintangan ang inosente','framed an innocent person for an offense'],
+    'Art. 364': ['nagpakalat ng tsismis para sirain ang pangalan ko','nagkalat ng maling kuwento laban sa aking reputasyon','spread rumors to harm my reputation']
+});
+
+// Further article-specific ways residents commonly describe incidents.
+Object.assign(ARTICLE_KEYWORD_EXPANSIONS, {
+    'Art. 252': ['nagkagulo at may nasaktan','nasaktan sa gitna ng rambulan','injured during a group fight'],
+    'Art. 253': ['tinulungan magpakamatay','tinulungan sa pagtatangkang magpakamatay','assisted another person to die by suicide'],
+    'Art. 260': ['nagyaya ng duelo','naghamon ng duelo','challenged someone to a duel'],
+    'Art. 269': ['dinakip nang walang legal na dahilan','ikinulong nang walang warrant','arrested me without authority','sapilitang dinakip'],
+    'Art. 271': ['hinikayat ang menor na umalis sa bahay','tinulungan ang bata tumakas sa bahay','induced a minor to leave home'],
+    'Art. 275': ['iniwan ang taong nasa panganib','pinabayaan ang taong nangangailangan ng tulong','abandoned an injured person'],
+    'Art. 276': ['iniwan ang batang wala pang pitong taon','pinabayaan ang batang maliit','abandoned a child under seven'],
+    'Art. 277': ['pinabayaan ng magulang ang anak','pinabayaan ng tagapag-alaga ang bata','parent neglected the child','guardian abandoned a child'],
+    'Art. 283': ['nagbanta na susunugin ang bahay','nagbanta na sisirain ang ari-arian','threatened to commit a crime'],
+    'Art. 285': ['nagbanta sa galit','nagbanta nang walang seryosong plano','made a minor threat'],
+    'Art. 286': ['pinilit akong sumama','pinilit akong ibigay ang gamit','pinagbantaan para gawin ang gusto niya','forced me to do something'],
+    'Art. 288': ['pinilit ang trabahador gamit ang dahas','pinagbantaan para tumigil sa trabaho','coerced a worker through threats'],
+    'Art. 289': ['pinilit sumali sa samahan gamit ang dahas','pinagbantaan dahil sa unyon','used threats to prevent labor organizing'],
+    'Art. 290': ['binuksan ang sulat ko nang walang pahintulot','kinuha ang liham ko','opened my private correspondence'],
+    'Art. 291': ['ibinunyag ang lihim dahil sa posisyon','inilabas ang kumpidensyal na impormasyon','revealed a secret through abuse of authority'],
+    'Art. 312': ['inaangkin ang lupa ko','kinuha ang bahagi ng lupa ko','occupied land by force'],
+    'Art. 313': ['inilipat ang mohon ng lupa','sinira ang palatandaan ng hangganan','removed a land boundary marker'],
+    'Art. 315': ['nangako ng investment pero kinuha ang pera','niloko ako para maglabas ng pera','deceived me to obtain money'],
+    'Art. 316': ['isinangla ang bagay na hindi kanya','ibinenta ang ari-ariang hindi kanya','fraudulently sold property'],
+    'Art. 317': ['niloko ang menor para magbigay ng pera','defrauded a minor'],
+    'Art. 318': ['nangako ng kita para makakuha ng pera','gumamit ng panlilinlang para makakuha ng pera','deceived me in a transaction'],
+    'Art. 319': ['ibinenta ang nakasanglang gamit','isinangla ulit ang nakasanglang ari-arian','sold mortgaged property without authority'],
+    'Art. 328': ['sinira ang puno o pananim','sinira ang bakod o gusali nang sadya','deliberately damaged property during special circumstances'],
+    'Art. 329': ['sinira ang gamit ko','sinira ang halaman ng kapitbahay','sinadyang sirain ang ari-arian','deliberately damaged my property'],
+    'Art. 338': ['nilinlang ang dalaga para makipagtalik','seduced a woman through deceit'],
+    'Art. 339': ['hinipuan nang may pahintulot','malalaswang kilos na may pahintulot','lewd act with consent'],
+    'Art. 356': ['nagbanta na ilalathala ang lihim','pinagbantaan na ilalabas ang larawan','threatened to publish private information'],
+    'Art. 357': ['pinagbawalan ilathala ang paglilitis','pinagbawalan mag-ulat ng kaso sa korte','prohibited publication of court proceedings'],
+    'Art. 363': ['pinaratangan ang inosente sa krimen','false accusation against an innocent person'],
+    'Art. 364': ['nagpakalat ng tsismis para sirain ang dangal','ipinagkalat ang maling kuwento tungkol sa akin','spread rumors to damage my reputation'],
+    'BP 22': ['nagbayad gamit ang talbog na tseke','tumalbog ang tseke dahil walang pondo','issued a check with insufficient funds']
+});
+};
+for (const law of window.BARANGAY_LAWS) law.keywords.push(...(ARTICLE_KEYWORD_EXPANSIONS[law.article] || []));
 
 /* ============================================================
    SECTION B: STANDARD SUBJECTS + STANDARD-TO-LAW MAP
@@ -1201,15 +1303,15 @@ window.KEYBOARD_MASHES = [
    ============================================================ */
 window.KEYWORD_WEIGHTS = {
     // Points per keyword occurrence, weighted by keyword length
-    single:          1,     // 1-word keyword
-    phrase2:         3,     // 2-word keyword
-    phrase3plus:     5,     // 3+ word keyword
+    single:          1,     // single words need corroboration
+    phrase2:         4,     // contextual two-word phrase
+    phrase3plus:     7,     // specific three-or-more-word phrase
     maxOccurrences:  3,     // cap repeats so one long word can't dominate
     victimBonus:     4,     // multiplier when victim-context matches
 
     // Dropdown population — be permissive
-    minScoreToShow:  1,     // ← was 2; NOW 1 so ANY keyword match shows up
-    maxCandidates:   15,    // ← was 8; NOW 15 so more laws appear
+    minScoreToShow:  3,     // avoid suggestions from a single weak word
+    maxCandidates:   8,     // show the strongest contextual matches
     topCandidateBadge: 'Best Match',
 };
 
