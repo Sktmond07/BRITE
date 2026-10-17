@@ -1,6 +1,8 @@
 // resident_complaint.js
 // Barangay San Bartolome Katarungang Pambarangay Classifier
 // Role-aware complaint view + card view + filter chips + documentable UI + live hearing timer
+//
+// ⚠️  REQUIRES: complaint_keywords.js MUST be loaded BEFORE this file.
 
 let currentComplaintId = null;
 let complainantsList = [];
@@ -31,7 +33,6 @@ const COMPLAINT_STAGES = {
         actor: 'Secretary / Captain', forRole: 'both',
     },
 
-    // Complainant receives a NOTICE (KP #8) — role-aware
     notice_issued: {
         label: 'Notice Issued', icon: 'fa-envelope', color: '#1565c0',
         description: 'Notice of Hearing issued — schedule pending',
@@ -39,7 +40,6 @@ const COMPLAINT_STAGES = {
         actor: 'Captain', forRole: 'complainant',
     },
 
-    // Respondent receives a SUMMONS (KP #9) — role-aware
     summoned: {
         label: 'Summoned', icon: 'fa-envelope-open-text', color: '#1565c0',
         description: 'Summons issued by Captain — you must appear',
@@ -50,7 +50,6 @@ const COMPLAINT_STAGES = {
     mediation: {
         label: 'Mediation', icon: 'fa-handshake', color: '#6a1b9a',
         description: 'Lupon mediation in progress',
-        // in_mediation included here — it's the same phase
         statuses: ['for_mediation', 'mediation_scheduled', 'in_mediation'],
         actor: 'Captain / Lupon', forRole: 'both',
     },
@@ -69,7 +68,6 @@ const COMPLAINT_STAGES = {
         actor: 'Pangkat', forRole: 'both',
     },
 
-        // ── 10-day repudiation window on a signed settlement ──
     settled_pending: {
         label: 'Settlement Pending', icon: 'fa-hourglass-half', color: '#2e7d32',
         description: 'Amicable settlement signed — 10-day repudiation window',
@@ -77,18 +75,17 @@ const COMPLAINT_STAGES = {
         actor: 'Barangay', forRole: 'both',
     },
 
-    // ── 5-day repudiation window on an Agreement for Arbitration ──
     arbitration_pending: {
         label: 'Arbitration Pending', icon: 'fa-hourglass-half', color: '#e65100',
         description: 'Agreement for Arbitration signed — 5-day repudiation window',
         statuses: ['arbitration_pending'],
         actor: 'Barangay', forRole: 'both',
     },
-        // ── Combined view: anything currently in a repudiation window ──
+
     repudiable: {
         label: 'Repudiation Open', icon: 'fa-gavel', color: '#c62828',
         description: 'Complaints whose repudiation window is still open',
-        statuses: null,          // ← computed dynamically
+        statuses: null,
         actor: 'Barangay', forRole: 'both',
     },
 
@@ -99,11 +96,10 @@ const COMPLAINT_STAGES = {
         actor: 'Captain / Pangkat', forRole: 'both',
     },
 
-    // Terminal failure — NOT `failed_mediation` (that's a transition, not a fail)
     failed: {
         label: 'Unresolved', icon: 'fa-times-circle', color: '#b71c1c',
         description: 'Mediation and conciliation both failed — Certificate to File Action issued',
-        statuses: ['unresolved'],        // ← only the FINAL state
+        statuses: ['unresolved'],
         actor: 'Pangkat', forRole: 'both',
     },
 
@@ -130,46 +126,21 @@ const STATUS_TO_STAGE = (() => {
             if (!map[s]) map[s] = key;
         }
     }
-       // Explicit fallbacks for ambiguous statuses
     map['summoned']              = map['summoned']              || 'summoned';
     map['failed_mediation']      = map['failed_mediation']      || 'pangkat_constitution';
     map['failed_conciliation_final'] = 'failed';
     map['referred']              = 'referred';
-
-    // New repudiation-driven statuses
     map['arbitration_pending']    = 'arbitration_pending';
-    map['arbitration_repudiated'] = 'failed';   // or a new stage if you prefer
-
-    return map;
-
+    map['arbitration_repudiated'] = 'failed';
     return map;
 })();
 
-
-
 // ============================================================
-// SECTION 0: VALIDATION HELPERS (mirror of server-side rules)
+// SECTION 0: VALIDATION HELPERS
 // ============================================================
 
-function _placeholders() {
-    return [
-        'test','testing','tester','sample','n/a','na','none','null','nil',
-        'anonymous','anon','asdf','asdfasdf','asdfgh','qwerty','qwertyuiop',
-        'zxcvbn','zxcvbnm','hjkl','xxx','xxxx','aaaa','bbbb','cccc',
-        'abc','abcd','abcde','abcdef','123','1234','12345','name','fullname',
-        'firstname','lastname','first name','last name','no name','noname',
-        'unknown','noone','nobody','john doe','jane doe','juan dela cruz',
-        'juandelacruz','juandc','juan d','juan','pedro','pedro penduko',
-        'lorem ipsum','lorem','ipsum','placeholder','tbd','tba','todo',
-        'asdfasdfasdf','asdasd','asdasdasd','hahaha','hahahaha','hehehe',
-        'jejeje','lol','lmao','wtf','test test','test name','name here'
-    ];
-}
-function _junkTokens() {
-    return ['test','testing','sample','asdf','asdfasdf','asdfgh','qwerty','zxcvbn',
-            'hjkl','123','1234','12345','aaaa','bbbb','cccc','dddd','abc','abcd',
-            'abcde','lorem','ipsum','none','n/a','na','null','xxx','yyy','zzz'];
-}
+function _placeholders() { return window.VALIDATION_PLACEHOLDERS; }
+function _junkTokens()   { return window.VALIDATION_JUNK_TOKENS; }
 
 function validateContactNumberJS(v) {
     v = (v || '').trim();
@@ -194,25 +165,20 @@ function validatePersonNameJS(name) {
     }
     if (name.length < 3) return { ok: false, msg: 'Name is too short.' };
 
-    // 3+ identical in a row
     if (/(.)\1{2,}/u.test(name)) return { ok: false, msg: 'Name looks invalid — please type your real name.' };
     if (/^(.)\1+$/u.test(name))   return { ok: false, msg: 'Name looks invalid — please type your real name.' };
 
-    // Gibberish checks
     const flat = name.toLowerCase().replace(/[^a-zñáéíóú]/g, '');
     if (!flat) return { ok: false, msg: 'Name looks invalid — please type your real name.' };
 
-    // No vowels anywhere
     if (!/[aeiouyáéíóú]/i.test(flat)) {
         return { ok: false, msg: 'Name looks invalid — please type your real name.' };
     }
 
-    // Consonant run of 4+
     if (/[bcdfghjklmnpqrstvwxzñ]{4,}/i.test(flat)) {
         return { ok: false, msg: 'Name looks invalid — please type your real name.' };
     }
 
-    // Vowel ratio < 15% in 6+ char string
     if (flat.length >= 6) {
         const vowelCount = (flat.match(/[aeiouyáéíóú]/gi) || []).length;
         if (vowelCount / flat.length < 0.15) {
@@ -220,12 +186,10 @@ function validatePersonNameJS(name) {
         }
     }
 
-    // Triple same letter
     if (/(.)\1\1/u.test(name)) {
         return { ok: false, msg: 'Name looks invalid — please type your real name.' };
     }
 
-    // Placeholders
     const norm = name.toLowerCase().replace(/\s+/g, ' ').trim();
     const normNoSpace = norm.replace(/\s/g, '');
     const ph = _placeholders();
@@ -233,10 +197,7 @@ function validatePersonNameJS(name) {
         return { ok: false, msg: 'Please enter a real name — placeholders like "test" are not allowed.' };
     }
 
-    // Keyboard mashes
-    const mash = ['asdf','asdfg','asdfgh','asdfghj','qwerty','qwertyu','qwertyui',
-                  'zxcvb','zxcvbn','hjkl','fghj','dfgh','sdfg','sdfgh','sdfghj',
-                  'hjklm','xcvbn','xcvbnm','ghjkl'];
+    const mash = window.KEYBOARD_MASHES;
     for (const word of norm.split(' ')) {
         if (mash.includes(word)) return { ok: false, msg: 'Name looks invalid — please type your real name.' };
     }
@@ -272,7 +233,7 @@ function validateWordingJS(text, minLen, fieldLabel) {
         'putang ina','puta','pakyu','fuck','fuckyou','shit','bitch','bastard',
         'asshole','dick','pussy','ulol','engot','inutil','lintik','hayop ka',
         'leche','punyeta','peste','pokpok','burat','titi','puke','kantot',
-        'jakol','bilat','bayag','pekpek'];
+        'jakol','bilat','bagay','pekpek'];
     const words = norm.split(' ').filter(w => w !== '');
     if (words.length > 0) {
         const allProfane = words.every(w => profanity.some(p => w.includes(p) || w === p));
@@ -282,20 +243,18 @@ function validateWordingJS(text, minLen, fieldLabel) {
 }
 
 // ============================================================
-// SECTION 0B: AUTO-PRIORITY ENGINE (mirror of server-side)
+// SECTION 0B: AUTO-PRIORITY ENGINE
 // ============================================================
 
 function _vulnerableVictimHarmedJS(desc) {
     desc = (desc || '').toLowerCase();
 
     const vuln = [
-        // ── Tagalog ──
         'bata','batang','anak','sanggol','menor','minor','musmos','paslit',
         'estudyante','baby','newborn',
         'matanda','lolo','lola','senior','elderly','gurang',
         'babae','asawa','nanay','ina','ate','dalaga','dalagita',
         'pwd','may kapansanan','disabled','wheelchair','bulag','bingi','pilay',
-        // ── English ──
         'child','kid','kids','children','minor','minors','baby','infant',
         'toddler','son','daughter','student','pupil',
         'elderly','old man','old woman','senior citizen','grandma','grandpa',
@@ -305,7 +264,6 @@ function _vulnerableVictimHarmedJS(desc) {
     ];
 
     const harm = [
-        // ── Tagalog ──
         'sinaktan','sinasaktan','binugbog','binubugbog','sinuntok','sinusuntok',
         'sinipa','sinisipa','sinampal','sinasampal','pinalo','pinapalo',
         'tinulak','tinutulak','sinakal','sinasakal','tinali','tinatali',
@@ -319,7 +277,6 @@ function _vulnerableVictimHarmedJS(desc) {
         'inabuso','binabastos','nambabastos',
         'pinasok ang ari','pinagsamantalahan','pinilit kahit ayaw',
         'hindi pinapakain','hindi pinapaaral','hindi inaalagaan',
-        // ── English ──
         'punched','punching','hit','hitting','slapped','slapping','kicked','kicking',
         'beaten','beat','beating','choked','choking','strangled','strangling',
         'pushed','pushing','grabbed','grabbing','dragged','dragging',
@@ -379,7 +336,6 @@ function priorityMetaJS(p) {
     return map[p] || map.medium;
 }
 
-
 let __priorityUpdateTimeout = null;
 
 function updateAutoPriorityBadge() {
@@ -433,1482 +389,18 @@ function updateAutoPriorityBadge() {
 // ============================================================
 // SECTION 1: THE 45 LAWS
 // ============================================================
-const barangayLaws = [
-    {
-        article: 'Art. 154', title: 'Unlawful Use of Means of Publication and Unlawful Utterances', victim: ['any'],
-        keywords: [
-            'unlawful publication','unlawful utterance','unlawful utterances',
-            'unlawful use of means of publication','unlawful use of means',
-            'ilegal na publication','ilegal na paglalathala','ilegal na pagsasalita',
-            'ilegal na utterance','ilegal na salita','ilegal na pananalita',
-            'masamang salita','masasamang salita','masamang pananalita',
-            'masamang pagsasalita','masamang sinasabi',
-            'paninirang puri sa social media','paninirang puri sa online',
-            'paninirang puri sa internet','paninirang puri sa facebook',
-            'paninirang puri sa fb','paninirang puri sa twitter',
-            'post sa facebook','post sa fb','post sa social media',
-            'post sa online','post sa internet',
-            'nagpost','nag-post','nagpost sa','nagpost ng',
-            'nag-comment','nagcomment','nagcomment sa','nagcomment ng',
-            'comment sa facebook','comment sa fb','comment sa social media',
-            'cyber','cyber libel','cyberlibel','cyber-libel',
-            'online libel','online paninira','online paninirang puri',
-            'libel sa online','libel sa social media','libel sa facebook',
-            'libel sa fb','libel sa internet','libel online','naglibel',
-            'unlawful','illegal utterance','illegal publication','illegal post',
-            'nag-udyok','nag-udyok sa','nag-udyok ng','nag-uudyok',
-            'nag-udyok sa iba','nag-udyok sa publiko','nang-udyok',
-            'nanghihikayat','nanghikayat','humihikayat',
-            'nagpapahayag','nagpahayag','nagbibigay pahayag',
-            'pahayag','nagbigay pahayag','nagbigay ng pahayag',
-            'salita','sinalita','sasalita','mesalita','pamisalita',
-            'masamang amanu','post','magpost','megpost',
-            'comment','magcomment','megcomment',
-            'libel','maglibel','meglibel','panlibel',
-            'facebook','fb','social media','twitter','tiktok','instagram',
-            'cyber','online','udyok','inudyok','mangudyok','pangudyok',
-            'hikayat','hinikayat','manghikayat','panghikayat',
-            'amanu','binie amanu','mamie amanu','pamie amanu',
-            'sabi','sinabi','sasabian','mesabi','pamisabi'
-        ]
-    },
-    {
-        article: 'Art. 155', title: 'Alarms and Scandals', victim: ['any','public'],
-        keywords: [
-            'alarms','alarm','scandal','scandals','scandalous','alarm and scandal',
-            'alarms and scandals','disturbance','public disturbance','public scandal',
-            'public disorder','disorder','breach of peace','disturbing the peace',
-            'iskandalo','nag-iskandalo','iskandaloso','iskandalosa',
-            'pag-iingay','pag-iingay sa publiko',
-            'ingay','maingay','napakaingay','sobrang ingay','masyadong maingay',
-            'grabe ang ingay','ang ingay ng',
-            'sigaw','sumigaw','nagsisigaw','sigawan','isigaw','sumisigaw',
-            'sigaw sa publiko','sigaw sa kalye','sigaw sa kalsada',
-            'gulo','nagkagulo','nagkakagulo','nagugulo','gulong-gulo',
-            'gulo sa kalye','gulo sa kalsada','gulo sa publiko',
-            'nagwawala','pumapalahaw','palahaw','nagsasayaw',
-            'nag-iingay','nag-iingay sa','nag-iingay sa publiko',
-            'videoke','videokehan','nagvivideoke','nag-videoke','videoke king',
-            'nag-videoke ng','nag-videoke sa','nagvideoke','nagvideokehan',
-            'karaoke','karaokehan','nagkakaraoke','nag-karaoke','karaoke king',
-            'nag-karaoke ng','nag-karaoke sa','nagkakaraokehan',
-            'malakas na musika','malakas na tugtog','malakas na tunog',
-            'malakas na ingay','malakas ang musika',
-            'nagpapatugtog','nagpapatugtog ng','nagpapatugtog sa','nagtutugtog',
-            'nagpapamusika','nagpamusika','sound system','soundsystem',
-            'sound trip','soundtrip','sounds','subwoofer','amplifier','speaker',
-            'konstruksyon','construction','construction noise','construction site',
-            'party','handaan','kasiyahan','kasiyahan na maingay','handaan na maingay',
-            'nag-iingay sa gabi','nag-iingay sa madaling araw',
-            'gabi-gabi na ingay','gabi-gabing ingay','gabi-gabi na maingay',
-            'sumisigaw sa gabi','sumisigaw sa madaling araw',
-            'umaangal','siren','sirena','tumutunog',
-            'all-night','all night','buong gabi','buong magdamag',
-            'aabot ng gabi','hanggang gabi','hanggang madaling araw',
-            'maingay ang videoke','maingay ang videoke ng kapitbahay',
-            'maingay ang kapitbahay','maingay na videoke','maingay na karaoke',
-            'maingay na musika','nagpapatugtog ng malakas',
-            'nagvivideoke ng malakas','nagvivideoke hanggang gabi',
-            'nagpapatugtog hanggang gabi','ingay ng videoke',
-            'ingay ng kapitbahay','ingay ng motor','ingay ng construction',
-            'ingay ng nagpapatayo',
-            'makain','makain ya','mingay','mingay ya','pamakin',
-            'gulu','magulu','magulu ya','gemulu','kaguluan',
-            'sigaw','sinigaw','sisigaw','mesigaw','sigawan','pamisigaw',
-            'kagulwan','mikagulu','iskandalu','miskandalu','mangiskandalu',
-            'videoke','mamagvideoke','megvideoke','karaoke','mamagkaraoke',
-            'megkaraoke','musika','malauting musika','malauting tunug',
-            'mamagpatigtug','megpatigtug','patigtug','tigtug',
-            'kasiyahan','mangasiyahan','miskasiyahan','handaan','minandaan',
-            'manghandaan','pamangan','kaluguran','makaluguran',
-            'sirena','tumigtig','abu-abu','buung bengi','bengi-bengi',
-            'tune king bengi','tune king abak'
-        ]
-    },
-    {
-        article: 'Art. 175', title: 'Using False Certificates', victim: ['any'],
-        keywords: [
-            'false certificate','falsified certificate','fake certificate',
-            'forged certificate','forgery','forging','forged',
-            'falsification','falsified','falsify','falsifying',
-            'falsification of document','falsification of public document',
-            'falsification of private document','forged signature','forged document',
-            'forged paper','forged id','falsified document','falsified paper','falsified id',
-            'pekeng certificate','pekeng sertipiko','peke ang certificate',
-            'peke ang sertipiko','pekeng dokumento','pekeng mga dokumento',
-            'peke','pekeng','peke-peke','gawa-gawa','gawa-gawang',
-            'pekeng papel','pekeng papeles','peke ang papel','peke ang papeles',
-            'pekeng ID','peke ang ID','peke ID','pekeng identification',
-            'pekeng lisensya','peke ang lisensya','pekeng permit','peke ang permit',
-            'pekeng barangay certificate','pekeng barangay clearance',
-            'pekeng barangay permit','pekeng police clearance',
-            'pekeng nbi clearance','pekeng police',
-            'peke ang pangalan','pekeng pangalan','nagpeke','nagpeke ng',
-            'nagpeke ng certificate','nagpeke ng dokumento',
-            'gumawa ng pekeng','gumawa ng peke','gumawa-gawa ng',
-            'gumagawa ng pekeng','gumagawa ng peke',
-            'gawa-gawang certificate','gawa-gawang sertipiko',
-            'gawa-gawang dokumento','gawa-gawang papel',
-            'peke ang lagda','pekeng lagda','peke ang pirma','pekeng pirma',
-            'peka','peka ya','peka-peka','mamagpeka','magpeka','megpeka',
-            'peka certificate','peka sertipiko','peka dokumento','peka papel',
-            'peka ID','peka lisensya','peka pemit',
-            'gawa-gawa','ginawa','megawa','falsu','mamalsu','magpalsu',
-            'falsipikado','falsipikasyon','falsipikasyun',
-            'lagda','peka lagda','firmado','falsong firmado',
-            'firma','peka firma','peka pirma','selyo','peka selyo'
-        ]
-    },
-    {
-        article: 'Art. 178', title: 'Using Fictitious Names and Concealing True Names', victim: ['any'],
-        keywords: [
-            'fictitious name','fictitious names','fictitious','concealing true name',
-            'concealing true names','concealing name','concealing identity',
-            'concealing','concealed','concealment','false name','false names',
-            'fake name','fake names','alias','aliases','using alias','uses alias',
-            'pekeng pangalan','peke ang pangalan','pekeng mga pangalan',
-            'peke ang mga pangalan','hindi tunay na pangalan','hindi totoong pangalan',
-            'hindi tunay na pagkatao','hindi totoong pagkatao',
-            'hindi tunay na identity','hindi totoong identity',
-            'nagpanggap','nagpapanggap','nagpapanggap na','nagpanggap na',
-            'nagpapanggap bilang','nagpanggap bilang',
-            'nagpapanggap na iba','nagpanggap na iba','ibang tao','ibang pangalan',
-            'peke ang identity','peke ang pagkatao','peke ang pangalan',
-            'nagtatago ng tunay na pangalan','nagtatago ng tunay na pagkatao',
-            'nagtatago ng pangalan','itinatago ang pangalan','itinago ang pangalan',
-            'peke ang pagpapakilala','nagpakilala ng pekeng','nagpakilala ng peke',
-            'nagpakilala bilang','nagpapakilala bilang',
-            'nagpanggap na doktor','nagpanggap na abogado','nagpanggap na pulis',
-            'nagpanggap na barangay','nagpanggap na tanod','nagpanggap na guro',
-            'lagyu','lagyu na','lagyu ya','peka lagyu','alang lagyu',
-            'mamaglagyu','maglagyu','meglagyu',
-            'katawan','peka katawan','pagkatao','peka pagkatao',
-            'panggap','nagpanggap','mamanggap','magpanggap','megpanggap',
-            'mitago','magtago','megtago','mangtago',
-            'tagu','tinagu','tatagu','tetaguan','metagu',
-            'kilala','kinilala','kikilalanin','mekilala','pakikilala',
-            'magpakilala','megpakilala','pakilala','nagpakilala',
-            'peka papel','peka dokumento','peka ID',
-            'alias','may alias','gamit alias','gumamit alias'
-        ]
-    },
-    {
-        article: 'Art. 179', title: 'Illegal Use of Uniforms and Insignias', victim: ['any'],
-        keywords: [
-            'illegal use of uniforms','illegal use of insignias',
-            'illegal use of uniform','illegal use of insignia',
-            'illegal uniform','illegal insignia','illegal uniforms','illegal insignias',
-            'pekeng uniporme','peke ang uniporme','pekeng insignia','peke ang insignia',
-            'pekeng uniform','peke ang uniform','pekeng badge','peke ang badge',
-            'pekeng barong','peke ang barong','pekeng uniforme','peke ang uniforme',
-            'nagpanggap na tanod','nagpanggap na barangay tanod',
-            'nagpanggap na pulis','nagpanggap na police',
-            'nagpanggap na barangay official','nagpanggap na opisyal',
-            'nagpanggap na opisyal ng barangay','nagpanggap na kapitan',
-            'nagpanggap na barangay captain','nagpanggap na konsehal',
-            'nagpanggap na mayor','nagpanggap na gobernador',
-            'nagpapanggap na tanod','nagpapanggap na pulis',
-            'nagpapanggap na opisyal','nagpapanggap na kapitan',
-            'uniporme ng barangay','uniform ng barangay','uniporme ng tanod',
-            'uniform ng tanod','uniporme ng pulis','uniform ng pulis',
-            'insignia','badge','barangay badge','police badge','tanod badge',
-            'nagpeke ng uniporme','nagpeke ng badge','nagpeke ng insignia',
-            'gumawa ng pekeng uniporme','gumawa ng pekeng badge',
-            'gumawa-gawang uniporme','gawa-gawang badge',
-            'nagsuot ng uniporme','nagsusuot ng uniporme','nagsuot ng pekeng',
-            'nagsuot ng pekeng uniporme','nagsuot ng pekeng badge',
-            'uniporme','unipormi','uniporme ya','unipormi ya',
-            'peka uniporme','peka unipormi','peka badge','peka insignia',
-            'panggap','panggap a tanod','panggap a pulis','panggap a opisyal',
-            'panggap a kapitan','panggap a konsehal','panggap a mayor',
-            'tanod','tanod ya','pulis','pulis ya','opisyal','opisyal ya',
-            'kapitan','kapitan ya','konsehal','konsehal ya','mayor','mayor ya',
-            'suut','sinuut','susulud','mesuut','magsuut','suut ya',
-            'gamit','ginamit','gagamitan','megamit','gumamit',
-            'badge','badge ya','insignia','insignia ya','sinturon'
-        ]
-    },
-    {
-        article: 'Art. 252', title: 'Physical Injuries Inflicted in a Tumultuous Affray', victim: ['any'],
-        keywords: [
-            'tumultuous affray','tumultuous','affray','tumult','tumults',
-            'fracas','commotion','melee','brawl','brawling','brawled','fighting',
-            'altercation','fight','chaos','chaotic',
-            'rambol','rumble','nag-rambol','nagrarambol','rumble sa',
-            'malaking away','malalaking away','malaking gulo','malaking kaguluhan',
-            'gulo','nagkagulo','nagkakagulo','kaguluhan',
-            'away','nag-away','nag-aaway','away ng','away sa','away sa kalye',
-            'nagbugbugan','nagbubugbugan','nagbugbog','nagbubugbog',
-            'nagbasagan','nagbabasagan','nagbasag','nagbabasag',
-            'nagsasakitan','nagsasaktan','nagsaktan','nagkasakitan',
-            'nagbabarilan','nagbarilan','nagbaril','nagbabaril',
-            'nagsasaksakan','nagsaksakan','nagsaksak','nagsasaksak',
-            'gulo na may sugat','gulo na may nasaktan','gulo na may pinsala',
-            'away na may sugat','away na may nasaktan','away na may pinsala',
-            'nagkasugatan','nagkasakitan','nagkasugat',
-            'nagsugatan','nagsusugatan','sugat','sugatan','nasugatan',
-            'nasaktan','nasasaktan',
-            'nangdamay','nangdamay sa','nadamay','nadadamay','nadamay sa',
-            'nadamay ng','nadadamay ng','nasangkot','nasasangkot','nasangkot sa',
-            'gulu','magulu','magulu ya','gemulu','kaguluan','mikagulu',
-            'labuad','milabuad','pamilabuad',
-            'away','inaway','mangaway','menaway','penaway',
-            'sabung','sinabung','sasabung','mesabung','pamisabung',
-            'bakal','binakal','babakalan','mebakal','pamakal',
-            'sabong','sinabong','sasabong','mesabong',
-            'tudtud','tinudtud','tutudtud','metudtud',
-            'laban','linaban','lalaban','melaban','pamlaban',
-            'sugat','sinugat','susugat','mesugat','pamisugat',
-            'damay','dinamay','dadamay','medamay','pamdamay',
-            'sangkut','sinangkut','sasangkut','mesangkut','pamsangkut'
-        ]
-    },
-    {
-        article: 'Art. 253', title: 'Giving Assistance to Consummated Suicide', victim: ['any'],
-        keywords: [
-            'assistance to suicide','assistance to consummated suicide',
-            'giving assistance to suicide','giving assistance',
-            'helping suicide','helping to suicide','helping to commit suicide',
-            'helping commit suicide',
-            'suicide','suicides','suicidal','commit suicide','commits suicide',
-            'committing suicide','committed suicide','suicide attempt',
-            'suicide attempts','attempted suicide','attempting suicide',
-            'tulong sa pagpapakamatay','tulong sa pagpapatiwakal',
-            'tumulong sa pagpapakamatay','tumulong sa pagpapatiwakal',
-            'pagtulong sa pagpapakamatay','pagtulong sa pagpapatiwakal',
-            'pagpapakamatay','pagpapatiwakal','nagpakamatay','nagpatiwakal',
-            'nagpapakamatay','nagpapatiwakal','magpapakamatay','magpapatiwakal',
-            'pumatay sa sarili','pumapatay sa sarili','papatay sa sarili',
-            'pagpatay sa sarili',
-            'nag-udyok','nag-uudyok','nag-udyok sa','umudyok','umudyok sa',
-            'nang-udyok','nang-uudyok',
-            'nag-udyok magpakamatay','nag-udyok magpatiwakal',
-            'humikayat','humihikayat','nanghikayat','nanghihikayat',
-            'humikayat magpakamatay','humikayat magpatiwakal',
-            'nagbigay ng tulong','nagbigay ng tulong sa pagpapakamatay',
-            'tumulong','tumutulong','tumulong sa','tumutulong sa',
-            'pakamate','magpakamate','mamamate','menamate','pamate',
-            'tulung','tinulung','tutulung','metulung','pamtulung',
-            'saklulu','sinaklulu','sasaklulu','mesaklulu','pamsaklulu',
-            'udyok','inudyok','mangudyok','pangudyok',
-            'hikayat','hinikayat','manghikayat','panghikayat',
-            'boluntad','sarili','pamate king sarili','pakamate king sarili',
-            'tulung a mate','tulung a pakamate','tulung pakamate'
-        ]
-    },
-    {
-        article: 'Art. 260', title: 'Responsibility of Participants in a Duel', victim: ['any'],
-        keywords: [
-            'duel','duels','dueling','dueled','duellist','duelist',
-            'responsibility of participants','participants in a duel',
-            'responsibility of participants in a duel',
-            'if only physical injuries are inflicted',
-            'no physical injuries have been inflicted',
-            'duwelo','nagduwelo','nagduduwelo','duwelo sa','duwelo ng',
-            'labanan','naglaban','naglalaban','lalaban','lalabanan',
-            'laban','naglabanan','labana',
-            'hamon','naghamon','nanghamon','hinamon','hahamon','humamon',
-            'hamon sa laban','hamon sa away','hamon sa duwelo','hamon ng away',
-            'naghamon ng away','naghamon ng laban','naghamon ng duwelo',
-            'sagupa','nagsagupa','nagsasagupa','sagupaan',
-            'nagsagupaan','nagsasagupaan','nagsagupa sa','nagkasagupa',
-            'nagkasagupaan','nagkakasagupa',
-            'dula','nagdula','nagdudula','dulaan',
-            'pinagduwelo','pinaglaban','pinaglalaban','pinaglabanan',
-            'hamunan','hamunan sa','hamunan ng','naghamunan',
-            'lalabanan sa','naglabanan','naglalabanan',
-            'duwelu','mangduwelu','menuwelu','panduwelu',
-            'hamun','hinamun','hahamunin','mehamun','pamhamun',
-            'salungat','sinlungat','sasalungat','mesalungat','pamsalungat',
-            'tuki','tinuki','tutuki','metuki','pagtuki',
-            'sugal','sinugal','sasugal','mesugal','pamisugal',
-            'takda','tinakda','tatakda','metakda','pamtakda'
-        ]
-    },
-    {
-        article: 'Art. 265', title: 'Less Serious Physical Injuries', victim: ['any'],
-        keywords: [
-            'less serious physical injuries','less serious physical injury',
-            'less serious injuries','less serious injury','less serious',
-            'serious physical injuries','serious physical injury',
-            'serious injuries','serious injury','serious',
-            'seryosong sugat','seryosong mga sugat','malubhang sugat',
-            'malubhang mga sugat','malubhang pinsala','malubhang mga pinsala',
-            'malubhang pinsala sa katawan','seryosong pinsala',
-            'seryosong pinsala sa katawan','seryosong mga pinsala',
-            'sugat na malala','sugat na seryoso','sugat na malubha',
-            'malubhang sugat','malalang sugat','malalang mga sugat',
-            'malalang pinsala','malalang mga pinsala',
-            'sinaktan ng malubha','malubhang sinaktan','sinaktan ng matindi',
-            'binugbog ng matindi','binugbog ng malubha','sinaktan ng grabe',
-            'nasugatan ng malubha','nasugatan ng matindi',
-            'naospital dahil sa pananakit','naospital dahil sa pambubugbog',
-            'nasugatan','nasusugatan','sugatan','sinugatan','sinusugatan',
-            'nasaktan','nasasaktan','sinaktan','sinasaktan','nasaktan ng',
-            'sinaktan ng','pinagbabugbog','pinagbubugbog','binugbog','binubugbog',
-            'ginulpi','ginugulpi','pinagulpi','pinagugulpi',
-            'nagulpi','nagugulpi','bugbog','bugbugin',
-            'pasa','pasa-pasa','may pasa','puno ng pasa','maraming pasa',
-            'namaga','namamaga','pamamaga','nagmaga','nagmamaga',
-            'dumugo','dumudugo','dinugo','dinudugo','nagdugo','nagdurugo',
-            'pagdurugo','pagdudugo',
-            'sugat sa ulo','sugat sa mukha','sugat sa braso','sugat sa kamay',
-            'sugat sa binti','sugat sa paa','sugat sa likod','sugat sa tiyan',
-            'bali','nabali','nabalian','binabali','babaliin','baliin',
-            'bali ang','bali-bali','bali sa','bali ng','nabalian ng buto',
-            'napilay','napipilay','mapipilay','pilay','pinapilay',
-            'ospital','naospital','nagpaospital','ipinadala sa ospital',
-            'medical treatment','medical attention','medical help',
-            'nagpagamot','nagpapagamot','pagpapagamot',
-            'nagpatingin','nagpapatingin','pagpapatingin','patingin sa doktor',
-            'patingin sa ospital',
-            '1-30 days','1 to 30 days','isang linggo','isang buwan',
-            'sugat','sinugat','susugat','mesugat','pamisugat',
-            'sugat a maragul','sugat a malaut','sugat a masakit',
-            'pasa','pinasa','papasa','mepasa','pampasa',
-            'lusu','linusu','lulusu','melusu','pamlusu',
-            'dugu','dinugu','dudugu','medugu','pamdugu',
-            'bali','biniali','babali','mebali','pambali',
-            'ospital','mangospital','menospital','pangospital'
-        ]
-    },
-    {
-        article: 'Art. 266', title: 'Slight Physical Injuries and Maltreatment', victim: ['any','minor','senior','woman','pwd'],
-        keywords: [
-            'slight physical injuries','slight physical injury','slight injuries',
-            'slight injury','slight','minor injuries','minor injury','minor',
-            'maltreatment','maltreat','maltreating','maltreated','maltreats',
-            'magaan na sugat','magaan na mga sugat','magaan na pinsala',
-            'maliit na sugat','maliit na mga sugat','maliit na pinsala',
-            'magaan na pinsala sa katawan','maliit na pinsala sa katawan',
-            'suntok','sinuntok','sinusuntok','nasuntok','nasusuntok',
-            'suntukin','suntukin ka','suntukin kita','suntukin nila',
-            'sipa','sinipa','sinisipa','nasipa','sipain',
-            'sampal','sinampal','sinasampal','nasampal','sampalin',
-            'palo','pinalo','pinapalo','napalo','paluin',
-            'paluin kita','palo ng','palo sa','binatukan','binabatukan',
-            'natukan','batukan','batukan ka','batukan kita',
-            'tulak','tinulak','tinutulak','natulak','tulakin',
-            'tulakin ka','tulakin kita','tulak sa','tulak ng',
-            'sabunot','sinabunutan','sinasabunutan','nasabunutan',
-            'sabunutan','sabunutan ka','sabunutan kita','hinila ang buhok',
-            'hinihila ang buhok','hinila','hinihila','hinatak','hinahatak',
-            'kalmot','kinalmot','kinakalmot','nakalmot','kalmutin',
-            'kalmutin ka','kalmutin kita','kalmot sa','kalmot ng',
-            'kagat','kinagat','kinakagat','nakagat','kagatin',
-            'kagatin ka','kagatin kita','kagat sa','kagat ng',
-            'pagmamalupit','nagmamalupit','nangmamalupit','namamalupit',
-            'pinagmamalupitan','pinagmalupitan','namalupit','namamamalupit',
-            'pananakit','nananakit','nanakit','sinaktan','sinasaktan',
-            'pananampal','nanampal','nananampal',
-            'pambubugbog','nambubugbog','bumabugbog','binubugbog',
-            'panunulak','nangunulak','tumutulak','tinutulak',
-            'pananabunot','nangangabunot','sumasabunot','sinasabunot',
-            'pananakit sa','pananakit ng','pananakit sa katawan','pananakit sa kapwa',
-            'sinaktan ang bata','sinaktan ang menor','sinaktan ang anak',
-            'binubugbog ang bata','binubugbog ang menor','binubugbog ang anak',
-            'pinapalo ang bata','pinapalo ang menor','pinapalo ang anak',
-            'sinasaktan ang bata','sinasaktan ang menor','sinasaktan ang anak',
-            '1-9 days','1 to 9 days','isang araw','dalawang araw','tatlong araw',
-            'suntuk','sinuntuk','susuntuk','mesuntuk','pamsuntuk',
-            'sipa','sinipa','sisipa','mesipa','pamsipa',
-            'tampaling','tinampaling','tatampaling','metampaling',
-            'palu','pinalu','papalu','mepalu','pampalu',
-            'tulak','tinulak','tutulak','metulak','pamtulak',
-            'sabunot','sinabunot','sasabunot','mesabunot','pamsabunot',
-            'kalmut','kinalmut','kakalmut','mekalmut','pamkalmut',
-            'kagat','kinagat','kakagat','mekagat','pamkagat',
-            'malupit','minamalupit','mamalupit','memalupit','pamalupit',
-            'sakit','sinakit','sasakit','mesakit','pamsakit'
-        ]
-    },
-    {
-        article: 'Art. 269', title: 'Unlawful Arrest', victim: ['any'],
-        keywords: [
-            'unlawful arrest','unlawful arrests','illegal arrest','illegal arrests',
-            'false arrest','false arrests','wrongful arrest','wrongful arrests',
-            'unlawful detention','unlawful detentions','illegal detention',
-            'illegal detentions','unlawful imprisonment','illegal imprisonment',
-            'illegal na pag-aresto','illegal na huli',
-            'ilegal na pag-aresto','ilegal na huli','ilegal na paghuli',
-            'illegal na pagkakulong','ilegal na pagkakulong',
-            'kinulong','kinukulong','nagkulong','nagkukulong','ikulong',
-            'ikukulong','ipinakulong','ipinapakulong','pinakulong','pinapakulong',
-            'kinulong ng walang kaso','kinulong ng walang','kinulong ng',
-            'hinuli','hinuhuli','naghuli','naghuhuli','hulihin','huhulihin',
-            'hinuli ng walang warrant','hinuli ng walang kaso','hinuli ng walang',
-            'detained','detain','detaining','detains','detention','detentions',
-            'nakakulong','nakakulong sa','nakakulong kami',
-            'nakakulong ako','nakakulong siya','nakakulong sa presinto',
-            'kulong','naka-kulong','naka-kulong sa','naka-kulong sa presinto',
-            'presinto','presinto ng','dinala sa presinto','dinala sa',
-            'dinala sa kulungan','dinala sa bilangguan',
-            'preso','preso sa','naging preso','presong','preso na',
-            'walang warrant','walang warrant of arrest','walang warrant ng',
-            'walang kaso','walang kasong','walang kaso laban',
-            'walang kaso sa','walang kaso siya','walang kaso ako',
-            'walang basehan','walang basehan ang','walang basehan ang pag-aresto',
-            'walang basehan ang paghuli','walang basehan ang pagkakulong',
-            'walang dahilan','walang dahilan ang','walang dahilan ang pag-aresto',
-            'walang dahilan ang paghuli','walang dahilan ang pagkakulong',
-            'hinuli nang walang','hinuli nang walang dahilan',
-            'hinuli nang walang kaso','hinuli nang walang warrant',
-            'kinulong nang walang','kinulong nang walang dahilan',
-            'kinulong nang walang kaso','kinulong nang walang warrant',
-            'huli','hinuli','huhuli','mehuli','pamhuli',
-            'kulung','kinulung','kukulung','mekulung','pamkulung',
-            'presu','mekulung','meprisu','pangaprisu',
-            'preso','mepreso','pangapreso',
-            'karsel','kinarsel','kakarsel','mekarsel','pamkarsel',
-            'alang kasu','alang warrant','alang basehan','alang dahilan',
-            'alang kaso','alang sabi','alang abiso','alang balita',
-            'bitbit','binibitan','bibitin','mebitbit','pambitbit'
-        ]
-    },
-    {
-        article: 'Art. 271', title: 'Inducing a Minor to Abandon His / Her Home', victim: ['minor'],
-        keywords: [
-            'inducing minor','inducing a minor','inducing minors','inducing',
-            'induce minor','induce a minor','induce minors','inducement of minor',
-            'inducing a minor to abandon home','inducing minor to abandon home',
-            'inudyukan ang bata','inudyukan ang menor','inudyukan ang menor de edad',
-            'inudyukan ang batang','inudyukan si',
-            'inudyukan ang','inudyukan','nag-udyok','nag-uudyok','umudyok',
-            'nang-udyok','nang-uudyok','nangudyok','nangungudyok',
-            'bata tumakas','batang tumakas','batang tumatakas','tumakas na bata',
-            'batang tumakbo','batang tumatakbo','tumakbo na bata','tumakbo',
-            'batang umalis ng bahay','batang umaalis ng bahay','umalis ng bahay',
-            'batang lumayas','batang lumalayas','lumayas na bata','lumayas',
-            'minor na umalis','minor na lumayas','minor na tumakas',
-            'naglayas na bata','batang naglayas','naglalayas na bata',
-            'naglalayas','naglayas','naglayas si','naglayas ang',
-            'inudyukan maglayas','tinulungan maglayas','tinulungan tumakas',
-            'tinulungan umalis','tinulungan lumayas',
-            'hinikayat maglayas','hinikayat tumakas','hinikayat umalis','hinikayat lumayas',
-            'udyok','inudyok','mangudyok','pangudyok',
-            'anak','inank','aanak','meanak','pamanak',
-            'ubing','ubing ya','inubing','uubing','meubing','pamubing',
-            'bata','bata ya','binata','babata','mebata','pambata',
-            'takyaw','tinakyaw','tatakyaw','metakyaw','pamtakyaw',
-            'laku','linaku','lalaku','melaku','pamlaku',
-            'tali','tinali','tatali','metali','pamtali'
-        ]
-    },
-    {
-        article: 'Art. 275', title: 'Abandonment of a Person in Danger', victim: ['any'],
-        keywords: [
-            'abandonment','abandonments','abandon','abandons','abandoning',
-            'abandoned','abandonment of person','abandonment of person in danger',
-            'abandonment of own victim','abandonment of victim',
-            'abandonment of a person in danger',
-            'abandonment of one\'s own victim',
-            'iniwan','iniwanan','ini-iwan','nag-iwan','nagiwan','iiwan','iiwanan',
-            'iniwan sa panganib','iniwan sa peligro','iniwan sa sakuna',
-            'iniwan sa aksidente','iniwan sa gulo','iniwan sa away',
-            'iniwan sa sunog','iniwan sa baha','iniwan sa oras ng panganib',
-            'pinabayaan','pinababayaan','nagpabaya','nagpapabaya','pabayaan',
-            'pinabayaan sa panganib','pinabayaan sa peligro','pinabayaan sa sakuna',
-            'pinabayaan sa aksidente','pinabayaan sa gulo','pinabayaan sa away',
-            'hindi tinulungan','hindi tinutulungan','hindi tumulong',
-            'hindi tumutulong','hindi sinaklolohan','hindi sinasaklolohan',
-            'hindi sinagip','hindi sinasagip','hindi iniligtas','hindi inililigtas',
-            'inabandona','inabandona sa','inabandona ang','inabandona kami',
-            'inabandona ako','inabandona siya',
-            'iniiwan','iniiwan sa','iniiwan ang','iniiwan kami','iniiwan ako',
-            'pabaya','pabaya sa','pabayang','pabaya siya','pabaya ako','pabaya kami',
-            'walang pakialam','walang pakialam sa','walang pakialam sa panganib',
-            'walang pakialam sa peligro','walang pakialam sa sakuna',
-            'walang pakialam sa kapwa','walang malasakit','walang malasakit sa',
-            'iwang','iniwang','iiwang','meiwang','pamiwang',
-            'tali','tinali','tatali','metali','pamtali',
-            'tetalakdan','telakdan','talakdan',
-            'pabaya','pinabaya','papabaya','mepabaya','pampabaya',
-            'malasakit','alang malasakit','pakialam','alang pakialam',
-            'tulung','tinulung','tutulung','metulung','pamtulung',
-            'saklulu','sinaklulu','sasaklulu','mesaklulu','pamsaklulu',
-            'salbak','sinalbak','sasalback','mesalbak','pamsalbak'
-        ]
-    },
-    {
-        article: 'Art. 276', title: 'Abandoning a Minor (Under 7 Years Old)', victim: ['minor'],
-        keywords: [
-            'abandoning minor','abandoning a minor','abandoning minors',
-            'abandoning a child','abandoning children','abandoning kid',
-            'abandoning kids','abandoning baby','abandoning babies',
-            'abandoning a minor child','abandoning minor child',
-            'child under seven','child under 7','under seven years old',
-            'under 7 years old','minor under seven','minor under 7',
-            'iniwang bata','iniwang batang','iniwang sanggol','iniwang baby',
-            'iniwang anak','iniwang mga bata','iniwang mga sanggol',
-            'pinabayaang bata','pinabayaang batang','pinabayaang sanggol',
-            'pinabayaang baby','pinabayaang anak','pinabayaang mga bata',
-            'inabandonang bata','inabandonang sanggol','inabandonang baby',
-            'inabandonang anak','inabandonang mga bata',
-            'bata iniwan','bata iniwanan','sanggol iniwan','sanggol iniwanan',
-            'baby iniwan','baby iniwanan','anak iniwan','anak iniwanan',
-            'bata wala pang 7','batang wala pang 7','sanggol wala pang 7',
-            'bata wala pang pitong','batang wala pang pitong',
-            'bata na wala pang 7 taon','bata na wala pang pitong taon',
-            'batang pinabayaan','sanggol na pinabayaan','sanggol na inabandona',
-            'inabandona ang anak','inabandona ang bata','inabandona ang sanggol',
-            'inabandona ang baby','inabandona ang mga anak',
-            'iniwan ang anak','iniwan ang bata','iniwan ang sanggol',
-            'iniwan ang baby','iniwan ang mga anak',
-            'pinabayaan ang anak','pinabayaan ang bata','pinabayaan ang sanggol',
-            'pinabayaan ang baby','pinabayaan ang mga anak',
-            'iniwan sa kalye','iniwan sa lansangan','iniwan sa daan',
-            'iniwan sa labas','iniwan sa bahay','iniwan sa pintuan',
-            'iniwan sa gate','iniwan sa simbahan','iniwan sa ospital',
-            'iniwan sa kanal','iniwan sa basurahan','iniwan sa sasakyan',
-            'iniwan sa kotse','iniwan sa tricycle','iniwan sa jeep',
-            'iwang','iniwang','iiwang','meiwang','pamiwang',
-            'anak','inank','aanak','meanak','pamanak',
-            'ubing','ubing ya','inubing','uubing','meubing','pamubing',
-            'bata','bata ya','binata','babata','mebata','pambata',
-            'pitu','pitung','pitung taon','pitu ya taon',
-            'alang pitu','alang pitung','kulang pitu','kulang pitung',
-            'pabaya','pinabaya','papabaya','mepabaya','pampabaya',
-            'abandonu','inabandonu','abandonu ya','mangabandonu'
-        ]
-    },
-    {
-        article: 'Art. 277', title: 'Abandonment of a Minor by Persons Entrusted with Custody; Indifference of Parents', victim: ['minor'],
-        keywords: [
-            'abandonment by custodian','abandonment by person',
-            'abandonment by person entrusted','abandonment of minor',
-            'abandonment of minor by custodian','abandonment of minor by parent',
-            'indifference of parents','indifference of parent',
-            'persons entrusted with custody','entrusted with his custody',
-            'entrusted with her custody','entrusted with custody',
-            'iniwan ng magulang','iniwan ng ina','iniwan ng ama',
-            'pinabayaan ng magulang','pinabayaan ng ina','pinabayaan ng ama',
-            'inabandona ng magulang','inabandona ng ina','inabandona ng ama',
-            'pabayang magulang','pabayang ina','pabayang ama',
-            'hindi inaalagaan','hindi inaalagaan ng magulang',
-            'hindi pinapakain','hindi pinapakain ng magulang',
-            'hindi pinapaligo','hindi pinapasok sa eskwela',
-            'hindi pinapaaral','nagpapabaya','nagpapabaya ng anak',
-            'walang pakialam','walang pakialam sa anak','walang pakialam sa bata',
-            'iwang','iniwang','iiwang','meiwang','pamiwang',
-            'indung','indung ya','indung ku','indung mi','indung na',
-            'tata','tata ya','tata ku','tata mi','tata na',
-            'pabaya','pinabaya','papabaya','mepabaya','pampabaya',
-            'anak','inank','aanak','meanak','pamanak',
-            'ubing','ubing ya','inubing','uubing','meubing','pamubing',
-            'kustudiya','kustudiya ya','mangustudiya','pangustudiya',
-            'responsibilidad','responsibilidad ya','may responsibilidad',
-            'tungkulin','tungkulin ya','mangatungkulin','pangatungkulin',
-            'malasakit','alang malasakit','pakialam','alang pakialam',
-            'abandonu','inabandonu','abandonu ya','mangabandonu'
-        ]
-    },
-    {
-        article: 'Art. 280', title: 'Qualified Trespass to Dwelling', victim: ['property'],
-        keywords: [
-            'qualified trespass','qualified trespasses','qualified trespass to dwelling',
-            'qualified trespass to dwelling without the use of violence',
-            'trespass','trespasses','trespassing','trespassed','trespasser',
-            'trespassers','trespass to dwelling','trespass dwelling',
-            'without use of violence','without violence','without intimidation',
-            'pumasok sa bahay','pumasok sa loob ng bahay','pumasok sa loob',
-            'pinasok ang bahay','pinasok ang loob ng bahay','pinasok ang loob',
-            'pumasok nang walang pahintulot','pumasok nang walang paalam',
-            'pasok sa bahay','pasok sa loob','pasok sa loob ng bahay',
-            'loob ng bahay','loob ng bahay namin','loob ng bahay nila',
-            'pumasok sa bakuran','pinasok ang bakuran',
-            'nagbabalak pumasok','nagpupumilit pumasok',
-            'pilit pumasok','pinilit pumasok',
-            'suklab','sinuklab','sasuklab','mesuklab','pamsuklab',
-            'loob','linub','lulub','melub','pamlub',
-            'sablay','sinablay','sasablay','mesablay','pamsablay',
-            'alang paintulut','alang pemit','alang paalam','alang abiso',
-            'alang sabi','e ne sasabian','e na paintulut','e na pemit',
-            'alang gulu','alang takot','alang sindak',
-            'balay','balay ya','binelay','babelay','mebalay','pambalay'
-        ]
-    },
-    {
-        article: 'Art. 281', title: 'Other Forms of Trespass', victim: ['property'],
-        keywords: [
-            'other trespass','other trespasses','other forms of trespass',
-            'trespass to property','trespass property','trespassing property',
-            'trespass sa lupa','trespass sa bakuran','trespass sa property',
-            'pumasok sa lupa','pinasok ang lupa','pumasok sa bakuran','pinasok ang bakuran',
-            'pumasok sa property','pinasok ang property',
-            'walang paalam na pumasok','sumalakay sa bakuran','sumalakay sa lupa',
-            'nagpupumilit pumasok sa lupa','pilit pumasok sa lupa',
-            'pinilit pumasok sa lupa','trespassing sa property',
-            'trespassing','trespasser','trespassers','nagtrespass',
-            'suklab','sinuklab','sasuklab','mesuklab','pamsuklab',
-            'loob','linub','lulub','melub','pamlub',
-            'sablay','sinablay','sasablay','mesablay','pamsablay',
-            'alang paintulut','alang pemit','alang paalam','alang abiso',
-            'alang sabi','e ne sasabian','e na paintulut','e na pemit',
-            'labuad','labuad ya','linabuad','lalabuad','melabuad','pamlabuad'
-        ]
-    },
-    {
-        article: 'Art. 283', title: 'Light Threats', victim: ['any'],
-        keywords: [
-            'light threats','light threat','magaan na banta','magaan na pananakot',
-            'banta','nagbanta','nagbabanta','babanta','pagbabanta','pagbanta',
-            'bantaan','binantaan','binabantaan','nambanta','nananakot',
-            'mananakot','nanakot','tinakot','tinatakot','pananakot','panakot',
-            'pangamba','pangambahan','nangamba','nangangamba',
-            'nagbantang sasaktan','nagbantang papatayin',
-            'nagbantang sasaksakin','nagbantang babarilin',
-            'nagbantang susunugin','nagbantang sisiraan','nagbantang ipapahiya',
-            'banta ng away','banta ng gulo','banta ng laban','banta ng suntukan',
-            'pinagbantaan','pinagbabantaan',
-            'pangamba sa buhay','pangamba sa kaligtasan','pangamba sa pamilya',
-            'banta','binanta','babanta','mamanta','pamanta',
-            'takot','tinakot','tatakut','tetakutan','metakot',
-            'pangatakot','pangatatakot','katakutan',
-            'sindak','sinindak','sasindak','mesindak','pamsindak',
-            'bantang','bantang ya','binantang','babantang','mebantang',
-            'pangatakut','pangatatakut','pangatakut ya','kapangatakut'
-        ]
-    },
-    {
-        article: 'Art. 285', title: 'Other Light Threats', victim: ['any'],
-        keywords: [
-            'other light threats','other light threat','ibang magaan na banta',
-            'banta sa sulat','banta sa letter','banta sa text','banta sa message',
-            'banta sa chat','banta sa messenger','banta sa sms',
-            'banta sa social media','banta sa facebook','banta sa fb',
-            'banta sa twitter','banta sa tiktok','banta sa instagram',
-            'nagbanta sa sulat','nagbanta sa text','nagbanta sa message',
-            'nagbanta sa social media','nagbanta sa facebook',
-            'banta via text','banta via chat','banta via sms','banta via email',
-            'banta sa pamamagitan ng','banta gamit ang',
-            'banta king sulat','banta king text','banta king chat',
-            'banta king messenger','banta king social media','banta king fb',
-            'menanta','menanta ya','mananta','mananta ya','miminta','miminta ya'
-        ]
-    },
-    {
-        article: 'Art. 286', title: 'Grave Coercion', victim: ['any'],
-        keywords: [
-            'grave coercion','grave coercions','mabigat na pananakot',
-            'sapilitan','sinasapilitan','pinipilit','pinilit','pinipilit gawin',
-            'pinilit gawin','pinipilit ako','pinilit ako',
-            'pinipilit pumayag','pinilit pumayag','pinipilit sumama',
-            'pinilit sumama','tinutukan','tinututukan','itinutok','itinututok',
-            'tutukan','tutukan ng baril','tinutukan ng baril',
-            'tutukan ng patalim','tinutukan ng patalim',
-            'tutukan ng kutsilyo','tinutukan ng kutsilyo',
-            'tinakot para','tinakot para gawin','tinakot para pumayag',
-            'pinilit na','pinilit na gawin','pinilit na pumayag','pinilit na sumama',
-            'pinilit na magbigay','pinilit na magbayad','pinilit na pumirma',
-            'sapilitang pagbibigay','sapilitang pagkuha','sapilitang paggawa',
-            'pilitin','pipilitin','pinipilit','pinilit',
-            'sapilitan','sinapilitan','sasapilitan','mesapilitan',
-            'tud','tinud','tutud','tetudan','metud',
-            'tutuk','tinutuk','tututuk','tetutukan','metutuk',
-            'mawang','minawang','mamawang','memawang','pamawang',
-            'takot','tinakot','tatakut','tetakutan','metakot'
-        ]
-    },
-    {
-        article: 'Art. 287', title: 'Light Coercion', victim: ['any'],
-        keywords: [
-            'light coercion','light coercions','magaan na pananakot',
-            'magaan na pagpilit','magaan na panghihimasok',
-            'pinipilit','pinilit','sapilitan','sinasapilitan','pinapilit',
-            'pinapagawa','pinapasunod',
-            'pinapasunod sa','pinapasunod ako','pinapasunod ka',
-            'pinapagawa ng','pinapagawa ako','pinapagawa ka',
-            'pilitin','pipilitin','pinipilit','pinilit',
-            'pipilitin magbayad','pinipilit magbayad','pinilit magbayad',
-            'pipilitin magbigay','pinipilit magbigay','pinilit magbigay',
-            'pipilitin sumama','pinipilit sumama','pinilit sumama',
-            'pilit','pinilit','pipilit','mepilit','pamipilit',
-            'pilitan','pinilitan','pipilitan','mepilitan',
-            'pagawa','pinagawa','pagagawain','megawa','pamagawa',
-            'sunud','sinunud','susunud','mesunud','pamsunud'
-        ]
-    },
-    {
-        article: 'Art. 288', title: 'Other Similar Coercions', victim: ['any'],
-        keywords: [
-            'compulsory purchase','compulsory purchases','compulsory buying',
-            'other similar coercions','other coercions',
-            'sapilitang pagbili','sapilitang pagbili ng merchandise',
-            'sapilitang pagbabayad','sapilitang bayad',
-            'pinilit bumili','pinipilit bumili','pinabayaran','pinapabayaran',
-            'token','tokens','token payment','token system',
-            'bayad sa token','bayad sa tokens',
-            'pagbabayad ng sahod sa token','sahod na token',
-            'compulsory merchandise','compulsory wage','payment by tokens',
-            'pilit','pinilit','pipilit','mepilit','pamipilit',
-            'sali','sinali','sasali','mesali','pamisali',
-            'bakal','binakal','babakalan','mebakal','pamakal',
-            'bayad','binayad','babayaran','mebayad','pambayad',
-            'sueldu','sueldu ya','sueldu ku','sueldu na',
-            'supisyenti','supisyenti ya','supisyenti ku','supisyenti na'
-        ]
-    },
-    {
-        article: 'Art. 289', title: 'Formation, Maintenance and Prohibition of Combination of Capital or Labor through Violence or Threats', victim: ['any'],
-        keywords: [
-            'combination of capital','combination of capital or labor',
-            'formation of combination','labor combination','capital combination',
-            'union formation','maintenance of combination','prohibition of combination',
-            'through violence','through threats','through threat',
-            'sapilitang unyon','unyon','union','unions','labor union','labor unions',
-            'sapilitang pagsali','sapilitang pagsali sa unyon',
-            'pinilit sumali','pinipilit sumali',
-            'pagbuo ng unyon','pagbuo ng asosasyon','pagbuo ng kapisanan',
-            'asosasyon','association','kapisanan','samahan','organisasyon',
-            'organization','grupo','group','groups',
-            'sapilitang pagbuo','sapilitang pagbuo ng',
-            'unyun','unyun ya','mangunyu','mangunyun','pangunyu',
-            'sali','sinali','sasali','mesali','pamisali',
-            'pilit','pinilit','pipilit','mepilit','pamipilit',
-            'kapisanan','kapisanan ya','mikapisanan','pangapisanan',
-            'samahan','samahan ya','misamahan','pamsamahan',
-            'grupu','grupu ya','migrupu','pamigrupu',
-            'trabahu','trabahu ya','mitrabahu','pamitrabahu',
-            'takot','tinakot','tatakut','metakot','pamtakot'
-        ]
-    },
-    {
-        article: 'Art. 290', title: 'Discovering Secrets through Seizure and Correspondence', victim: ['any'],
-        keywords: [
-            'discovering secrets','discovering secret','seizure of correspondence',
-            'seizure and correspondence','seizure of letters','seizure of mail',
-            'binuksan ang liham','binuksan ang sulat','binuksan ang email',
-            'binuksan ang mail','binuksan ang letter','binuksan ang sobre',
-            'kinuha ang liham','kinuha ang sulat','kinuha ang email',
-            'ninakaw ang liham','ninakaw ang sulat','ninakaw ang email',
-            'pinagbubuksan ang sulat','pinagbubuksan ang liham',
-            'binabasa ang liham','binabasa ang sulat','binabasa ang email',
-            'nagbukas ng liham','nagbukas ng sulat','nagbukas ng email',
-            'sulat','sulat ya','sinulat','susulat','mesulat','pamsulat',
-            'bukas','binukas','bubukas','mebukas','pambukas',
-            'lihim','lihim ya','linihim','lilihim','melihim','pamlihim',
-            'liham','liham ya','liniham','liliham','meliham','pamliham',
-            'sobre','sobre ya','sinobre','susobre','mesobre','pamsobre',
-            'email','email ya','email ku','email mi','email na',
-            'kuwa','kinuwa','kukuwa','mekuwa','pangkuwa',
-            'basa','binasa','babasa','mebasa','pambasa'
-        ]
-    },
-    {
-        article: 'Art. 291', title: 'Revealing Secrets with Abuse of Authority', victim: ['any'],
-        keywords: [
-            'revealing secrets','revealing secret','revealing secrets with abuse',
-            'revealing secrets with abuse of authority','abuse of authority',
-            'abuse of power','abuse of position','abuse of office',
-            'isinumbong ang sikreto','isinumbong ang sekreto',
-            'isiniwalat ang sikreto','isiniwalat ang sekreto',
-            'inihayag ang sekreto','inihayag ang sikreto',
-            'opisyal na nagsiwalat','opisyal na nagsumbong',
-            'abuso ng kapangyarihan','inabuso ang kapangyarihan',
-            'inabuso ang posisyon','inabuso ang puwesto',
-            'inabuso ang tungkulin','inabuso ang',
-            'nag-abuso','nag-abuso ng','nag-abuso ng kapangyarihan',
-            'inabuso','inabuso ng',
-            'nagsiwalat','nagsisiwalat','nagsiwalat ng',
-            'nagsumbong','nagsusumbong','nagsumbong ng',
-            'abusu','inabusu','abusu ya','mangabusu','mangabuso',
-            'abuso','inabuso','mangabuso','pangabuso',
-            'kapangyarihan','kapangyarihan ya','mangapangyarihan',
-            'puwesto','puwesto ya','mangapuwesto','pangapuwesto',
-            'tungkulin','tungkulin ya','mangatungkulin','pangatungkulin',
-            'sikretu','sikretu ya','sinikretu','sisikretu','mesikretu',
-            'sikreto','sikreto ya','sinikreto','sisikreto','mesikreto',
-            'sumbung','sinumbung','susumbung','mesumbung','pamsumbung',
-            'siwalat','siniwalat','sisisiwalat','mesiwalat','pamsiwalat'
-        ]
-    },
-    {
-        article: 'Art. 309', title: 'Theft (Value ≤ P50)', victim: ['any','property'],
-        keywords: [
-            'theft','thefts','thief','thieves','stealing','steal','steals','stole','stolen',
-            'nakaw','nagnakaw','nanakaw','ninakaw','ninakawan','ninanakaw',
-            'pagnanakaw','nagnanakaw','magnanakaw','mangnanakaw',
-            'nanakawin','nananakaw','nanakaw','nakawin','nakuha','kinuha',
-            'kinukuha','kumuha','kumukuha','kinukuha ng walang paalam',
-            'kinuha ng walang paalam','kinuha nang patago','kinuha nang tahimik',
-            'kinuha ang wallet','kinuha ang cellphone','kinuha ang bag',
-            'kinuha ang pitaka','kinuha ang pera','kinuha ang alahas',
-            'nanakaw ang wallet','nanakaw ang cellphone',
-            'nanakaw ang bag','nanakaw ang pitaka','nanakaw ang pera',
-            'magnanakaw','mandurukot','nadukutan','nanakawan',
-            'nadukutan ng','nadukutan ako','nadukutan kami','nadukutan siya',
-            'dukot','dukutin','dinukot','dinudukot','nagdudukot',
-            'pagnanakaw sa','pagnanakaw ng','pagnanakaw namin',
-            'below 50','less than 50','50 piso','50 pesos','limampung piso',
-            'nakaw','minakaw','manakaw','maninakaw','makaw','kinaw',
-            'kinaw ne','kinakaw','kakanawan','mekaw',
-            'kuwa','kinuwa','kukuwa','mekuwa','pangkuwa',
-            'takyaw','tinakyaw','tatakyaw','metakyaw','pamtakyaw',
-            'sibsit','sinibsit','sasibsit','mesibsit','pamsibsit',
-            'alang 50','dili','dinili','duduli','medili'
-        ]
-    },
-    {
-        article: 'Art. 310', title: 'Qualified Theft (Value ≤ P500)', victim: ['any','property'],
-        keywords: [
-            'qualified theft','qualified thefts','mabigat na pagnanakaw',
-            'qualified','grave theft','aggravated theft',
-            'pinasok ang bahay','pumasok sa bahay',
-            'akyat bahay','akyat-bahay','nag-akyat bahay',
-            'umakyat sa bahay','umakyat sa bubong','umakyat sa bintana',
-            'pinasok ang bintana','pinasok ang pintuan',
-            'sinira ang bintana at nagnakaw','sinira ang pinto at nagnakaw',
-            'pinasok ang bahay at nagnakaw','pumasok sa bahay at nagnakaw',
-            'pagnanakaw sa bahay','pagnanakaw na may pananakit',
-            'below 500','less than 500','500 piso','500 pesos','limandaang piso',
-            'nakaw','minakaw','manakaw','maninakaw','makaw','kinaw',
-            'suklab','sinuklab','sasuklab','mesuklab','pamsuklab',
-            'loob','linub','lulub','melub','pamlub',
-            'akyat','inakyat','aakyat','meakyat','pangakyat',
-            'alang 500','500 piso','500 pesos'
-        ]
-    },
-    {
-        article: 'Art. 312', title: 'Occupation of Real Property or Usurpation of Real Rights', victim: ['property'],
-        keywords: [
-            'occupation of real property','occupation of real properties',
-            'occupation of land','occupation of property','usurpation of real rights',
-            'usurpation of real property','usurpation of real rights in property',
-            'usurpation','usurp','usurps','usurping','usurped','usurper','usurpers',
-            'sinakop ang lupa','sinakop ang property',
-            'kinuha ang lupa','kinuha ang property',
-            'inasamang lupa','inasamang property',
-            'pagsakop ng lupa','pagsakop ng property',
-            'nag-okupa ng lupa','nag-okupa ng property',
-            'nag-occupy ng lupa','nag-occupy ng property',
-            'inookupahan ang lupa','inookupahan ang property',
-            'kinamkam ang lupa','kinamkam ang bahagi ng lupa',
-            'nasakop ang lupa namin','nakuha ang bahagi ng lupa namin',
-            'sakup','sinakup','sasakup','mesakup','pamsakup',
-            'kuwa','kinuwa','kukuwa','mekuwa','pangkuwa',
-            'lupa','lupa ya','linupa','lulupa','melupa','pamlupa',
-            'tuknang','tinuknang','tutuknang','metuknang','pamtuknang',
-            'upahan','inupahan','uupahan','meupahan','pangupahan',
-            'tira','tiniran','tutiran','metiran','pamtira'
-        ]
-    },
-    {
-        article: 'Art. 313', title: 'Altering Boundaries or Landmarks', victim: ['property'],
-        keywords: [
-            'altering boundaries','altering boundary','altering landmarks',
-            'altering landmark','altering of boundaries','altering of landmarks',
-            'binago ang hangganan','binago ang mojon','binago ang bakod',
-            'binago ang boundary','inilipat ang mojon','inilipat ang bakod',
-            'inilipat ang boundary','inurong ang bakod','inurong ang boundary',
-            'itinaas ang bakod','itinaas ang boundary',
-            'pinalitan ang bakod','pinalitan ang boundary','pinalitan ang mojon',
-            'nagpalit ng hangganan','nagpalit ng mojon','nagpalit ng bakod',
-            'boundary','boundaries','hangganan','mojon','mojones',
-            'landmark','landmarks','bakod','fence','fences',
-            'bakud','bakud ya','binakud','babakuran','mebakud','pambakud',
-            'dulung','dulung ya','dinulung','dudulung','medulung','pamdulung',
-            'lindug','lindug ya','linindug','lilindug','melindug','pamlindug',
-            'tanda','tanda ya','tinanda','tutanda','metanda','pamtanda',
-            'hangganan','hangganan ya','hinangganan','hihingganan','mehangganan',
-            'mojon','mojon ya','minojon','mumojon','memojon','pamojon',
-            'alkus','alkus ya','inalkus','aalukusan','mealkus','pamalkus'
-        ]
-    },
-    {
-        article: 'Art. 315', title: 'Swindling or Estafa (Amount ≤ P200)', victim: ['any'],
-        keywords: [
-            'swindling','swindlings','swindle','swindles','swindling or estafa',
-            'swindling and estafa','estafa','estafas','estapador','estapadora',
-            'estapadors','estapadoras','estafador','estafadora','estafadores',
-            'nag-estafa','nag-estafa ng','nag-estafa sa',
-            'niloko','niloloko','nanloko','nanloloko','manloloko',
-            'dinaya','dinadaya','nangdaya','nangdaraya','mandaraya',
-            'daya','pagdaya','pandaraya','pandarayang','nandaraya','nangdaraya',
-            'panloloko','nanloloko','manloloko','panlilinlang','nanglilinlang',
-            'niloko sa pera','niloko kami sa pera',
-            'niloko sa negosyo','niloko sa transaksyon','niloko sa pagbili',
-            'niloko sa pagbenta','niloko sa kontrata',
-            'kinuha ang pera sa daya','kinuha ang bayad at tumakas',
-            'nag-estafa ng pera','nag-estafa ng bayad',
-            'nangdaya sa presyo','nangdaya sa sukli',
-            'below 200','less than 200','200 piso','200 pesos','dalawandaang piso',
-            'daya','dinaya','dinadaya','mandaya','mandaraya','pandaya',
-            'luku','linuku','luluku','meluku','pamluku',
-            'luku-luku','linuku-luku','luluku-luku','meluku-luku',
-            'daya king kwarta','dinaya king kwarta','dinaya keng kwarta',
-            'kuwa','kinuwa','kukuwa','mekuwa','pangkuwa',
-            'kwarta','kwarta ya','kinwarta','kukwarta','mekwarta','pamkwarta',
-            'alang 200','estapa','inestapa','mangestapa','pangestapa'
-        ]
-    },
-    {
-        article: 'Art. 316', title: 'Other Forms of Swindling', victim: ['any'],
-        keywords: [
-            'other swindling','other forms of swindling','other swindlings',
-            'ibang panloloko','ibang uri ng panloloko','ibang panlilinlang',
-            'ibang pandaraya','ibang uri ng pandaraya',
-            'panloloko','panloloko sa','panloloko ng','nangloloko',
-            'daya','pagdaya','pandaraya','pandarayang','nandaraya','nangdaraya',
-            'niloko','niloloko','nanloko','nanloloko','manloloko',
-            'nagdaya','nagdaya ng','nagdaya sa',
-            'dinaya','dinadaya','dinaya sa',
-            'pinagbentahan ng hindi totoo','nagbenta ng hindi totoo',
-            'naglinlang','naglinlang ng','naglinlang sa',
-            'nilinlang','nilinlang ng','nilinlang sa',
-            'panlilinlang','nanglilinlang',
-            'daya','dinaya','dinadaya','mandaya','mandaraya','pandaya',
-            'luku','linuku','luluku','meluku','pamluku',
-            'benta','binenta','bebenta','mebenta','pambenta',
-            'benta king ali tutu','binenta king ali tutu',
-            'daya king','dinaya king','dinaya keng',
-            'kuwa','kinuwa','kukuwa','mekuwa','pangkuwa',
-            'sambut','sinambut','sasambut','mesambut','pamsambut'
-        ]
-    },
-    {
-        article: 'Art. 317', title: 'Swindling a Minor', victim: ['minor'],
-        keywords: [
-            'swindling a minor','swindling minor','swindling minors',
-            'swindling a child','swindling children','swindling a kid',
-            'niloko ang bata','niloko ang menor','niloko ang menor de edad',
-            'dinaya ang bata','dinaya ang menor','dinaya ang menor de edad',
-            'panloloko sa bata','panloloko sa menor',
-            'pandaraya sa bata','pandaraya sa menor',
-            'bata na niloko','batang niloko','menor na niloko',
-            'bata na dinaya','batang dinaya','menor na dinaya',
-            'daya','dinaya','dinadaya','mandaya','mandaraya','pandaya',
-            'anak','anak ya','inank','aanak','meanak','pamanak',
-            'ubing','ubing ya','inubing','uubing','meubing','pamubing',
-            'bata','bata ya','binata','babata','mebata','pambata',
-            'luku','linuku','luluku','meluku','pamluku',
-            'luku king anak','linuku king anak','linuku keng anak',
-            'luku king ubing','linuku king ubing','linuku keng ubing'
-        ]
-    },
-    {
-        article: 'Art. 318', title: 'Other Deceits', victim: ['any'],
-        keywords: [
-            'other deceits','other deceit','deceits','deceit','deceiving','deceive',
-            'deceived','deceives','deceiver','deceivers',
-            'ibang panlilinlang','ibang panloloko','ibang pandaraya',
-            'ibang uri ng panlilinlang','ibang uri ng panloloko','ibang uri ng pandaraya',
-            'panlilinlang','panloloko','pandaraya','daya','pagdaya','nagdaya',
-            'nangdaya','nandaraya','nangdaraya','manlilinlang','manloloko',
-            'naglinlang','nilinlang','nanglilinlang',
-            'daya','dinaya','dinadaya','mandaya','mandaraya','pandaya',
-            'luku','linuku','luluku','meluku','pamluku',
-            'luku-luku','linuku-luku','luluku-luku','meluku-luku',
-            'sambut','sinambut','sasambut','mesambut','pamsambut',
-            'taksya','tinaksya','tattaksya','metaksya','pamtaksya',
-            'kalokuan','kinilokuan','kakilokuan','mekilokuan'
-        ]
-    },
-    {
-        article: 'Art. 319', title: 'Removal, Sale or Pledge of Mortgaged Property', victim: ['property'],
-        keywords: [
-            'removal','remove','removing','removed','sale','sell','selling','sold',
-            'pledge','pledging','pledged','mortgaged','mortgage','mortgaging',
-            'alis','inalis','nag-alis','mag-alis','pag-alis','umalis','inalisan',
-            'benta','ibinenta','pinagbenta','nagbenta','magbenta','pagbenta','binenta',
-            'binebenta','ibebenta','pinagbebenta','nakabenta',
-            'sangla','sinangla','nakasanla','pinagsanglaan','nagsangla','magsangla',
-            'pagsangla','isinasangla','isasangla','sanglaan','sanglahan',
-            'nakamortgage','nakamortgaged','nakasanlang lupa','nakasanlang bahay',
-            'property','ari-arian','pag-aari','lupa','bahay','sasakyan',
-            'walang pahintulot','walang paalam','hindi pinayagan',
-            'inalis ang','kinuha ang','ibinenta ang','isinangla ang',
-            'alisi','inalisi','mag-alis','ag-alis','mangalis','menalisi',
-            'benta','ibenta','binenta','mamiali','memiali','pamibenta',
-            'sangla','sinangla','makasangla','magsangla','pamisali','kasalang',
-            'ipisali','penali','sinali','seli','sisali','sanglaan',
-            'mikasalang','mitakda','pamagbenta','pamamisali',
-            'alang paintulut','alang pemit','alang paalam','alang abiso',
-            'kayarian','kayarian na','kayarian ku','kayarian mi',
-            'tierra','lote','lupang','balen','pamana','herencia'
-        ]
-    },
-    {
-        article: 'Art. 328', title: 'Special Cases of Malicious Mischief (Value ≤ P1,000)', victim: ['property'],
-        keywords: [
-            'malicious mischief','mischief','special mischief','malicious',
-            'special cases of malicious mischief',
-            'sinira','sinisira','nasira','paninira','maninira','nagsira','magsira',
-            'pagkasira','pagkakasira','nasisira','nasiraan','sira','sirang','sira-sira',
-            'sira ng gamit','sirang gamit','sinira ang gamit',
-            'binasag','binabasag','nagbasag','magbasag','pagbasag','basag','basagin',
-            'binaboy','binabuy','nagbaboy','nambaboy','pambaboy',
-            'ginulo','ginugulo','nanggulo','nanggugulo',
-            'dinurog','dinudurog','nagdudurog',
-            'pinutol','piniputol','nagputol','nagpuputol',
-            'sinunog','sinusunog','nagsunog','nagsusunog','pagsunog',
-            'damage','destroy','destroyed','destroying','vandalism','vandalize',
-            'vandalized','vandalizing','ruin','ruined','ruining',
-            'basag','wasak','nawasak','winasak','winawasak',
-            'lansag','nilansag','giniba','ginigiba','naggiba','igiba',
-            'punit','pinunit','pinupunit','napunit','napupunit',
-            'sinira','sisira','misira','misisira','peras','peras ne','peras na',
-            'panyira','manyira','maninira','pamisali',
-            'basag','binasag','babasagin','memasag','mabasag','mebasag',
-            'putut','pinutut','pupututin','meputut','pamutut',
-            'sindi','sinindi','sisindian','mesindi',
-            'sabug','sinabug','sasabugan','mesabug',
-            'alang paintulut','alang pemit','alang paalam',
-            'destrosu','destrusu','destruksion','destruksyun',
-            'kayarian','kayarian na','kayarian ku','kayarian mi',
-            'below 1000','less than 1000','1000 piso','1k','1000 pesos'
-        ]
-    },
-    {
-        article: 'Art. 329', title: 'Other Mischiefs (Value ≤ P1,000)', victim: ['property'],
-        keywords: [
-            'other mischief','other mischiefs','ibang paninira','ibang uri ng paninira',
-            'disturbance','nuisance','litter','littering','dump',
-            'dumping','dumped','dumps','garbage','trash','rubbish','waste',
-            'paninira','nakakasira','nakasira','nakakasira ng','nakakasama',
-            'gulo','ginulo','nanggulo','nanggugulo','nakakagulo','nakakagambala',
-            'nagulo','nagugulo','ginagambala','nakakagambala','isturbo','istorbo',
-            'nakakaistorbo','nag-isturbo','nakakaabala','nakaabala',
-            'tapon','tinapon','itapon','nagtapon','nagtatapon','nagtatapong',
-            'pagtatapon','itinatapon','itapon ang','itinapon ang',
-            'tapon ng basura','tapon ng dumi','nagtapon ng basura',
-            'basura','basurahan','basurang','basurero','nagbasura','magbasura',
-            'basura sa harap','basura sa tapat','basura sa bakuran','basura sa lupa',
-            'basura sa kalsada','basura sa daan','basura sa kanal','basura sa ilog',
-            'nagkakalat ng basura','nagkalat ng basura','nagkakalat','nagkalat',
-            'nakakalat','nakakalat na','kalat','kalat-kalat','maruming','marumi',
-            'nakakadumi','nagpaparumi','nagpaparumi ng','nagpaparumi sa',
-            'dumi','duming','nadumi','nadudumihan','dinumihan','nagpapadumi',
-            'pinagsasabuyan','nagsasaboy','nagsasabuyan','sinasabuyan',
-            'binuhusan','binubuhusan','nagbuhos','nagbubuhos','nagbuhos ng',
-            'binuhusan ng','binubuhusan ng','ibinuhos','ibinubuhos',
-            'pinagbuhusan','pinagbubuhusan','binuhusan ng dumi','binuhusan ng basura',
-            'below 1000','less than 1000','1000 piso','1k','1000 pesos',
-            'basura','magbasura','memasura','mamagbasura','mangabul','manabul',
-            'binabudbud','babudburan','mebudbud','budbud','budbudan',
-            'tabug','tinabug','tatabugan','metabug',
-            'sabuy','sinabuy','sasabuyan','mesabuy',
-            'putik','maputik','meputik','pamuputik','maniputik',
-            'malangi','malangsi','malangse','mabahu','mabahu ya','kabahu',
-            'sanglu','masanglu','mesanglu','sasanglu','kasangluan',
-            'alang linis','maruk','maruk ya','karuk','karukan',
-            'rusing','rusingan','marusing','marusing ya','karusing',
-            'tapon','tetapon','metapon','itapon',
-            'basural','basuralan','kasuelo','kadumi','karumi',
-            'inmundisia','imundisia','peste','mapeste','mameste'
-        ]
-    },
-    {
-        article: 'Art. 338', title: 'Simple Seduction', victim: ['woman'],
-        keywords: [
-            'simple seduction','seduction','seduce','seducing','seduced',
-            'seducement','seductress','seduced a woman','seduced a girl',
-            'nag-akit','umakit','akit','pang-akit','nang-akit','nag-aaakit',
-            'inakit','inaakit','pag-akit','pag-aaakit','umaaakit',
-            'pinangakuan','nangako','nangangako','nagpangako','pangako',
-            'pangako ng kasal','pangakong kasal','pangako ng pag-ibig',
-            'niloko sa pag-ibig','niloko sa pagmamahal','niloko ang',
-            'relasyon','karelasyon','may relasyon','nagrelasyon','nakikipagrelasyon',
-            'kalaguyo','kerida','kabits','kabit','kabitin','may kabit',
-            'binuntis','nabuntis','nagbuntis','pinabuntis','nagpabuntis',
-            'iniwan sa ere','iniwan na buntis','iniwang buntis','pinabayaan na buntis',
-            'virgin','birhen','dalaga','binibini','dalagita',
-            'hindi kasal','walang kasal','hindi pinakasalan','hindi pinapanagot',
-            'tinud','tutud','manud','tetud','metud','metud ya',
-            'inakit','mangakit','pangakit','pangakit na',
-            'menako','manako','memanako','pammanako',
-            'besa','binensa','babensaan','mebensa','mebensa ya',
-            'buntis','binuntis','mabuntis','mebuntis',
-            'iniwan','iniwan ne','tetalakdan','telakdan','talakdan',
-            'alang asawa','alang kasal','e kasal','e re pinakasal',
-            'e ne panagutan','e ne aako','e ne abalu','e ne pakibalu',
-            'daya','dinaya','mangdaya','mandaraya',
-            'amante','kabit','kerida','querida',
-            'abandonadu','abandonada','embarasada','preñada','preñada ya'
-        ]
-    },
-    {
-        article: 'Art. 339', title: 'Acts of Lasciviousness with Consent', victim: ['any'],
-        keywords: [
-            'lasciviousness','lascivious','lascivious acts','lascivious conduct',
-            'acts of lasciviousness','with consent','with consent of offended party',
-            'indecent','indecency','obscene','obscenity','lewd','lewdness',
-            'sexual','sexual act','sexual acts','molestation','molest',
-            'molesting','molested','molester',
-            'malaswa','malaswang','malaswang gawa','malaswang kilos',
-            'malaswang hawak','malaswang hipo',
-            'kalaswaan','nakakalaswa','nakakalaswang','masamang gawa',
-            'hipo','hinipo','humipo','humihipo','hinihipo','nahipo','nahihipo',
-            'hipuin','hinahawakan','hawak','hinawakan','humawak','humahawak',
-            'masamang hawak','masamang hipo','masamang paghawak',
-            'kamay sa','kamay sa dibdib','kamay sa hita','kamay sa katawan',
-            'ginalaw','ginagalaw','ginagalaw-galaw','nanggagalaw',
-            'hinimas','hinihimas','naghimas','naghihimas','himas',
-            'sinipsip','sinisipsip','nagsipsip','nagsisipsip',
-            'dinilaan','dinidilaan','nagdila','nagdilaan',
-            'hinagkan','hinahagkan','naghagkan','naghahagkan','hagkan','halik',
-            'hinalikan','hinahalikan','naghalik','naghahalik','halikan',
-            'consent','may pahintulot','pinayagan','sinang-ayunan',
-            'malaswang','malalaswa','kabastusan','binastos','binabastos',
-            'nambabastos','pambabastos','pangbabastos',
-            'malaswa','malaswa ya','malaswang','kalaswaan','kalaswan',
-            'gemal','gagal','gemalan','gagalan','ginalaw','ginalaw ne',
-            'galaw','ginagalaw','gagalaw','galawan','galawanan',
-            'kapkap','kinapkap','kakapkapan','mekapkap',
-            'pisil','pinisil','pipisil','mepisil',
-            'dila','dinilaan','didilaan','medilaan',
-            'sipsip','sinipsip','sisipsip','mesipsip',
-            'bastus ya','binastus','babastusan','mebastus',
-            'insultu','ininsultu','mang-insultu',
-            'abusu','inabusu','mangabusu','mangabuso'
-        ]
-    },
-    {
-        article: 'Art. 356', title: 'Threatening to Publish and Offer to Prevent Such Publication', victim: ['any'],
-        keywords: [
-            'threat to publish','threatening to publish','threaten','threatened',
-            'threatening','threat','publish','publishing','published','publication',
-            'offer to prevent publication','prevent publication',
-            'libel','libelous','blackmail','blackmailing','blackmailed',
-            'extortion','extorting','extort','extortionist','extortioner',
-            'expose','exposing','exposed','expose you',
-            'ibubunyag ang sikreto','ibubunyag ang lihim','ibubunyag ang nangyari',
-            'ipapahiya ako sa social media','ipapahiya ako sa facebook',
-            'ipapahiya ako sa publiko','ibubuking ako','isusumbong ako',
-            'banta','nagbanta','nagbabanta','babanta','pagbabanta','pagbanta',
-            'nambanta','nananakot','mananakot','nanakot','tinakot','tinatakot',
-            'takot','kinatatakutan','pinagbantaan','pinagbabantaan',
-            'pananakot','panakot','pambabanta','pagbabantang',
-            'ibubunyag','ibinubunyag','ibunyag','ibinunyag','nagbunyag',
-            'isusumbong','isinasumbong','isumbong','sinumbong','nagsumbong',
-            'ipapahiya','ipinapahiya','ipahiya','pinahiya','nagpahiya',
-            'ibubuking','ibinubuking','ibuking','binuking','nagbuking',
-            'isisiwalat','isinasisiwalat','isiwalat','isiniwalat','nagsiwalat',
-            'kung hindi ka magbayad','kung hindi ka magbigay',
-            'kapalit ng pera','kapalit ng','pera kapalit',
-            'banta ng','bantang','bantang ipapahiya','bantang ibubunyag',
-            'banta','binanta','babanta','mamanta','pamanta',
-            'takot','tinakot','tatakut','tetakutan','metakot',
-            'pangatakot','pangatatakot','katakutan',
-            'sumbung','sinumbung','susumbung','mesumbung',
-            'isumbung','isusumbung','ipasumbung','pamisumbung',
-            'bunyag','binunyag','bubunyag','mebunyag','pamunyag',
-            'pahiya','pinahiya','papahiya','mepahiya',
-            'kahiya','kahiya ya','kahihiyan','makakahiya','nakakahiya',
-            'salita','sinalita','sasalita','mesalita','pamisalita',
-            'amenasa','inamenasa','amenasahan','maamenasa',
-            'amenaza','pangaamenasa','intimidasion','intimidasyun',
-            'intimida','inintimida','amenaza de publicar'
-        ]
-    },
-    {
-        article: 'Art. 357', title: 'Prohibiting Publication of Acts Referred to in Official Proceedings', victim: ['any'],
-        keywords: [
-            'publication of official','publication of acts','official publication',
-            'official proceedings','official proceeding','official record',
-            'prohibiting publication','forbid publication','prevent publication',
-            'barred from publishing','gagged','gag order','gag orders',
-            'secret','secrecy','classified','confidential','confidentiality',
-            'opisyal na pagdinig','opisyal na paglilitis','opisyal na record',
-            'opisyal na dokumento','opisyal na papeles','opisyal na usapin',
-            'pinagbawalan magsalita','pinagbawalan mag-ulat','pinagbawalan magsabi',
-            'pinagbawalan magbahagi','pinagbawalan ikuwento','pinagbawalan sabihin',
-            'pinaghigpitan','pinaghihigpitan','pinaghigpit','naghigpit',
-            'sikreto','sikretong','isang sikreto','sikreto ng','sikreto sa',
-            'tinatago','itinatago','nagtatago','nagtago','itinago',
-            'ipinagbawal','ipinagbabawal','nagbawal','nagbabawal','pinagbawal',
-            'prohibited','prohibiting','prohibit','forbidden','forbid','forbidding',
-            'leak','leaked','leaking','leaker','leakage',
-            'proceedings','hearing','hearings','trial','trials','session','sessions',
-            'barangay hearing','barangay proceedings','barangay trial',
-            'barangay session','barangay record','barangay document',
-            'record of the case','case record','case file',
-            'opisyal','official','awtoridad','authority','otorsidad',
-            'sikretu','sikretu ya','sikretu na','misikretu',
-            'sikreto','sikreto ya','sikreto na','misikreto',
-            'pemagbawal','pipagbawal','agbawal','magbawal','bawalan',
-            'pipigilan','pigilan','mipigil','mipigil ya',
-            'tinago','tinago ne','tatago','tetaguan','metago',
-            'tagu','tinagu','tatagu','tetaguan','metagu',
-            'ilihim','ininilihim','ililihim','melihim',
-            'lihim','lilihim','linihim','lilihimen','melilihim',
-            'mag-ulat','meg-ulat','ipag-ulat','ipag-ulat ne',
-            'magsalita','megsalita','ipagsalita','ipagsalita ne',
-            'sekreto','sekreto ya','misekreto','sikretu',
-            'prohibidu','prohibida','prohibido','prohibision','prohibisyun',
-            'kasu','kasu ya','kasung','kasung opisyal','kasung barangay'
-        ]
-    },
-    {
-        article: 'Art. 363', title: 'Incriminating Innocent Persons', victim: ['any'],
-        keywords: [
-            'incriminating','incriminate','incriminated','incriminating innocent',
-            'incriminating innocent persons','incriminating innocent person',
-            'false accusation','false accusations','falsely accusing',
-            'false witness','false testimony','false charge','false charges',
-            'blame','blaming','blamed','frame','framing','framed','frame-up',
-            'bintang','nagbintang','nagbibintang','binintangan','binibintangan',
-            'pagbintang','pagbibintang','ibinintang','ibinibintang',
-            'paratang','nagparatang','nagpaparatang','pinagparatangan',
-            'pinaparatangan','paratangan','paratangin','ipinaratang','ipinaparatang',
-            'pinagbintangan','pinagbibintangan','pinagbintangan ng',
-            'sinungaling','magsinungaling','nagsinungaling','pagsisinungaling',
-            'hindi totoo','hindi tunay','hindi naman totoo','hindi naman tunay',
-            'gawa-gawa','gawa-gawang','kathang-isip','kathang isip',
-            'imbento','imbentong','iniimbento','nag-imbento','nag-iimbento',
-            'hinabi','hinahabi','gawa-gawang kwento','gawa-gawang istorya',
-            'sinisi','sinisisi','nagsisi','nagsisisi','pinagsisihan',
-            'itinuro','itinuturo','nagturo','nagtuturo','tinuro','tinuturo',
-            'kasinungalingan','mga kasinungalingan','kasinungalingang',
-            'pagsisinungaling','pagsisinungalingan','magsisinungaling',
-            'ibinintang','ibinabintang','ibintang','ibinintang sa',
-            'bintang','binintang','bibintang','mamintang',
-            'pamintang','pamintang na','pamintang ne','kapamintang',
-            'sumbung','sinumbung','susumbung','mesumbung',
-            'paratang','pinaratang','paparatang','meparatang',
-            'kasalanan','kinasalanan','kakasalanan','mekasalanan',
-            'kalokuan','kinilokuan','kakilokuan','mekilokuan',
-            'sinungaling','sinungaling ya','magsinungaling','megsinungaling',
-            'salita','sinalita','sasalita','mesalita','pamisalita',
-            'peksa','pemaksa','papaksa','mepaksa','pamaksa',
-            'imbentu','inimbentu','iimbentuan','meimbentu','pamimbentu',
-            'gawa-gawa','gawa-gawa ne','gawa-gawa ya','megawa-gawa',
-            'tud','tinud','tutud','tetudan','metud','metud ya',
-            'turu','tinuru','tuturu','teturuan','meturu','meturu ya',
-            'tudtud','tinudtud','tutudtud','tetudtud','metudtud',
-            'kabalastugan','kinabalastugan','kakabalastugan','mekabalastugan',
-            'akusasion','akusasyun','akusa','inakusa','akusahan','akusadu',
-            'akusada','pangaakusa','testigu','testigus',
-            'falsong testigu','testimonio','falsong testimonio'
-        ]
-    },
-    {
-        article: 'Art. 364', title: 'Intriguing Against Honor', victim: ['any'],
-        keywords: [
-            'intriguing','intrigue','intrigues','intriguing against honor',
-            'gossip','gossiping','gossiped','gossiper','gossipers',
-            'slander','slandering','slandered','slanderer','slanderous',
-            'defamation','defame','defaming','defamed','defamatory',
-            'insult','insulting','insulted','insults','insulter',
-            'verbal abuse','cursing','curse',
-            'intriga','nag-intriga','nag-iintriga','pag-intriga',
-            'tsismis','tsismoso','tsismosa','nagtsitsismis','nagtsismis',
-            'pinagtsitsismisan','pinagtsismisan','tsismisan','tsismisang',
-            'chismis','chismoso','chismosa','nagchichismis','nagchismis',
-            'pinagchichismisan','pinagchismisan','chismisan','chismisang',
-            'marites','maritess','nagmamarites','nagmarites',
-            'siraan','sinisiraan','nagsiraan','nagsisiraan','siraan ng',
-            'paninirang puri','paninirang-puri','paninirang',
-            'naninirang','maninirang','maninirang puri',
-            'pinanirang','pinapanirang','paninirang puri',
-            'reputasyon','reputation','dangal','karangalan','pangalan',
-            'sinira ang pangalan','sinisira ang pangalan','nagsira ng pangalan',
-            'sinisiraan ang','sinisiraan ako','sinisiraan kami',
-            'nagkalat ng tsismis','nagkakalat ng tsismis','kinalat','kinakalat',
-            'pinagkalat','pinagkakalat','ipinagkalat','ipinagkakalat',
-            'kumalat','kumakalat','lumaganap','lumalaganap','nagkalat',
-            'nagkakalat','naglalaganap','nagpalaganap','nagpapalaganap',
-            'nilalait','panlalait','nanlalait','manlalait',
-            'insulto','ininsulto','nang-insulto','nang-iinsulto','insultuhin',
-            'mura','minura','minumura','mumurahin','pinagmumura','nagmumura',
-            'murahin','pinagmumura','namumura',
-            'bastos','binastos','binabastos','nambabastos',
-            'pambabastos','pagbibigay-bastos','panlalait',
-            'masamang salita','masasamang salita','masamang pananalita',
-            'masakit na salita','masasakit na salita','nananakit ng salita',
-            'pananakit ng salita','pananakit sa pamamagitan ng salita',
-            'tsismis','tsismis ya','magtsismis','megtsismis','tsismoso',
-            'tsismosa','tsismoso ya','tsismosa ya',
-            'intriga','inintriga','iintriga','meintriga','pang-intriga',
-            'siraan','siniraan','sisiraan','mesiraan',
-            'purik','pinurik','purikan','mepurik','mepurik ya',
-            'tukso','tinutukso','tutukso','tetukso','metukso',
-            'lait','nilait','lalaitin','lelait','melait','paglait',
-            'mura','minura','mumura','memura','pamura',
-            'bastus','binastus','babastusan','mebastus','pambastus',
-            'insultu','ininsultu','insultu ya','mang-insultu',
-            'panlalait','manlalait','panlalait na','manlalait ya',
-            'sinala','sinasala','sasalaan','mesala','pamisala',
-            'karangalan','karangalan ya','dangal','dangal na',
-            'kalait','kinalait','kakalait','mekalait'
-        ]
-    },
-    {
-        article: 'BP 22', title: 'Issuing Checks Without Sufficient Funds', victim: ['any'],
-        keywords: [
-            'bounced check','bouncing check','bad check','bouncing checks',
-            'bounced cheque','bad cheque','dishonored check','dishonored cheque',
-            'insufficient funds','insufficient fund','insufficient',
-            'no sufficient funds','without sufficient funds','no funds',
-            'issuing checks without sufficient funds',
-            'issuing checks','issuing check','issued check','issue ng check','issue ng tseke',
-            'check','checks','cheque','cheques','tseke','mga tseke',
-            'cheke','mga cheke','cheke na','tseke na','chekeng','tsekeng',
-            'walang pondo','walang pondong','kulang ang pondo','kulang pondo',
-            'walang laman','walang laman ang','walang lamang',
-            'tumalbog','tumatalbog','tatalbog','patalbog','talbugin',
-            'tumalbog na check','tumalbog na tseke','tumalbog na cheke',
-            'bounced','bounce','bounces','bouncing','nag-bounce','bumalik',
-            'nagbalik','ibinalik','ibinabalik','ibinalik ng bangko',
-            'ibinabalik ng banko','ibinalik ng bank','returned check',
-            'bank','banko','bangko','savings','checking account',
-            'checking','checkbook','chequebook','checkbook account',
-            'bayad sa check','bayad sa tseke','bayad sa cheke',
-            'check na bayad','tseke na bayad','cheke na bayad',
-            'nag-issue ng check','nag-issue ng tseke','nagbigay ng check',
-            'nagbigay ng tseke','nagbigay ng cheke','ibinigay na check',
-            'tseke','cheke','tseke ya','cheke ya','magtseke','magcheke',
-            'ibie tseke','ibie cheke','binie tseke','binie cheke',
-            'alang pondo','alang lamang','alang lawe','alang kwarta',
-            'tumalbog','tinmalbug','tatalbug','metalbog','metalbog ya',
-            'patalbug','talbugan','talbog','telbug',
-            'balik','binie balik','ibabalik','babalik','mibalik','mibalik ya',
-            'bangku','banku','bangku ya','tseke king bangku',
-            'cheke king bangku','checking account','kuwenta',
-            'sensilyu','kwarta','kwarta na','alang kwarta','walang kwarta'
-        ]
-    },
-    {
-        article: 'PD 1612', title: 'Fencing of Stolen Properties (Value ≤ P50)', victim: ['any','property'],
-        keywords: [
-            'fencing','fence','fences','fencing of stolen property',
-            'fencing of stolen properties','fence stolen','fence stolen property',
-            'stolen property','stolen properties','stolen goods','stolen item',
-            'stolen items','stolen thing','stolen things','stolen stuff',
-            'nakaw na gamit','nakaw na bagay','nakaw na mga gamit',
-            'nakaw na mga bagay','nakaw na','nakaw','nagnakaw',
-            'bumili ng nakaw','bumibili ng nakaw','bibili ng nakaw',
-            'tumanggap ng nakaw','tumatanggap ng nakaw','tatanggap ng nakaw',
-            'pinagbentahan ng nakaw','pinagbebentahan ng nakaw',
-            'nagtago ng nakaw','nagtatago ng nakaw','itinago ang nakaw',
-            'itinatago ang nakaw','itinago','itinatago',
-            'kinupkop','kinukupkop','nagkupkop','nagkukupkop',
-            'tinanggap','tinatanggap','tumanggap','tumatanggap',
-            'binili','binibili','bumili','bumibili',
-            'fence','fencer','fencing operation','stolen goods dealer',
-            'dealer ng nakaw','tindero ng nakaw','nagtitinda ng nakaw',
-            'nagbebenta ng nakaw','nagbebenta','nagtitinda',
-            'kinuha','kinukuha','kumuha','kumukuha',
-            'below 50','less than 50','50 piso','50 pesos',
-            'nakaw','minakaw','manakaw','maninakaw','makaw','kinaw',
-            'kinaw ne','kinakaw','kakanawan','mekaw','mekaw ya',
-            'binili','binili ne','bibili','mibili','mamili','mimili',
-            'tanggap','tinanggap','tatanggap','metanggap','manganggap',
-            'sali','sinali','sasali','mesali','pamisali',
-            'tagu','tinagu','tatagu','tetaguan','metagu',
-            'kupkop','kinupkop','kukupkop','mekupkop','pangupkop',
-            'tindera','tindero','manindera','manindero','tindahan',
-            'bakal','binakal','babakalan','mebakal','mamakal',
-            'kuwa','kinuwa','kukuwa','mekuwa','mangkuwa',
-            'alang 50','50 piso','50 pesos','limampung piso'
-        ]
-    }
-];
+const barangayLaws = window.BARANGAY_LAWS;
 
 // ============================================================
 // SECTION 2: STANDARD SUBJECTS
 // ============================================================
-const standardSubjects = [
-    'Lending/Utang Issue','Property/Boundary Issue','Neighbor Dispute','Noise Complaint','Waste Management',
-    'Animal Complaint','Road/Infrastructure','Physical Altercation','Threat/Intimidation','Verbal Abuse',
-    'Scandal','Theft/Robbery','Cyber Libel','Child Protection Concern','Violence Against Women (VAWC)',
-    'Illegal Gambling','Drug Related Issue','Illegal Vendors','Abandoned Vehicle','Obstruction on Public Way',
-    'Illegal Structure','Water Supply Issue','Electrical Problem','Zoning Violation','Health Concern',
-    'Calamity Assistance','Social Services Concern','Employment/Livelihood Issue','Education Assistance',
-    'Medical Assistance','Death/Burial Assistance','Senior Citizen Concern','PWD Concern','Solo Parent Concern'
-];
-
-const standardToLaw = {
-    'Lending/Utang Issue': { article: 'BP 22', title: 'Issuing Checks Without Sufficient Funds' },
-    'Property/Boundary Issue': { article: 'Art. 313', title: 'Altering Boundaries or Landmarks' },
-    'Neighbor Dispute': { article: 'Art. 364', title: 'Intriguing Against Honor' },
-    'Noise Complaint': { article: 'Art. 155', title: 'Alarms and Scandals' },
-    'Waste Management': { article: 'Art. 329', title: 'Other Mischiefs (Value ≤ P1,000)' },
-    'Animal Complaint': { article: 'Art. 329', title: 'Other Mischiefs (Value ≤ P1,000)' },
-    'Road/Infrastructure': { article: 'Art. 329', title: 'Other Mischiefs (Value ≤ P1,000)' },
-    'Physical Altercation': { article: 'Art. 266', title: 'Slight Physical Injuries and Maltreatment' },
-    'Threat/Intimidation': { article: 'Art. 283', title: 'Light Threats' },
-    'Verbal Abuse': { article: 'Art. 364', title: 'Intriguing Against Honor' },
-    'Scandal': { article: 'Art. 155', title: 'Alarms and Scandals' },
-    'Theft/Robbery': { article: 'Art. 309', title: 'Theft (Value ≤ P50)' },
-    'Cyber Libel': { article: 'Art. 154', title: 'Unlawful Use of Means of Publication' },
-    'Child Protection Concern': { article: 'Art. 276', title: 'Abandoning a Minor (Under 7 Years Old)' },
-    'Violence Against Women (VAWC)': { article: 'Art. 266', title: 'Slight Physical Injuries and Maltreatment' },
-    'Illegal Gambling': { article: 'Art. 155', title: 'Alarms and Scandals' },
-    'Drug Related Issue': { article: null, title: null },
-    'Illegal Vendors': { article: 'Art. 155', title: 'Alarms and Scandals' },
-    'Abandoned Vehicle': { article: 'Art. 155', title: 'Alarms and Scandals' },
-    'Obstruction on Public Way': { article: 'Art. 155', title: 'Alarms and Scandals' },
-    'Illegal Structure': { article: 'Art. 312', title: 'Occupation of Real Property or Usurpation of Real Rights' },
-    'Water Supply Issue': { article: 'Art. 329', title: 'Other Mischiefs' },
-    'Electrical Problem': { article: 'Art. 329', title: 'Other Mischiefs' },
-    'Zoning Violation': { article: 'Art. 312', title: 'Occupation of Real Property or Usurpation of Real Rights' },
-    'Health Concern': { article: null, title: null },
-    'Calamity Assistance': { article: null, title: null },
-    'Social Services Concern': { article: null, title: null },
-    'Employment/Livelihood Issue': { article: null, title: null },
-    'Education Assistance': { article: null, title: null },
-    'Medical Assistance': { article: null, title: null },
-    'Death/Burial Assistance': { article: null, title: null },
-    'Senior Citizen Concern': { article: null, title: null },
-    'PWD Concern': { article: null, title: null },
-    'Solo Parent Concern': { article: null, title: null }
-};
+const standardSubjects = window.STANDARD_SUBJECTS;
+const standardToLaw = window.STANDARD_TO_LAW;
 
 // ============================================================
 // SECTION 3: VICTIM CONTEXT DETECTION
 // ============================================================
-const VICTIM_PATTERNS = {
-    minor: [
-        'bata','batang','anak','anak ko','anak namin','anak nila','sanggol',
-        'menor','menor de edad','minor','musmos','paslit','bagets',
-        'estudyante','studyante','batang lalaki','batang babae','baby','newborn',
-        'aking anak','aming anak','kanilang anak','anak ni','anak ng',
-        'ubing','anak ku','anak mi','anak na','ubing ku','ubing mi',
-        'batang wala pang','wala pang 7','wala pang pitong',
-        'pitong taon','walong taon','siyam na taon','sampung taon'
-    ],
-    senior: [
-        'matanda','matandang','lolo','lola','lolo ko','lola ko','lolo namin','lola namin',
-        'senior','senior citizen','elderly','may edad','may edad na',
-        '80 taong gulang','70 taong gulang','60 taong gulang','65 taong gulang',
-        '80 anyos','70 anyos','60 anyos','65 anyos','75 anyos','85 anyos',
-        'gurang','gurang na','matuang','matuang tao'
-    ],
-    woman: [
-        'babae','asawa','asawa ko','asawa namin','asawa ni','maybahay','kabiyak',
-        'kasintahan','girlfriend','partner','live-in','kinakasama','kerida',
-        'nanay','ina','ina ko','ina namin','ina ni','mommy','mama','mother',
-        'ate','ate ko','ate namin','babaeng kapatid','kapatid kong babae',
-        'dalaga','dalagita','binibini','misis','ginang','ale',
-        'babae kong anak','anak kong babae','anak na babae',
-        'lola','lola ko','lola namin','lola ni',
-        'babaeng senior','senior na babae'
-    ],
-    pwd: [
-        'pwd','may kapansanan','disabled','disable',
-        'wheelchair','naka-wheelchair','nakawheelchair','naka wheelchair',
-        'bulag','bingi','pipi','pilay','putol ang paa','putol ang kamay',
-        'amputee','may sakit','may sakit sa isip','may sakit sa utak',
-        'autistic','autism','down syndrome','adhd','special child',
-        'may depekto','kapansanan','kapansanan ko','kapansanan ni'
-    ],
-    property: [
-        'lupa','lupang','bakod','bahay','sasakyan','kotse','motor','tricycle',
-        'gamit','gamit ko','gamit namin','gamit ni','ari-arian','ari-arian ko',
-        'ari-arian namin','ari-arian ni','property','kayarian','kayarian ku',
-        'kayarian mi','lote','lupain','sakahan','bukid','taniman',
-        'bakuran','pintuan','bintana','pader','bubong','kuryente',
-        'tubig','poste','kable','wiring','pipa','tubo','gripo',
-        'cellphone','laptop','computer','TV','radyo','ref',
-        'bisikleta','bike','bag','purse','wallet','pitaka','pera','alahas',
-        'relo','singsing','kwintas'
-    ],
-    public: [
-        'publiko','kapitbahay','kalye','kalsada','daan','plaza','parke',
-        'barangay','eskwelahan','simbahan','palengke','terminal',
-        'kanto','kalsadang','lansangan','lugar','pampubliko'
-    ]
-};
+const VICTIM_PATTERNS = window.VICTIM_PATTERNS;
 
 function detectVictimContext(description) {
     const ctx = { minor: 0, senior: 0, woman: 0, pwd: 0, property: 0, public: 0 };
@@ -1928,65 +420,12 @@ function detectVictimContext(description) {
 // ============================================================
 // SECTION 4: NON-JURISDICTIONAL DETECTION
 // ============================================================
-const ESCALATION_PATTERNS = {
-    rape: ['ginahasa','gahasa','rape','raped','raping','pinilit na makipagtalik','pinilit makipagtalik','sexual assault','sexual abuse','pang-aabusong sekswal','panggagahasa','manggagahasa','nirape','pinagsamantalahan','pinasok ang ari','ipinasok ang ari','hindi pumayag pero pinilit','pinilit kahit ayaw','walang consent na pakikipagtalik'],
-    vawc: ['ra 9262','vawc','violence against women','sinasaktan ako ng asawa','sinasaktan ako ng partner','binubugbog ako ng asawa','binubugbog ako ng partner','sinuntok ako ng asawa','sinuntok ako ng partner','sinakal ako ng asawa','sinakal ako ng partner','tinutukan ako ng asawa','tinutukan ako ng partner','pinagbantaan ako ng asawa','pinagbantaan ako ng partner','kinulong ako ng asawa','kinulong ako ng partner','sinisigawan ako ng asawa','sinisigawan ako ng partner','minumura ako ng asawa','minumura ako ng partner','psychological abuse','emotional abuse','economic abuse','pinagkakaitan ng pera ng asawa','pinagkakaitan ng pera ng partner'],
-    child_abuse: ['ra 7610','child abuse','pang-aabuso sa bata','pang-aabuso sa menor','pang-aabuso sa menor de edad','sinasaktan ang bata nang malubha','binubugbog ang bata nang malubha','pinapalo ang bata ng matindi','pinapalo ang menor ng matindi','sinusunog ang bata','pinapaso ang bata','pinapaso ang kamay','pinapasok ang bata sa trabaho','pinagtatrabaho ang bata','child labor','batang nagtatrabaho','batang pinagtatrabaho','pinagbebenta ang bata','ibinibenta ang bata','nagbebenta ng bata','trafficking','human trafficking','child trafficking','pinagsasamantalahan ang bata','ginagalaw ang bata'],
-    drugs: ['ra 9165','droga','drugs','shabu','marijuana','weed','nagbebenta ng droga','nagbebenta ng shabu','nagbebenta ng marijuana','nagtitinda ng droga','drug pusher','drug den','drug session','nagsa-shabu','nagdadrugs','gumagamit ng droga','adik','tulak','naglalako ng droga','may tulak sa barangay','drug laboratory'],
-    illegal_gambling: ['pd 1602','illegal gambling','jueteng','tupada','sabong','cockfighting','e-sabong','online sabong','masiao','tong-its','pustahan sa kalye','nagsusugal','gambling','casino','pusoy','poker','pustahan','nagtaya','bet'],
-    labor: ['labor dispute','labor case','dole','nlrc','hindi sumasahod','delayed sahod','mababa ang sahod','minimum wage','hindi binabayaran ang sahod','nawalan ng trabaho dahil','terminated','natanggal sa trabaho','illegal dismissal','constructive dismissal','unpaid wages','unpaid overtime','walang overtime pay','no overtime pay','walang sss','walang philhealth','walang pag-ibig','walang 13th month'],
-    government: ['gobyerno','government','barangay official','kapitan','konsehal','mayor','gobernador','pulis','pulisya','government property','ari-arian ng gobyerno','public official','public officer','sangguniang barangay','sangguniang bayan'],
-    no_private_party: ['public crime','krimen sa publiko','walang pribadong biktima','no private complainant','walang partikular na biktima'],
-    high_penalty: ['rape','murder','homicide','kidnapping','kidnap for ransom','carnapping','robbery na may pananakit','robbery with violence','serious illegal detention','highway robbery','piracy','qualified piracy','terrorism','arson','pagtataksil sa bayan','treason','rebellion','sedition','coup d\'etat']
-};
-
-const ESCALATION_LABELS = {
-    rape: 'Sexual Assault / Rape',
-    vawc: 'Violence Against Women and Children (RA 9262)',
-    child_abuse: 'Child Abuse (RA 7610)',
-    drugs: 'Illegal Drugs (RA 9165)',
-    illegal_gambling: 'Illegal Gambling (PD 1602)',
-    labor: 'Labor Dispute',
-    government: 'Case Involving Government',
-    no_private_party: 'Offense with No Private Party',
-    high_penalty: 'Offense with Penalty Exceeding 1 Year'
-};
-
-const ESCALATION_REFER_TO_SHORT = {
-    rape: 'PNP-WCPD / DSWD',
-    vawc: 'PNP Women\'s Desk / DSWD',
-    child_abuse: 'PNP-WCPD / DSWD / Bantay Bata 163',
-    drugs: 'PNP / PDEA / BADAC',
-    illegal_gambling: 'PNP',
-    labor: 'DOLE / NLRC',
-    government: 'Proper Government Agency',
-    no_private_party: 'PNP / Prosecutor\'s Office',
-    high_penalty: 'PNP / Prosecutor\'s Office'
-};
-
-const ESCALATION_SUBJECT = {
-    rape: 'Child Protection Concern',
-    vawc: 'Violence Against Women (VAWC)',
-    child_abuse: 'Child Protection Concern',
-    drugs: 'Drug Related Issue',
-    illegal_gambling: 'Illegal Gambling',
-    labor: 'Employment/Livelihood Issue',
-    government: 'Other Concern',
-    no_private_party: 'Other Concern',
-    high_penalty: 'Other Concern'
-};
-
-const ESCALATION_ACTIONS = {
-    rape: { referTo: 'PNP Women & Children Protection Desk (WCPD) — tumawag sa 911', barangayDuty: ['Itatala ang insidente sa Barangay Blotter.','Mag-iisyu ng <strong>Referral Letter</strong> para sa PNP-WCPD at Prosecutor\'s Office.','Ipapaalam sa <strong>DSWD</strong> para sa kaligtasan ng biktima.','Kung bata ang biktima, ipapaalam din sa <strong>MSWDO</strong>.','Ipapaalam sa <strong>Municipal Health Office</strong> para sa medical exam kung kailangan.','Ipapaabot sa PNP ang <strong>preserved evidence</strong>.','HINDI maaaring i-mediate. HINDI maaaring i-areglo.'] },
-    vawc: { referTo: 'PNP Women\'s Desk — tumawag sa 911', barangayDuty: ['Mag-iisyu ng <strong>Barangay Protection Order (BPO)</strong> — valid ng 15 araw, libre.','Itatala ang insidente sa Barangay Blotter.','Mag-iisyu ng <strong>Referral Letter</strong> para sa PNP-Women\'s Desk.','Ipapaalam sa <strong>DSWD / MSWDO</strong> para sa counseling at shelter.','Tutulungan ang biktima sa pag-file ng PNP report.','Kung may mga anak na kasama, ipapaalam sa <strong>Child Protection Unit</strong>.','HINDI maaaring i-mediate. HINDI maaaring i-areglo.'] },
-    child_abuse: { referTo: 'PNP-WCPD at DSWD — tumawag sa 911 at sa Bantay Bata 163', barangayDuty: ['Ilalagay ang bata sa <strong>ligtas na lugar</strong>.','Mag-iisyu ng <strong>Referral Letter</strong> para sa PNP-WCPD at MSWDO.','Ipapaalam sa <strong>DSWD</strong> at <strong>Bantay Bata 163</strong> (1-800-1-888-163).','Ipapaalam sa <strong>Municipal Health Office</strong>.','Itatala ang insidente sa Barangay Blotter.','Kung nasa panganib pa, maaaring mag-isyu ng <strong>Barangay Protection Order</strong>.','HINDI maaaring i-mediate. HINDI maaaring ibalik ang bata sa suspek.'] },
-    drugs: { referTo: 'PNP Anti-Illegal Drugs Group / PDEA — tumawag sa 911', barangayDuty: ['Ipapaalam agad sa <strong>PNP</strong> at <strong>PDEA</strong>.','Itatala ang insidente sa Barangay Blotter (walang pag-aresto).','Ipapaalam sa <strong>Barangay Anti-Drug Abuse Council (BADAC)</strong>.','HINDI maaaring i-mediate. HINDI maaaring i-areglo.','Ipapaalam sa <strong>MADAC</strong>.'] },
-    illegal_gambling: { referTo: 'PNP — tumawag sa 911', barangayDuty: ['Ipapaalam agad sa <strong>PNP</strong>.','Itatala ang insidente sa Barangay Blotter.','HINDI maaaring i-mediate. HINDI maaaring i-areglo.'] },
-    labor: { referTo: 'DOLE o NLRC', barangayDuty: ['Mag-iisyu ng <strong>Referral Letter</strong> para sa DOLE o NLRC.','Ipapaalam sa <strong>PESO</strong> kung may livelihood concern.','HINDI maaaring i-mediate. HINDI maaaring i-areglo.'] },
-    government: { referTo: 'Kaukulang ahensya ng gobyerno o korte', barangayDuty: ['Itatala ang insidente sa Barangay Blotter.','Ipapaalam sa kaukulang ahensya.','HINDI maaaring i-mediate. HINDI maaaring i-areglo.'] },
-    no_private_party: { referTo: 'PNP o Prosecutor\'s Office', barangayDuty: ['Itatala ang insidente sa Barangay Blotter.','Ipapaalam sa PNP o Prosecutor\'s Office.','HINDI maaaring i-mediate dahil walang pribadong partido.'] },
-    high_penalty: { referTo: 'PNP at Prosecutor\'s Office', barangayDuty: ['Ipapaalam agad sa <strong>PNP</strong> at <strong>Prosecutor\'s Office</strong>.','Itatala ang insidente sa Barangay Blotter.','HINDI maaaring i-mediate dahil ang parusa ay lumalampas sa 1 taon o ang multa ay higit sa P5,000.'] }
-};
+const ESCALATION_PATTERNS             = window.ESCALATION_PATTERNS;
+const ESCALATION_LABELS               = window.ESCALATION_LABELS;
+const ESCALATION_REFER_TO_SHORT       = window.ESCALATION_REFER_TO_SHORT;
+const ESCALATION_SUBJECT              = window.ESCALATION_SUBJECT;
+const ESCALATION_ACTIONS              = window.ESCALATION_ACTIONS;
+const ANONYMOUS_ELIGIBLE_ESCALATIONS  = window.ANONYMOUS_ELIGIBLE_ESCALATIONS;
 
 function detectEscalation(description) {
     if (!description) return null;
@@ -2003,10 +442,8 @@ function detectEscalation(description) {
     return null;
 }
 
-const ANONYMOUS_ELIGIBLE_ESCALATIONS = ['drugs','illegal_gambling','government','rape','vawc','child_abuse','high_penalty'];
-
 // ============================================================
-// SECTION 5: SCORING & CLASSIFICATION
+// SECTION 5: SCORING & CLASSIFICATION (POINTING SYSTEM)
 // ============================================================
 function normalizeText(text) {
     return (text || '').toLowerCase().replace(/[^\w\sáéíóúñ-]/g, ' ').replace(/\s+/g, ' ').trim();
@@ -2014,20 +451,55 @@ function normalizeText(text) {
 function escapeRegex(str) { return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 
 function countKeywordMatches(description, keywords) {
-    if (!keywords || keywords.length === 0) return { score: 0, hits: 0, phraseHits: 0 };
+    const W = window.KEYWORD_WEIGHTS || {};
+    const wSingle      = W.single         ?? 1;
+    const wPhrase2     = W.phrase2        ?? 3;
+    const wPhrase3plus = W.phrase3plus    ?? 5;
+    const maxOcc       = W.maxOccurrences ?? 3;
+
+    if (!keywords || keywords.length === 0) {
+        return { score: 0, hits: 0, phraseHits: 0, matchedKeywords: [] };
+    }
+
     let score = 0, hits = 0, phraseHits = 0;
+    const matchedKeywords = [];
+
     for (const kw of keywords) {
         const k = kw.toLowerCase();
-        let matched = false;
+
+        let count = 0;
+
         if (k.includes(' ')) {
-            if (description.includes(k)) { matched = true; score += 3; phraseHits++; }
+            let idx = 0;
+            while (count < maxOcc) {
+                const pos = description.indexOf(k, idx);
+                if (pos === -1) break;
+                count++;
+                idx = pos + k.length;
+            }
         } else {
-            const re = new RegExp(`\\b${escapeRegex(k)}\\b`, 'i');
-            if (re.test(description)) { matched = true; score += 1; }
+            const re = new RegExp(`\\b${escapeRegex(k)}\\b`, 'gi');
+            const m = description.match(re);
+            if (m) count = Math.min(m.length, maxOcc);
         }
-        if (matched) hits++;
+
+        if (count === 0) continue;
+
+        const wordCount = k.trim().split(/\s+/).length;
+        const weight = wordCount >= 3 ? wPhrase3plus
+                     : wordCount === 2 ? wPhrase2
+                     : wSingle;
+
+        const points = weight * count;
+
+        score += points;
+        hits++;
+        if (wordCount >= 2) phraseHits++;
+
+        matchedKeywords.push({ kw: kw, weight, count, points });
     }
-    return { score, hits, phraseHits };
+
+    return { score, hits, phraseHits, matchedKeywords };
 }
 
 function lawVictimBonus(law, victimCtx) {
@@ -2040,22 +512,55 @@ function lawVictimBonus(law, victimCtx) {
     return bonus;
 }
 
-function classifyDescription(description) {
-    if (!description || description.trim().length < 5) return null;
-    const normalized = normalizeText(description);
-    const victimCtx = detectVictimContext(normalized);
+function classifyDescriptionMulti(description) {
+    if (!description || description.trim().length < 3) return [];
 
-    const lawScores = barangayLaws.map(law => {
+    const W = window.KEYWORD_WEIGHTS || {};
+    const minScore = W.minScoreToShow ?? 1;
+    const maxCand  = W.maxCandidates  ?? 15;
+
+    const normalized = normalizeText(description);
+    const victimCtx  = detectVictimContext(normalized);
+
+    const allScored = barangayLaws.map(law => {
         const m = countKeywordMatches(normalized, law.keywords);
         const bonus = lawVictimBonus(law, victimCtx);
-        return { law, base: m.score, score: m.score + bonus, hits: m.hits, phraseHits: m.phraseHits };
-    }).sort((a, b) => b.score - a.score);
+        return {
+            law,
+            score:      m.score + bonus,
+            baseScore:  m.score,
+            bonus,
+            hits:       m.hits,
+            phraseHits: m.phraseHits,
+            matched:    m.matchedKeywords,
+        };
+    });
 
-    const topLaw = lawScores[0];
-    if (topLaw && topLaw.phraseHits >= 1) return { type: 'law', article: topLaw.law.article, law_title: topLaw.law.title, description: topLaw.law.description || `Pumapatungkol sa ${topLaw.law.title}`, hits: topLaw.hits, confidence: Math.min(98, 78 + topLaw.phraseHits * 6 + topLaw.hits * 2) };
-    if (topLaw && topLaw.hits >= 2) return { type: 'law', article: topLaw.law.article, law_title: topLaw.law.title, description: topLaw.law.description || `Pumapatungkol sa ${topLaw.law.title}`, hits: topLaw.hits, confidence: Math.min(92, 62 + topLaw.hits * 8) };
-    if (topLaw && topLaw.hits >= 1) return { type: 'law', article: topLaw.law.article, law_title: topLaw.law.title, description: topLaw.law.description || `Pumapatungkol sa ${topLaw.law.title}`, hits: topLaw.hits, confidence: Math.min(85, 55 + topLaw.hits * 8) };
-    return null;
+    const withHits = allScored.filter(x => x.hits > 0 && x.score >= minScore);
+    if (withHits.length === 0) return [];
+
+    withHits.sort((a, b) => {
+        if (b.score      !== a.score)      return b.score      - a.score;
+        if (b.hits       !== a.hits)       return b.hits       - a.hits;
+        return b.phraseHits - a.phraseHits;
+    });
+
+    const top = withHits.slice(0, maxCand);
+    const topScore = top[0].score;
+
+    return top.map((x, idx) => ({
+        article:         x.law.article,
+        law_title:       x.law.title,
+        description:     x.law.description || `Pumapatungkol sa ${x.law.title}`,
+        score:           x.score,
+        baseScore:       x.baseScore,
+        bonus:           x.bonus,
+        hits:            x.hits,
+        phraseHits:      x.phraseHits,
+        matchedKeywords: x.matched,
+        confidence:      Math.min(99, Math.round((x.score / Math.max(topScore, 1)) * 88 + 10)),
+        isBest:          idx === 0,
+    }));
 }
 
 // ============================================================
@@ -2111,22 +616,154 @@ function updateAnonymityVisibility(escalationType) {
 }
 
 // ============================================================
-// SECTION 6: LAW INFO PANEL
+// SECTION 6: LAW INFO PANEL (Custom Buttons + Tooltips)
 // ============================================================
-function showLawInfoPanel(article, title, reason, confidence, extraInfo, exempted, exemptionReason) {
+let selectedLaws = []; // Array of selected articles
+
+function updateSelectedLaws() {
+    const titleInput = document.getElementById('complaintTitle');
+    const subjectInput = document.getElementById('complaintSubject');
+    if (!titleInput || !subjectInput) return;
+
+    if (selectedLaws.length === 0) {
+        titleInput.value = '';
+        subjectInput.value = '';
+        subjectInput.dataset.rawValue = '';
+        return;
+    }
+
+    // 1. Build the Summary for Title & Subject
+    const articles = selectedLaws.map(c => c.article).join(' / ');
+    
+    const shortTitles = selectedLaws.map(c => {
+        let cleanTitle = c.law_title.replace(/\s*\(.*?\)\s*/g, ''); // Remove (Value ≤ P50)
+        let words = cleanTitle.split(' ');
+        return words.slice(0, 3).join(' '); // Take first 3 words
+    });
+    const uniqueSummaries = [...new Set(shortTitles)];
+    const combinedTitle = `${articles} — ${uniqueSummaries.join(' & ')}`;
+
+    // 2. Set the Read-Only Title
+    titleInput.value = combinedTitle;
+
+    // 3. Set the Read-Only Subject
+    subjectInput.value = combinedTitle;
+    
+    // 4. Set the raw string value for the server
+    const rawArticles = selectedLaws.map(c => `${c.article} - ${c.law_title}`).join(' | ');
+    subjectInput.dataset.rawValue = rawArticles;
+}
+
+function showLawInfoPanel(article, title, reason, confidence, extraInfo, exempted, exemptionReason, allCandidates) {
     let panel = document.getElementById('lawInfoPanel');
     const subjectGroup = document.getElementById('complaintSubject')?.closest('.form-group');
     if (!subjectGroup) return;
     if (!panel) { panel = document.createElement('div'); panel.id = 'lawInfoPanel'; subjectGroup.appendChild(panel); }
 
-    if (!article) {
+    if (!article && (!allCandidates || allCandidates.length === 0)) {
         panel.style.cssText = `margin-top:12px;padding:14px 16px;background:linear-gradient(135deg,#fff8e1 0%,#ffecb3 100%);border-left:4px solid #ef6c00;border-radius:10px;`;
-        panel.innerHTML = `<div style="display:flex;gap:10px;"><div style="font-size:24px;">🔍</div><div style="flex:1;"><div style="font-size:11px;color:#ef6c00;font-weight:700;text-transform:uppercase;">Walang Tugmang Batas</div><div style="font-size:14px;color:#333;margin:4px 0;">${escapeHtml(reason || 'Hindi matukoy ang batas. Dagdagan ang detalye.')}</div><div style="font-size:11px;color:#666;"><i class="fas fa-info-circle"></i> Subukang isama: (1) ano ang ginawa, (2) sino ang gumawa, (3) kanino nangyari, (4) kailan at saan.</div></div></div>`;
+        panel.innerHTML = `<div style="display:flex;gap:10px;"><div style="font-size:24px;">🔍</div><div style="flex:1;"><div style="font-size:11px;color:#ef6c00;font-weight:700;text-transform:uppercase;">No Matching Law Found</div><div style="font-size:14px;color:#333;margin:4px 0;">${escapeHtml(reason || 'Could not identify the law from your description. Please add more detail.')}</div><div style="font-size:11px;color:#666;"><i class="fas fa-info-circle"></i> Try to include: (1) what happened, (2) who did it, (3) who it happened to, (4) when and where.</div></div></div>`;
         return;
     }
 
-    panel.style.cssText = `margin-top:12px;padding:14px 16px;background:linear-gradient(135deg,#e8f5e9 0%,#f1f8e9 100%);border-left:4px solid #2E7D32;border-radius:10px;`;
-    panel.innerHTML = `<div style="display:flex;gap:10px;"><div style="font-size:24px;">⚖️</div><div style="flex:1;"><div style="font-size:11px;color:#2E7D32;font-weight:700;text-transform:uppercase;">Katarungang Pambarangay Law</div><div style="font-size:16px;font-weight:700;color:#1B5E20;margin:2px 0;">${escapeHtml(article)}</div><div style="font-size:14px;color:#333;margin-bottom:8px;">${escapeHtml(title)}</div>${reason ? `<div style="font-size:12px;color:#555;background:rgba(255,255,255,0.6);padding:8px;border-radius:6px;margin-bottom:6px;"><strong>Paliwanag:</strong> ${escapeHtml(reason)}</div>` : ''}${extraInfo ? `<div style="font-size:12px;color:#555;background:rgba(255,255,255,0.6);padding:8px;border-radius:6px;margin-bottom:6px;"><strong>Detalye:</strong> ${escapeHtml(extraInfo)}</div>` : ''}<div style="font-size:11px;color:#666;"><span style="background:#2E7D32;color:white;padding:2px 8px;border-radius:10px;font-weight:600;">${confidence}% tugma</span><span style="margin-left:6px;"><i class="fas fa-info-circle"></i> Natukoy mula sa iyong paglalarawan.</span></div></div></div>`;
+    if (!allCandidates || allCandidates.length === 0) {
+        panel.innerHTML = '';
+        return;
+    }
+
+    // ── Build the custom Button Rows for all matched laws ──
+    const rows = allCandidates.map((c, i) => {
+        const isChecked = selectedLaws.some(s => s.article === c.article);
+        const bgColor = isChecked ? '#e8f5e9' : '#fff';
+        const borderColor = isChecked ? '#2E7D32' : '#e2efe8';
+        const textColor = isChecked ? '#1b5e20' : '#333';
+
+        // Build the tooltip text
+        const tooltipText = `Article: ${c.article}\nTitle: ${c.law_title}\nScore: ${c.score} pts\nConfidence: ${c.confidence}%\n\nDescription:\n${c.description}`;
+
+        return `
+            <div onclick="toggleLawSelection('${escapeHtml(c.article)}', event)" 
+                 title="${escapeHtml(tooltipText)}"
+                 style="display:flex;align-items:center;gap:12px;padding:12px 14px;margin-bottom:8px;
+                        background:${bgColor}; border:2px solid ${borderColor}; border-radius:10px; 
+                        cursor:pointer; transition:all 0.2s ease;"
+                 onmouseover="this.style.transform='translateY(-1px)'; this.style.boxShadow='0 4px 12px rgba(0,0,0,0.05)';"
+                 onmouseout="this.style.transform='translateY(0)'; this.style.boxShadow='none';">
+                
+                <!-- Custom Checkbox Button -->
+                <div style="flex-shrink:0; width:22px; height:22px; border-radius:6px; 
+                            border:2px solid ${isChecked ? '#2E7D32' : '#bdbdbd'}; 
+                            background:${isChecked ? '#2E7D32' : '#fff'}; 
+                            display:flex; align-items:center; justify-content:center; transition:all 0.2s;">
+                    <i class="fas fa-check" style="color:#fff; font-size:12px; opacity:${isChecked ? '1' : '0'}; transform:scale(${isChecked ? '1' : '0.5'}); transition:all 0.2s;"></i>
+                </div>
+
+                <!-- Law Info -->
+                <div style="flex:1; min-width:0;">
+                    <div style="font-weight:700; font-size:0.88rem; color:${textColor}; display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                        ${escapeHtml(c.article)} — ${escapeHtml(c.law_title)}
+                        ${i === 0 ? `<span style="background:#2E7D32;color:#fff;font-size:9px;padding:1px 6px;border-radius:8px;">Best Match</span>` : ''}
+                    </div>
+                    <div style="font-size:0.75rem; color:#666; margin-top:3px;">
+                        Score: ${c.score} pts | Confidence: ${c.confidence}%
+                    </div>
+                </div>
+            </div>
+        `;
+    }).join('');
+
+    panel.style.cssText = `margin-top:12px;padding:16px;background:#f8faf8;border:1px solid #e2efe8;border-radius:10px;`;
+    panel.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+            <div style="font-size:12px;color:#2E7D32;font-weight:800;text-transform:uppercase;letter-spacing:0.4px;">
+                <i class="fas fa-list-check"></i> Matched Laws (Select applicable)
+            </div>
+            <div style="font-size:11px;color:#666;">Total: ${allCandidates.length}</div>
+        </div>
+        <div style="max-height:250px;overflow-y:auto;padding-right:4px;">
+            ${rows}
+        </div>
+    `;
+
+    // Auto-select the top candidate if none are selected yet
+    if (selectedLaws.length === 0 && allCandidates.length > 0) {
+        toggleLawSelection(allCandidates[0].article, { target: {} }, allCandidates);
+    }
+}
+
+function toggleLawSelection(article, event, candidatesList = null) {
+    // Prevent the click event from double-firing if the user clicked exactly on the custom checkbox div
+    if (event.target.tagName === 'I') {
+        event.stopPropagation();
+    }
+
+    let list = candidatesList;
+
+    if (!list) {
+        const descInput = document.getElementById('complaintDescription');
+        if (descInput) {
+            list = classifyDescriptionMulti(descInput.value.trim());
+        }
+    }
+
+    if (!list) return;
+
+    const law = list.find(c => c.article === article);
+    if (!law) return;
+
+    // Toggle logic
+    const isAlreadySelected = selectedLaws.some(s => s.article === article);
+    if (isAlreadySelected) {
+        selectedLaws = selectedLaws.filter(s => s.article !== article);
+    } else {
+        selectedLaws.push(law);
+    }
+
+    // Re-render checkboxes to update highlighting
+    showLawInfoPanel(law.article, law.law_title, '', law.confidence, '', false, '', list);
+
+    // Update the read-only fields
+    updateSelectedLaws();
 }
 
 function hideLawInfoPanel() { const panel = document.getElementById('lawInfoPanel'); if (panel) panel.remove(); }
@@ -2143,98 +780,104 @@ function showEscalationPanel(type) {
     if (!panel) { panel = document.createElement('div'); panel.id = 'lawInfoPanel'; subjectGroup.appendChild(panel); }
 
     panel.style.cssText = `margin-top:12px;padding:16px;background:linear-gradient(135deg,#ffebee 0%,#ffcdd2 100%);border-left:4px solid #c62828;border-radius:10px;`;
-    panel.innerHTML = `<div style="display:flex;gap:12px;"><div style="font-size:32px;line-height:1;">🚨</div><div style="flex:1;"><div style="font-size:11px;color:#c62828;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">HINDI Sakop ng Katarungang Pambarangay</div><div style="font-size:15px;font-weight:700;margin-bottom:6px;color:#b71c1c;">${escapeHtml(label)}</div><div style="font-size:13px;color:#333;margin-bottom:10px;line-height:1.5;">Ang kasong ito ay <strong>hindi maaaring i-mediate</strong> ng Lupong Tagapamayapa. Ito ay kabilang sa mga kasong hindi sakop ng Barangay Justice System (RA 7160, §408-422).</div><div style="font-size:12px;color:#333;background:rgba(255,255,255,0.75);padding:10px 12px;border-radius:8px;margin-bottom:8px;"><strong style="color:#c62828;">I-refer sa:</strong> ${escapeHtml(info.referTo)}</div><div style="font-size:12px;color:#333;background:rgba(255,255,255,0.75);padding:10px 12px;border-radius:8px;line-height:1.6;"><strong style="color:#1B5E20;display:block;margin-bottom:6px;">Ano ang gagawin ng Barangay:</strong><ol style="margin:0;padding-left:20px;">${info.barangayDuty.map(a => `<li>${a}</li>`).join('')}</ol></div><div style="font-size:11px;color:#666;margin-top:8px;"><i class="fas fa-info-circle"></i> Ang Barangay ay <strong>magtatala, magre-refer, at magpoprotekta</strong> — ngunit <strong>hindi magme-mediate</strong>.</div></div></div>`;
+    panel.innerHTML = `<div style="display:flex;gap:12px;"><div style="font-size:32px;line-height:1;">🚨</div><div style="flex:1;"><div style="font-size:11px;color:#c62828;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">HINDI Sakop ng Katarungang Pambarangay</div><div style="font-size:15px;font-weight:700;margin-bottom:6px;color:#b71c1c;">${escapeHtml(label)}</div><div style="font-size:13px;color:#333;margin-bottom:10px;line-height:1.5;">Ang kasong ito ay <strong>hindi maaaring i-mediate</strong> ng Lupong Tagapamayapa. Ito ay kabilang sa mga kasong hindi sakop ng Barangay Justice System (RA 7160, §408-422).</div><div style="font-size:12px;color:#333;background:rgba(255,255,255,0.75);padding:10px 12px;border-radius:8px;margin-bottom:8px;"><strong style="color:#c62828;">I-refer sa:</strong> ${escapeHtml(info.referTo)}</div><div style="font-size:12px;color:#333;background:rgba(255,255,255,0.75);padding:10px 12px;border-radius:8px;line-height:1.6;"><strong style="color:#1B5E20;display:block;margin-bottom:6px;">Ano ang gagawin ng Barangay:</strong><ol style="margin:0;padding-left:20px;">${info.barangayDuty.map(a => `<li>${a}</li>`).join('')}</ol></div><div style="font-size:11px;color:#666;margin-top:8px;"><i class="fas fa-info-circle"></i> Ang Barangay ay <strong>magtatala, mag-re-refer, at magpoprotekta</strong> — ngunit <strong>hindi magme-mediate</strong>.</div></div></div>`;
 }
 
 // ============================================================
-// SECTION 8: MANUAL DROPDOWN
+// SECTION 8: MANUAL DROPDOWN (Disabled)
 // ============================================================
-document.addEventListener('change', function(e) {
-    if (!e.target || e.target.id !== 'complaintSubject') return;
-    if (suppressSubjectChangeEvent) { suppressSubjectChangeEvent = false; return; }
-    if (!userInteractedWithSubject) return;
-    userInteractedWithSubject = false;
-    const selected = e.target.options[e.target.selectedIndex];
-    if (!selected) return;
-    const article = selected.dataset.article;
-    const lawTitle = selected.dataset.lawTitle;
-    const subjectValue = e.target.value;
-    if (article && lawTitle) showLawInfoPanel(article, lawTitle, 'Manu-manong pinili ang batas.', 100, '', false, '');
-    else if (standardToLaw[subjectValue] && standardToLaw[subjectValue].article) showLawInfoPanel(standardToLaw[subjectValue].article, standardToLaw[subjectValue].title, 'Karaniwang uri ng reklamo na may katumbas na batas.', 100, '', false, '');
-    else hideLawInfoPanel();
-});
+// The subject is now a read-only input, so this event listener is no longer needed for the dropdown.
 
 // ============================================================
 // SECTION 9: MAIN DESCRIPTION HANDLER
 // ============================================================
 let analysisTimeout = null;
+
 function onDescriptionChange() {
     const descInput = document.getElementById('complaintDescription');
     if (!descInput) return;
     const description = descInput.value.trim();
-    const subjectSelect = document.getElementById('complaintSubject');
-    if (!subjectSelect) return;
+    const subjectInput = document.getElementById('complaintSubject');
+    const titleInput    = document.getElementById('complaintTitle');
+    if (!subjectInput) return;
+
+    // ── Reset selections on new input ──
+    selectedLaws = [];
 
     if (description.length < 5) {
-        subjectSelect.innerHTML = '<option value="" disabled selected>┅ I-type ang paglalarawan para makita ang mungkahi ┅</option>';
+        subjectInput.value = '';
+        subjectInput.dataset.rawValue = '';
+        if (titleInput) titleInput.value = '';
         hideLawInfoPanel();
         clearTitleSuggestion();
         updateAnonymityVisibility(null);
         return;
     }
+
     if (analysisTimeout) clearTimeout(analysisTimeout);
-    analysisTimeout = setTimeout(() => { applyClassification(description); }, 400);
+    analysisTimeout = setTimeout(() => { applyClassification(description); }, 350);
 }
 
 function applyClassification(description) {
-    const subjectSelect = document.getElementById('complaintSubject');
-    if (!subjectSelect) return;
+    const subjectInput = document.getElementById('complaintSubject');
+    const titleInput    = document.getElementById('complaintTitle');
+    if (!subjectInput) return;
+
+    // ── 1. Escalation check (non-jurisdictional) ──
     const escalation = detectEscalation(description);
     if (escalation) {
-        const subject = ESCALATION_SUBJECT[escalation] || 'Other Concern';
+        const subject      = ESCALATION_SUBJECT[escalation] || 'Other Concern';
         const referToShort = ESCALATION_REFER_TO_SHORT[escalation] || 'Proper Government Agency';
-        const label = ESCALATION_LABELS[escalation] || 'Non-Jurisdictional Case';
-        subjectSelect.innerHTML = '';
-        const opt = document.createElement('option');
-        opt.value = subject;
-        opt.textContent = `🚨 ${subject} — ESCALATED (${label})`;
-        opt.dataset.escalated = escalation;
-        opt.dataset.referTo = referToShort;
-        subjectSelect.appendChild(opt);
-        standardSubjects.forEach(s => { if (s === subject) return; const alt = document.createElement('option'); alt.value = s; alt.textContent = s; subjectSelect.appendChild(alt); });
-        suppressSubjectChangeEvent = true;
-        subjectSelect.value = subject;
+        const label        = ESCALATION_LABELS[escalation] || 'Non-Jurisdictional Case';
+
+        subjectInput.value = `🚨 ${subject} — ESCALATED (${label})`;
+        subjectInput.dataset.rawValue = subject;
+        subjectInput.dataset.escalated = escalation;
+
+        if (titleInput) {
+            titleInput.value = `ESCALATED: ${label} (Refer to ${referToShort})`;
+            titleInput.dataset.escalated = escalation;
+        }
+
         showEscalationPanel(escalation);
-        const titleInput = document.getElementById('complaintTitle');
-        if (titleInput) { titleInput.value = `ESCALATED: ${label} (Refer to ${referToShort})`; titleInput.dataset.escalated = escalation; }
         updateAnonymityVisibility(escalation);
         if (document.getElementById('isAnonymous')) toggleAnonymityWarning();
         return;
     }
-    const titleInput0 = document.getElementById('complaintTitle');
-    if (titleInput0) delete titleInput0.dataset.escalated;
-    updateAnonymityVisibility(null);
 
-    const result = classifyDescription(description);
-    if (!result) {
-        subjectSelect.innerHTML = '<option value="" disabled selected>┅ Walang tugmang batas — dagdagan ang detalye ┅</option>';
-        showLawInfoPanel(null, null, 'Hindi matukoy ang batas mula sa iyong paglalarawan. Subukang magdagdag ng detalye.', 0, '', false, '');
+    // ── 2. Pointing-system multi-classify ──
+    const candidates = classifyDescriptionMulti(description);
+
+    if (!candidates || candidates.length === 0) {
+        subjectInput.value = '';
+        subjectInput.dataset.rawValue = '';
+        if (titleInput) titleInput.value = '';
+        showLawInfoPanel(null, null,
+            'Could not identify the law from your description. Try adding more detail.',
+            0, '', false, '');
+        updateAnonymityVisibility(null);
         return;
     }
-    if (result.type === 'law') {
-        subjectSelect.innerHTML = '';
-        const lawOpt = document.createElement('option');
-        lawOpt.value = `${result.article} - ${result.law_title}`;
-        lawOpt.textContent = `⚖️ ${result.article} - ${result.law_title}`;
-        lawOpt.dataset.article = result.article;
-        lawOpt.dataset.lawTitle = result.law_title;
-        subjectSelect.appendChild(lawOpt);
-        suppressSubjectChangeEvent = true;
-        subjectSelect.value = lawOpt.value;
-        showLawInfoPanel(result.article, result.law_title, result.description, result.confidence, '', false, '');
-        const titleInput = document.getElementById('complaintTitle');
-        if (titleInput) titleInput.value = `${result.article}: ${result.law_title}`;
-    }
+
+    // ── 3. Auto-select the Top Candidate ──
+    selectedLaws = [candidates[0]];
+    updateSelectedLaws();
+
+    // ── 4. Show the info panel with Checkboxes ──
+    showLawInfoPanel(
+        candidates[0].article,
+        candidates[0].law_title,
+        '',
+        candidates[0].confidence,
+        candidates.length > 1
+            ? `${candidates.length} possible laws matched. Check the ones that apply.`
+            : '',
+        false,
+        '',
+        candidates  
+    );
+
+    updateAnonymityVisibility(null);
 }
 
 // ============================================================
@@ -2248,7 +891,7 @@ function showTitleSuggestion(suggestedTitle) {
     const div = document.createElement('div');
     div.id = 'titleSuggestion';
     div.style.cssText = 'margin-top:8px;padding:8px 12px;background:#e3f2fd;border-radius:8px;border-left:3px solid #2196f3;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;';
-    div.innerHTML = `<div><i class="fas fa-magic" style="color:#2196f3;"></i> <span style="font-size:13px;">Mungkahi: <strong>${escapeHtml(suggestedTitle)}</strong></span></div><button type="button" onclick="applyTitleSuggestion('${escapeHtml(suggestedTitle).replace(/'/g, "\\'")}')" style="background:#2196f3;color:white;border:none;padding:4px 12px;border-radius:20px;cursor:pointer;font-size:11px;"><i class="fas fa-check"></i> Gamitin</button>`;
+    div.innerHTML = `<div><i class="fas fa-magic" style="color:#2196f3;"></i> <span style="font-size:13px;">Suggestion: <strong>${escapeHtml(suggestedTitle)}</strong></span></div><button type="button" onclick="applyTitleSuggestion('${escapeHtml(suggestedTitle).replace(/'/g, "\\'")}')" style="background:#2196f3;color:white;border:none;padding:4px 12px;border-radius:20px;cursor:pointer;font-size:11px;"><i class="fas fa-check"></i> Use</button>`;
     titleGroup.appendChild(div);
 }
 function applyTitleSuggestion(title) {
@@ -2260,16 +903,31 @@ function clearTitleSuggestion() { const s = document.getElementById('titleSugges
 // ============================================================
 // SECTION 11: INCIDENTS
 // ============================================================
+function _nowDateStr() {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+function _nowTimeStr() {
+    const d = new Date();
+    return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+}
+function _newIncident() {
+    return {
+        incident_date: _nowDateStr(),
+        incident_time: _nowTimeStr(),
+        location: '',
+        description: '',
+        evidence_files: []
+    };
+}
+
 function renderIncidentsList() {
-    if (incidentsList.length === 0) incidentsList = [{ incident_date: '', incident_time: '', location: '', description: '', evidence_files: [] }];
+    if (incidentsList.length === 0) incidentsList = [_newIncident()];
     return incidentsList.map((incident, index) => `
         <div class="incident-card" data-incident-index="${index}">
             <div class="incident-header">
                 <strong><i class="fas fa-calendar-alt"></i> Incident ${index + 1}</strong>
                 <div>
-                    <button type="button" class="add-evidence-btn" onclick="addIncidentEvidence(${index})">
-                        <i class="fas fa-paperclip"></i> Add Evidence
-                    </button>
                     ${incidentsList.length > 1 ? `<button type="button" class="remove-incident-btn" onclick="removeIncident(${index})"><i class="fas fa-trash"></i> Remove</button>` : ''}
                 </div>
             </div>
@@ -2279,12 +937,12 @@ function renderIncidentsList() {
                         <label>Date of Incident <span style="color:red;">*</span></label>
                         <input type="date" class="incident-date" data-incident-index="${index}"
                                data-role="incident_date_${index}"
-                               value="${incident.incident_date || ''}" required>
+                               value="${incident.incident_date || _nowDateStr()}" required>
                     </div>
                     <div class="form-group">
                         <label>Time of Incident</label>
                         <input type="time" class="incident-time" data-incident-index="${index}"
-                               value="${incident.incident_time || ''}">
+                               value="${incident.incident_time || _nowTimeStr()}">
                     </div>
                 </div>
                 <div class="form-group">
@@ -2300,7 +958,12 @@ function renderIncidentsList() {
                               rows="3" placeholder="Describe what happened..." required>${escapeHtml(incident.description || '')}</textarea>
                 </div>
                 <div class="evidence-section" data-role="incidents_evidence_${index}">
-                    <label><i class="fas fa-paperclip"></i> Evidence <span style="color:red;">*</span> <small style="color:#666;font-weight:400;">(at least 1 required)</small></label>
+                    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:6px;">
+                        <label style="margin:0;"><i class="fas fa-paperclip"></i> Evidence <span style="color:red;">*</span> <small style="color:#666;font-weight:400;">(at least 1 required)</small></label>
+                        <button type="button" class="add-evidence-btn" onclick="addIncidentEvidence(${index})">
+                            <i class="fas fa-plus"></i> Add Evidence
+                        </button>
+                    </div>
                     <div class="evidence-files-container" id="evidence-files-${index}">${renderEvidenceFiles(incident.evidence_files, index)}</div>
                     <input type="file" class="evidence-file-input" data-incident-index="${index}" multiple accept=".jpg,.jpeg,.png,.pdf,.mp4" style="display:none;">
                 </div>
@@ -2313,7 +976,7 @@ function renderEvidenceFiles(files, incidentIndex) {
     return files.map((file, i) => `<div class="evidence-file-item"><i class="fas ${file.type?.startsWith('image/') ? 'fa-image' : file.type?.includes('pdf') ? 'fa-file-pdf' : 'fa-file'}"></i><span class="file-name">${escapeHtml(file.name)}</span><button type="button" class="remove-evidence-btn" onclick="removeIncidentEvidence(${incidentIndex}, ${i})"><i class="fas fa-times"></i></button></div>`).join('');
 }
 
-function addIncident() { incidentsList.push({ incident_date: '', incident_time: '', location: '', description: '', evidence_files: [] }); document.getElementById('incidentsContainer').innerHTML = renderIncidentsList(); attachIncidentEventListeners(); attachFieldAutoClear(); }
+function addIncident() { incidentsList.push(_newIncident()); document.getElementById('incidentsContainer').innerHTML = renderIncidentsList(); attachIncidentEventListeners(); attachFieldAutoClear(); }
 function removeIncident(i) { incidentsList.splice(i, 1); document.getElementById('incidentsContainer').innerHTML = renderIncidentsList(); attachIncidentEventListeners(); attachFieldAutoClear(); }
 function addIncidentEvidence(i) { document.querySelector(`.evidence-file-input[data-incident-index="${i}"]`).click(); }
 function removeIncidentEvidence(i, fi) { incidentsList[i].evidence_files.splice(fi, 1); document.getElementById(`evidence-files-${i}`).innerHTML = renderEvidenceFiles(incidentsList[i].evidence_files, i); }
@@ -2495,35 +1158,26 @@ async function submitComplaint(event) {
     const subjectEl = document.getElementById('complaintSubject');
     const title     = titleEl.value.trim();
     const desc      = descEl.value.trim();
-    const subject   = subjectEl.value;
+    const subject   = subjectEl.dataset.rawValue || subjectEl.value;
     const escalation = detectEscalation(desc);
     const isEscalated = !!escalation;
     const referToShort = isEscalated ? (ESCALATION_REFER_TO_SHORT[escalation] || 'Proper Government Agency') : '';
 
-    if (isEscalated && (!subject || subjectEl.selectedOptions[0]?.dataset?.escalated)) {
-        const mappedSubject = ESCALATION_SUBJECT[escalation] || 'Other Concern';
-        subjectEl.value = mappedSubject;
-    }
-
     let firstError = null;
 
-    // Subject
     if (!subject) {
-        markFieldError(subjectEl, 'Please select a complaint subject.');
+        markFieldError(subjectEl, 'Please select at least one law.');
         firstError = firstError || subjectEl;
     }
-    // Title
     {
         const r = validateWordingJS(title, 5, 'Title');
         if (!r.ok) { markFieldError(titleEl, r.msg); firstError = firstError || titleEl; }
     }
-    // Description
     {
         const r = validateWordingJS(desc, 15, 'Description');
         if (!r.ok) { markFieldError(descEl, r.msg); firstError = firstError || descEl; }
     }
 
-    // Complainants
     if (complainantsList.length === 0) {
         const card = document.querySelector('#complainantsContainer .party-card');
         if (card) { markGroupError(card, 'At least one complainant is required.'); firstError = firstError || card; }
@@ -2553,7 +1207,6 @@ async function submitComplaint(event) {
         }
     });
 
-    // Respondents — only name is required; contact must follow rule if present
     respondentsList.forEach((p, i) => {
         const card = document.querySelector(`#respondentsContainer .party-card[data-index="${i}"]`);
         if (!card) return;
@@ -2568,7 +1221,6 @@ async function submitComplaint(event) {
         }
     });
 
-    // Incidents
     let hasValidIncident = false;
     incidentsList.forEach((inc, idx) => {
         const card = document.querySelector(`.incident-card[data-incident-index="${idx}"]`);
@@ -2584,7 +1236,6 @@ async function submitComplaint(event) {
             const r = validateWordingJS(inc.description, 10, `Incident ${idx+1} description`);
             if (!r.ok) { markFieldError(descInput, r.msg); ok = false; firstError = firstError || descInput; }
         }
-        // Evidence per incident
         if (!(inc.evidence_files && inc.evidence_files.length)) {
             const section = card.querySelector('.evidence-section');
             if (section) {
@@ -2614,7 +1265,6 @@ async function submitComplaint(event) {
         return;
     }
 
-    // ---------- SEND TO SERVER ----------
     const submitBtn = document.querySelector('#complaintForm button[type="submit"]');
     if (submitBtn) { submitBtn.disabled = true; submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Submitting...'; }
 
@@ -2659,7 +1309,6 @@ async function submitComplaint(event) {
         }
     }
 
-       // Single submission attempt — _doSubmitComplaint handles everything
     await _doSubmitComplaint(formData, { isEscalated, anonVisible, anonCheckbox, submitBtn, escalation });
 }
 
@@ -2688,7 +1337,7 @@ function getSubmitComplaintForm() {
     const rEmail = resident.email || '';
     const rAddr = resident.address || '';
     if (complainantsList.length === 0) complainantsList = [{ full_name: rName, address: rAddr, contact_number: rPhone, email: rEmail }];
-    if (incidentsList.length === 0) incidentsList = [{ incident_date: '', incident_time: '', location: '', description: '', evidence_files: [] }];
+    if (incidentsList.length === 0) incidentsList = [_newIncident()];
 
     return `
         <form id="complaintForm" onsubmit="submitComplaint(event)" novalidate>
@@ -2697,20 +1346,21 @@ function getSubmitComplaintForm() {
                 <div class="form-row">
                     <div class="form-group">
                         <label><i class="fas fa-tag"></i> Complaint Subject <span style="color:red;">*</span></label>
-                        <select id="complaintSubject" class="form-control" required>
-                            <option value="" disabled selected>┅ I-type ang paglalarawan para makita ang mungkahi ┅</option>
-                        </select>
-                        <small style="color:#2eaa5e;"><i class="fas fa-list"></i> Base sa 45 batas ng Katarungang Pambarangay</small>
+                        <!-- Read-Only Subject Input -->
+                        <input type="text" id="complaintSubject" class="form-control" readonly style="background-color: #f8f9fa; cursor: not-allowed;" required placeholder="Auto-filled from selected laws">
+                        <small style="color:#2eaa5e;"><i class="fas fa-lock"></i> Auto-generated from selected laws. Cannot be edited.</small>
                     </div>
                     <div class="form-group">
                         <label><i class="fas fa-exclamation-triangle"></i> Complaint Title <span style="color:red;">*</span></label>
-                        <input type="text" id="complaintTitle" class="form-control" required placeholder="Auto-filled from description">
+                        <!-- Read-Only Title -->
+                        <input type="text" id="complaintTitle" class="form-control" readonly style="background-color: #f8f9fa; cursor: not-allowed;" required placeholder="Auto-filled from selected laws">
+                        <small style="color:#2eaa5e;"><i class="fas fa-lock"></i> Auto-generated summary.</small>
                     </div>
                 </div>
                 <div class="form-group">
                     <label><i class="fas fa-align-left"></i> Overall Description <span style="color:red;">*</span></label>
-                    <textarea id="complaintDescription" class="form-control" rows="4" required placeholder="Ilarawan nang detalyado ang reklamo. Isama: ano ang ginawa, sino ang gumawa, kanino nangyari, kailan at saan."></textarea>
-                    <small style="color:#2eaa5e;"><i class="fas fa-magic"></i> Ang sistema ay tumutukoy ng batas base sa buong paglalarawan.</small>
+                    <textarea id="complaintDescription" class="form-control" rows="4" required placeholder="Describe the complaint in detail. Include: what happened, who did it, who it happened to, when and where."></textarea>
+                    <small style="color:#2eaa5e;"><i class="fas fa-magic"></i> The system identifies the applicable law from the full description.</small>
                 </div>
                 <div class="form-group" id="anonymityGroup" style="display: none; margin-top: 18px;">
                     <div id="anonymityCard" style="position: relative; border: 2px solid #e0e0e0; border-radius: 14px; padding: 18px 20px; background: linear-gradient(135deg, #fafafa 0%, #f5f5f5 100%); transition: all 0.25s ease; cursor: pointer;" onclick="if(event.target.tagName !== 'INPUT' && event.target.tagName !== 'A' && event.target.tagName !== 'I' && !event.target.closest('a')) { document.getElementById('isAnonymous').click(); }">
@@ -2797,8 +1447,6 @@ async function _doSubmitComplaint(formData, opts) {
         hideLoading();
         if (submitBtn) { submitBtn.disabled = false; submitBtn.innerHTML = '<i class="fas fa-paper-plane"></i> Submit Complaint'; }
 
-        // ── Possible duplicate → show warn-and-decide dialog ──
-        // ── BLOCKING duplicate → hard stop, no override ──
         if (!data.success && data.code === 'duplicate_blocked' && data.possible_duplicate) {
             const dup = data.possible_duplicate;
 
@@ -2831,7 +1479,6 @@ async function _doSubmitComplaint(formData, opts) {
                 if (result.isConfirmed) {
                     resetComplaintForm();
                     showMyComplaints();
-                    // Optionally auto-open the existing complaint:
                     setTimeout(() => viewComplaintDetails(dup.id), 400);
                 }
             });
@@ -2839,7 +1486,6 @@ async function _doSubmitComplaint(formData, opts) {
             return;
         }
 
-        // ── WARNING duplicate → warn-and-decide dialog ──
         if (!data.success && data.code === 'possible_duplicate' && data.possible_duplicate) {
             const dup = data.possible_duplicate;
 
@@ -2876,9 +1522,8 @@ async function _doSubmitComplaint(formData, opts) {
                 viewComplaintDetails(dup.id);
                 return;
             }
-            if (!choice.isConfirmed) return; // Cancel → keep form as-is
+            if (!choice.isConfirmed) return;
 
-            // ── File Anyway → re-submit with force_duplicate=1 ──
             const retry = new FormData();
             for (const [k, v] of formData.entries()) retry.append(k, v);
             retry.set('force_duplicate', '1');
@@ -2887,7 +1532,6 @@ async function _doSubmitComplaint(formData, opts) {
             await _doSubmitComplaint(retry, opts);
             return;
         }
-        // ── Normal success / errors ──
         if (data.success) {
             if (isEscalated) showEscalationSuccessModal(data.reference_number, escalation, anonVisible && anonCheckbox.checked);
             else showComplaintSuccessModal(data.reference_number, () => { resetComplaintForm(); showMyComplaints(); });
@@ -2928,22 +1572,14 @@ async function showMyComplaints() {
     }
 }
 
-
-
-// ============================================================
-// STAGE FILTERING HELPERS (role-aware)
-// ============================================================
-
 function resolveStageForComplaint(c, role) {
     const status = c.status;
-   
 
     const inRepudiationWindow =
         (status === 'settled_pending'      && Number(c.amicable_repudiated    || 0) === 0 && c.repudiation_deadline) ||
         (status === 'arbitration_pending'  && Number(c.arbitration_repudiated || 0) === 0 && c.repudiation_deadline);
 
  let baseStage = STATUS_TO_STAGE[status] || 'intake';
-    // ── "summoned" is ambiguous — resolve by hearing context + role ──
     if (status === 'summoned') {
         const sessionType = c.next_hearing_type || c.hearing_type || null;
         if (sessionType === 'conciliation') return 'pangkat_conciliation';
@@ -2951,17 +1587,12 @@ function resolveStageForComplaint(c, role) {
         return role === 'respondent' ? 'summoned' : 'notice_issued';
     }
 
-    // ── "failed_mediation" is a TRANSITION, not a terminal state ──
-    // The case is moving from Lupon (mediation) → Pangkat (conciliation).
     if (status === 'failed_mediation') {
         const sessionType = c.next_hearing_type || null;
-        // Pangkat hearing already scheduled → show it as the Pangkat Hearing stage
         if (sessionType === 'conciliation') return 'pangkat_conciliation';
-        // Otherwise the Captain is still forming the Pangkat
         return 'pangkat_constitution';
     }
 
-    // ── Promote to Pangkat Hearing if the next hearing is conciliation ──
     if ((baseStage === 'mediation' || baseStage === 'pangkat_constitution')
         && c.next_hearing_type === 'conciliation') {
         return 'pangkat_conciliation';
@@ -2977,13 +1608,11 @@ function computeStageCounts(list, role) {
         counts[key] = 0;
     }
 
-    // Per-status counts
     list.forEach(c => {
         const stageKey = resolveStageForComplaint(c, role);
         if (counts[stageKey] !== undefined) counts[stageKey]++;
     });
 
-    // Synthetic "Repudiation Open" count
     counts.repudiable = list.filter(c => {
         const s = c.status;
         const inSettle = (s === 'settled_pending'
@@ -3001,7 +1630,6 @@ function computeStageCounts(list, role) {
 function filterByStage(list, stageKey, role) {
     if (stageKey === 'all') return list;
 
-    // ── Synthetic stage: Repudiation Open ──
     if (stageKey === 'repudiable') {
         return list.filter(c => {
             const s = c.status;
@@ -3027,7 +1655,6 @@ function renderComplaintsWithTabs() {
 
     const stageCounts = computeStageCounts(currentList, currentRole);
 
-    // ── Tabs ──
     const tabsHtml = `
         <div style="display:flex;gap:8px;margin-bottom:18px;flex-wrap:wrap;align-items:center;">
             <button type="button" onclick="switchComplaintTab('complainant')"
@@ -3050,11 +1677,10 @@ function renderComplaintsWithTabs() {
         </div>
     `;
 
-    // ── STAGE CHIPS (role-filtered) ──
     const visibleStages = Object.entries(COMPLAINT_STAGES).filter(([key, stage]) => {
         if (key === 'all') return true;
         if (stage.forRole && stage.forRole !== 'both' && stage.forRole !== currentRole) return false;
-          if (key === 'repudiable') return true;   // always visible
+          if (key === 'repudiable') return true;
         return (stageCounts[key] || 0) > 0;
     });
 
@@ -3086,7 +1712,6 @@ function renderComplaintsWithTabs() {
         </div>
     `;
 
-    // ── Legend (collapsible) ──
     const legendHtml = `
         <details style="margin-bottom:16px;padding:10px 14px;background:#fafbfa;border-radius:10px;border:1px solid #e2efe8;">
             <summary style="cursor:pointer;font-size:0.8rem;font-weight:700;color:#555;">
@@ -3113,7 +1738,6 @@ function renderComplaintsWithTabs() {
         </details>
     `;
 
-    // ── Filtered list ──
     const filteredList = filterByStage(currentList, currentStageFilter, currentRole);
 
     let bodyHtml = '';
@@ -3185,16 +1809,6 @@ function renderComplaintsWithTabs() {
     startLiveCountdowns();
 }
 
-
-
-/**
- * Split the list into:
- *   • upcoming — complaints with a hearing scheduled in the FUTURE
- *   • others   — everything else
- *
- * Upcoming is sorted soonest-first by (hearing_date, hearing_time).
- * Others keep their incoming order (already sorted by created_at DESC from the API).
- */
 function splitByUpcomingHearing(list) {
     const now = Date.now();
 
@@ -3214,7 +1828,6 @@ function splitByUpcomingHearing(list) {
         }
     });
 
-    // Sort upcoming from SOONEST to LATEST
     upcoming.sort((a, b) => a.__hearingTs - b.__hearingTs);
 
     return { upcoming, others };
@@ -3232,7 +1845,6 @@ function setStageFilter(stageKey) {
     renderComplaintsWithTabs();
 }
 
-// Legacy shim — in case old code still calls setStatusFilter
 function setStatusFilter(key) {
 const legacyMap = {
     'all': 'all',
@@ -3242,18 +1854,18 @@ const legacyMap = {
     'summoned': 'summoned',
     'for_mediation': 'mediation',
     'mediation_scheduled': 'mediation',
-    'in_mediation': 'mediation',                    // ← NEW
+    'in_mediation': 'mediation',
     'pangkat_constitution_scheduled': 'pangkat_constitution',
     'pangkat_constituted': 'pangkat_constitution',
     'pangkat_scheduled': 'pangkat_conciliation',
-    'settled_pending': 'settled_pending',           // ← NEW
+    'settled_pending': 'settled_pending',
     'settled': 'resolved',
     'released': 'resolved',
     'certificate_issued': 'resolved',
-    'failed_mediation': 'pangkat_constitution',     // ← transition, not failed
-    'failed_conciliation_final': 'failed',          // legacy
-    'unresolved': 'failed',                         // ← your new name
-    'referred': 'referred',                         // ← NEW
+    'failed_mediation': 'pangkat_constitution',
+    'failed_conciliation_final': 'failed',
+    'unresolved': 'failed',
+    'referred': 'referred',
     'referred_dispatched': 'referred',
     'escalated': 'referred',
     'dismissed': 'dismissed',
@@ -3263,63 +1875,35 @@ const legacyMap = {
 
 function getStatusBadgeInfo(s) {
     const map = {
-        // ── Intake ──
         'pending_review':                 { label: 'Pending Review',                 color: '#f57c00', bg: '#fff8e1', icon: 'fa-clock' },
         'pending_captain_action':         { label: 'Awaiting Captain Action',        color: '#f57c00', bg: '#fff8e1', icon: 'fa-hourglass-half' },
-
-        // ── Summons / Notice ──
         'summoned':                       { label: 'Summons Issued',                 color: '#1565c0', bg: '#e3f2fd', icon: 'fa-envelope-open-text' },
-
-        // ── Mediation ──
         'for_mediation':                  { label: 'For Mediation',                  color: '#6a1b9a', bg: '#f3e5f5', icon: 'fa-gavel' },
         'mediation_scheduled':            { label: 'Mediation Hearing Scheduled',    color: '#6a1b9a', bg: '#f3e5f5', icon: 'fa-calendar-check' },
         'in_mediation':                   { label: 'In Mediation',                   color: '#6a1b9a', bg: '#f3e5f5', icon: 'fa-handshake' },
-
-        // ── Pangkat Formation (Captain's domain) ──
         'failed_mediation':               { label: 'Awaiting Pangkat Constitution',  color: '#4a148c', bg: '#f3e5f5', icon: 'fa-hourglass-half' },
         'pangkat_constitution_scheduled': { label: 'Constitution Meeting Set',       color: '#4a148c', bg: '#f3e5f5', icon: 'fa-calendar-check' },
         'pangkat_constituted':            { label: 'Awaiting Position Assignment',   color: '#4a148c', bg: '#f3e5f5', icon: 'fa-users-cog' },
-
-        // ── Pangkat Hearing (Chairperson's domain) ──
         'pangkat_scheduled':              { label: 'Conciliation Hearing Scheduled', color: '#00838f', bg: '#e0f7fa', icon: 'fa-gavel' },
-
-        // ── Settlement Pending (10-day repudiation) ──
         'settled_pending':                { label: 'Awaiting Repudiation Window',    color: '#2e7d32', bg: '#e8f5e9', icon: 'fa-hourglass-half' },
-
-        // ── Resolved ──
         'settled':                        { label: 'Settled — Executory',            color: '#1b5e20', bg: '#e8f5e9', icon: 'fa-handshake' },
         'certificate_issued':             { label: 'Certificate Issued',             color: '#1b5e20', bg: '#e8f5e9', icon: 'fa-certificate' },
         'released':                       { label: 'Released to Complainant',        color: '#1565c0', bg: '#e3f2fd', icon: 'fa-check-double' },
-
-            // ── Arbitration Pending (5-day repudiation) ──
-    'arbitration_pending':            { label: 'Arbitration — Awaiting Repudiation', color: '#e65100', bg: '#fff3e0', icon: 'fa-gavel' },
-    'arbitration_repudiated':         { label: 'Arbitration Repudiated',             color: '#c62828', bg: '#ffebee', icon: 'fa-file-signature' },
-    'amicable_repudiated':            { label: 'Settlement Repudiated',              color: '#c62828', bg: '#ffebee', icon: 'fa-file-signature' },
-
-        // ── Unresolved ──
+        'arbitration_pending':            { label: 'Arbitration — Awaiting Repudiation', color: '#e65100', bg: '#fff3e0', icon: 'fa-gavel' },
+        'arbitration_repudiated':         { label: 'Arbitration Repudiated',             color: '#c62828', bg: '#ffebee', icon: 'fa-file-signature' },
+        'amicable_repudiated':            { label: 'Settlement Repudiated',              color: '#c62828', bg: '#ffebee', icon: 'fa-file-signature' },
         'unresolved':                     { label: 'Unresolved — For Certification', color: '#b71c1c', bg: '#ffebee', icon: 'fa-file-certificate' },
         'failed_conciliation_final':      { label: 'Unresolved — For Certification', color: '#b71c1c', bg: '#ffebee', icon: 'fa-file-certificate' },
-
-
-
-        // ── Escalated / Referred ──
         'escalated':                      { label: 'ESCALATED — Non-Jurisdictional', color: '#c62828', bg: '#ffebee', icon: 'fa-exclamation-triangle' },
         'pending_captain_review':         { label: 'Awaiting Captain Signature',     color: '#f57c00', bg: '#fff8e1', icon: 'fa-signature' },
         'referred_dispatched':            { label: 'For Release to Complainant',     color: '#8e24aa', bg: '#f3e5f5', icon: 'fa-inbox' },
         'referred':                       { label: 'Referred to Agency',             color: '#8e24aa', bg: '#f3e5f5', icon: 'fa-paper-plane' },
-
-        // ── Dismissed ──
         'dismissed':                      { label: 'Dismissed',                      color: '#555',    bg: '#e0e0e0', icon: 'fa-ban' },
     };
     return map[s] || { label: (s || '').replace(/_/g, ' '), color: '#666', bg: '#f0f0f0', icon: 'fa-info-circle' };
 }
 
-
 function getRoleAwareBadgeInfo(c, roleTab) {
-    // Ambiguous statuses → resolve by hearing context + role, then use the
-    // *stage* label (e.g. `summoned` on the respondent side → "Summoned",
-    //  on the complainant side → "Notice Issued"; `failed_mediation` →
-    //  "Pangkat Forming" or "Pangkat Hearing" depending on hearing context).
     const ambiguous = ['summoned', 'failed_mediation'];
     if (ambiguous.includes(c.status)) {
         const stageKey = resolveStageForComplaint(c, roleTab);
@@ -3336,13 +1920,10 @@ function getRoleAwareBadgeInfo(c, roleTab) {
     return getStatusBadgeInfo(c.status);
 }
 
-
-
 // ============================================================
-// REPUDIATION MODAL — handles BOTH settlement & arbitration
+// REPUDIATION MODAL
 // ============================================================
 async function openRepudiationModal(complaintId) {
-    // 1. Fetch state
     Swal.fire({ title: 'Loading…', allowOutsideClick: false, didOpen: () => Swal.showLoading() });
 
     let state;
@@ -3361,7 +1942,6 @@ async function openRepudiationModal(complaintId) {
         return;
     }
 
-    // 2. Already filed
     if (state.already_filed) {
         const filedDate = new Date(state.already_filed.filed_at.replace(' ', 'T'))
             .toLocaleString('en-US', { dateStyle: 'long', timeStyle: 'short' });
@@ -3389,7 +1969,6 @@ async function openRepudiationModal(complaintId) {
         return;
     }
 
-    // 3. Not open
     if (!state.window_open) {
         await Swal.fire({
             icon: 'warning',
@@ -3400,7 +1979,6 @@ async function openRepudiationModal(complaintId) {
         return;
     }
 
-    // 4. Build the modal
     const isSettlement = (state.agreement === 'amicable_settlement');
     const agreementLabel = isSettlement
         ? 'Amicable Settlement (KP Form #16)'
@@ -3529,7 +2107,6 @@ async function openRepudiationModal(complaintId) {
                 countEl.textContent = `${n} / 20`;
                 countEl.style.color = n >= 20 ? '#2E7D32' : '#888';
             });
-            // Radio card styling
             document.querySelectorAll('.repud-ground').forEach(card => {
                 card.addEventListener('click', () => {
                     document.querySelectorAll('.repud-ground').forEach(c => {
@@ -3569,7 +2146,6 @@ async function openRepudiationModal(complaintId) {
 
     if (!result.isConfirmed || !result.value) return;
 
-    // 5. Confirm again — this is destructive
     const confirmAgain = await Swal.fire({
         icon: 'warning',
         title: 'Confirm Repudiation',
@@ -3588,7 +2164,6 @@ async function openRepudiationModal(complaintId) {
     });
     if (!confirmAgain.isConfirmed) return;
 
-    // 6. Submit
     Swal.fire({ title: 'Filing repudiation…', allowOutsideClick: false, didOpen: () => Swal.showLoading() });
 
     const fd = new FormData();
@@ -3614,7 +2189,6 @@ async function openRepudiationModal(complaintId) {
         return;
     }
 
-    // 7. Success
     await Swal.fire({
         icon: 'success',
         title: 'Repudiation Filed',
@@ -3639,12 +2213,11 @@ async function openRepudiationModal(complaintId) {
         width: 560,
     });
 
-    // 8. Refresh the list
     if (typeof showMyComplaints === 'function') showMyComplaints();
 }
 
-// Export so the inline onclick can find it
 window.openRepudiationModal = openRepudiationModal;
+
 function renderComplaintCard(c, roleTab) {
     const st = getRoleAwareBadgeInfo(c, roleTab);
     const isRespondent = roleTab === 'respondent';
@@ -3658,8 +2231,6 @@ function renderComplaintCard(c, roleTab) {
     const priorityColors = { urgent: '#c62828', high: '#e65100', medium: '#f9a825', low: '#43a047' };
     const priorityColor  = priorityColors[c.priority] || '#888';
 
-    // ── Repudiation action blocks (settlement OR arbitration) ──
-// ── Repudiation action block (settlement OR arbitration) ──
 let repudiationBlock = '';
 
 const buildRepudiationBlock = (opts) => {
@@ -3673,7 +2244,6 @@ const buildRepudiationBlock = (opts) => {
         weekday: 'long', month: 'long', day: 'numeric', year: 'numeric'
     });
 
-    // Everything that used to be printed on the card now lives in tooltips.
     const blockTooltip  = `${headerText}\n\n${explainer}`;
     const buttonTooltip = isOpen
         ? `${newStatusLine}\n\nDeadline: ${niceDeadline}`
@@ -3719,7 +2289,6 @@ const buildRepudiationBlock = (opts) => {
         </div>`;
 };
 
-// ── Amicable Settlement window (10 days) ──
 if (c.status === 'settled_pending'
     && c.repudiation_deadline
     && Number(c.amicable_repudiated || 0) === 0) {
@@ -3736,7 +2305,6 @@ if (c.status === 'settled_pending'
     });
 }
 
-// ── Agreement for Arbitration window (5 days) ──
 if (c.status === 'arbitration_pending'
     && c.repudiation_deadline
     && Number(c.arbitration_repudiated || 0) === 0) {
@@ -3753,7 +2321,6 @@ if (c.status === 'arbitration_pending'
     });
 }
 
-// ── Repudiation already filed — informational banner ──
 let repudiationFiledBlock = '';
 
 if (Number(c.amicable_repudiated || 0) === 1) {
@@ -3804,9 +2371,6 @@ if (Number(c.amicable_repudiated || 0) === 1) {
 
 let hearingBlock = '';
 
-
-// ── Only show the hearing countdown while the case is still in an
-//    active hearing phase AND the hearing hasn't started yet.
 const HEARING_ACTIVE_STATUSES = [
     'for_mediation', 'mediation_scheduled', 'in_mediation',
     'pangkat_constitution_scheduled',
@@ -3825,7 +2389,6 @@ if (c.hearing_date && isHearingPhaseActive) {
             const loc      = c.hearing_location || 'Barangay Hall';
             const isToday  = c.hearing_date === new Date().toISOString().split('T')[0];
 
-            // Determine hearing label from status
             let hearingLabel = 'Hearing Scheduled';
             let accentColor  = '#6a1b9a';
             if (c.status === 'for_mediation' || c.status === 'mediation_scheduled') {
@@ -3947,7 +2510,6 @@ if (c.hearing_date && isHearingPhaseActive) {
     `;
 }
 
-
 function formatTime12(timeStr) {
     if (!timeStr) return '';
     const parts = timeStr.split(':');
@@ -3959,7 +2521,6 @@ function formatTime12(timeStr) {
     return `${h}:${m} ${ampm}`;
 }
 
-// Inject "Today" pulse animation once
 (function injectHearingCardStyles() {
     if (document.getElementById('hearingCardStyles')) return;
     const s = document.createElement('style');
@@ -4026,7 +2587,6 @@ function renderComplaintDetails(data) {
             </div>
         </div>` : '';
 
-    // ── Documentable section helper ──
     const sectionHeader = (num, icon, title) => `
         <div style="display:flex;align-items:center;gap:12px;font-size:0.95rem;font-weight:800;color:#1a472a;text-transform:uppercase;letter-spacing:0.3px;margin-bottom:14px;padding-bottom:10px;border-bottom:2px solid #e2efe8;">
             <span style="display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;background:#2E7D32;color:#fff;border-radius:50%;font-size:0.8rem;font-weight:700;flex-shrink:0;">${num}</span>
@@ -4039,7 +2599,6 @@ function renderComplaintDetails(data) {
             ${bodyHtml}
         </div>`;
 
-    // Progress bar for complainant only
     let progressHtml = '';
     if (!isRespondent) {
         const order = ['pending_review','pending_captain_action','summoned','for_mediation','mediation_scheduled','settled'];
@@ -4064,7 +2623,6 @@ function renderComplaintDetails(data) {
             </div>`;
     }
 
-    // ── Section 1: Complaint Info ──
     const section1 = docBlock(1, 'fa-info-circle', 'Complaint Information', `
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px 20px;">
             <div><div style="font-size:0.7rem;text-transform:uppercase;color:#999;margin-bottom:3px;letter-spacing:0.4px;font-weight:600;">Reference</div><div style="font-size:0.9rem;color:#1a2b22;font-weight:700;font-family:monospace;">${escapeHtml(c.reference_number)}</div></div>
@@ -4083,7 +2641,6 @@ function renderComplaintDetails(data) {
             </div>` : ''}
     `);
 
-    // ── Section 2: Parties ──
     const partyCard = (p, idx, type) => {
         const roleColor = type === 'complainant' ? '#2E7D32' : '#e65100';
         const roleBg    = type === 'complainant' ? '#e8f5e9' : '#fff3e0';
@@ -4120,7 +2677,6 @@ function renderComplaintDetails(data) {
                 </div>`).join('')}</div>` : ''}
     `);
 
-    // ── Section 3: Incidents ──
     const section3 = incidents.length ? docBlock(3, 'fa-calendar-alt', `Incidents (${incidents.length})`, `
         <div style="display:grid;gap:12px;">
             ${incidents.map((inc, i) => {
@@ -4148,7 +2704,6 @@ function renderComplaintDetails(data) {
         </div>
     `) : '';
 
-    // ── Section 4: KP Forms ──
     const section4 = kpForms.length ? docBlock(4, 'fa-file-signature', `Documents Issued to You (${kpForms.length})`, `
         <div style="display:grid;gap:10px;">
             ${kpForms.map(f => `
@@ -4167,7 +2722,6 @@ function renderComplaintDetails(data) {
         </div>
     `) : '';
 
-    // ── Section 5: Hearings with LIVE TIMER ──
     const outcomeMap = { settled: 'Settled', no_settlement: 'No Settlement', cancelled: 'Cancelled' };
     const section5 = hearings.length ? docBlock(5, 'fa-gavel', `Hearing Schedule (${hearings.length})`, `
         <div style="display:grid;gap:12px;">
@@ -4209,7 +2763,6 @@ function renderComplaintDetails(data) {
         </div>
     `) : '';
 
-    // ── Section 6: Add Note (complainant only) ──
     const section6 = !isRespondent ? docBlock(6, 'fa-comment', 'Add a Note', `
         <textarea id="complaintNote" class="form-control" rows="3" placeholder="Add a note..."></textarea>
         <button class="btn-verify" onclick="addComplaintNote(${c.id})" style="margin-top:10px;"><i class="fas fa-paper-plane"></i> Add Note</button>
@@ -4226,7 +2779,6 @@ function renderComplaintDetails(data) {
         <div style="position:relative;overflow:hidden;background:#f8faf8;border-radius:16px;padding:0 0 22px 0;">
             <div style="position:absolute;top:0;left:0;right:0;height:5px;background:${roleStripeColor};"></div>
 
-            <!-- Header -->
             <div style="padding:20px 24px 4px;">
                 <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap;">
                     <div style="flex:1;min-width:0;">
@@ -4245,13 +2797,11 @@ function renderComplaintDetails(data) {
                 ${progressHtml}
             </div>
 
-            <!-- Banners -->
             <div style="padding:0 24px;">
                 ${roleBanner}
                 ${anonBanner}
             </div>
 
-            <!-- Documentable sections -->
             <div style="padding:0 24px;">
                 ${section1}
                 ${section2}
@@ -4263,7 +2813,6 @@ function renderComplaintDetails(data) {
         </div>
     `;
 
-    // Start live timer
     startLiveCountdowns();
 }
 
@@ -4343,7 +2892,8 @@ function showSubmitComplaintForm() {
     complainantsList = [{ full_name: rName, address: r.address || '', contact_number: r.phone || '', email: r.email || '' }];
     respondentsList = [];
     witnessesList = [];
-    incidentsList = [{ incident_date: '', incident_time: '', location: '', description: '', evidence_files: [] }];
+    incidentsList = [_newIncident()];
+    selectedLaws = []; // Reset selected laws
 
     const container = document.getElementById('complaintContent');
     if (container) {
@@ -4351,28 +2901,22 @@ function showSubmitComplaintForm() {
         attachIncidentEventListeners();
         attachPartyEventListeners();
         attachLiveValidation();
-        // Auto-priority live updater
-const descEl2 = document.getElementById('complaintDescription');
-const subjectEl2 = document.getElementById('complaintSubject');
-if (descEl2) {
-    descEl2.removeEventListener('input', updateAutoPriorityBadge);
-    descEl2.addEventListener('input', updateAutoPriorityBadge);
-}
-if (subjectEl2) {
-    subjectEl2.removeEventListener('change', updateAutoPriorityBadge);
-    subjectEl2.addEventListener('change', updateAutoPriorityBadge);
-}
-updateAutoPriorityBadge();
+
+        const descEl2 = document.getElementById('complaintDescription');
+        const subjectEl2 = document.getElementById('complaintSubject');
+        if (descEl2) {
+            descEl2.removeEventListener('input', updateAutoPriorityBadge);
+            descEl2.addEventListener('input', updateAutoPriorityBadge);
+        }
+        if (subjectEl2) {
+            subjectEl2.removeEventListener('change', updateAutoPriorityBadge);
+            subjectEl2.addEventListener('change', updateAutoPriorityBadge);
+        }
+        updateAutoPriorityBadge();
         ensureFieldErrorStyles();
         attachFieldAutoClear();
         const descInput = document.getElementById('complaintDescription');
         if (descInput) { descInput.removeEventListener('input', onDescriptionChange); descInput.addEventListener('input', onDescriptionChange); }
-        const subjectSelect = document.getElementById('complaintSubject');
-        if (subjectSelect) {
-            subjectSelect.addEventListener('mousedown', () => { userInteractedWithSubject = true; });
-            subjectSelect.addEventListener('touchstart', () => { userInteractedWithSubject = true; });
-            subjectSelect.addEventListener('keydown', () => { userInteractedWithSubject = true; });
-        }
     }
 }
 
@@ -4384,7 +2928,8 @@ function resetComplaintForm() {
     complainantsList = [{ full_name: rName, address: r.address || '', contact_number: r.phone || '', email: r.email || '' }];
     respondentsList = [];
     witnessesList = [];
-    incidentsList = [{ incident_date: '', incident_time: '', location: '', description: '', evidence_files: [] }];
+    incidentsList = [_newIncident()];
+    selectedLaws = []; // Reset selections
     ['complainantsContainer', 'respondentsContainer', 'witnessesContainer', 'incidentsContainer'].forEach(id => {
         const el = document.getElementById(id);
         if (id === 'complainantsContainer' && el) el.innerHTML = renderComplainantsList();
@@ -4396,8 +2941,11 @@ function resetComplaintForm() {
     attachIncidentEventListeners();
     ensureFieldErrorStyles();
     attachFieldAutoClear();
-    const subjectSelect = document.getElementById('complaintSubject');
-    if (subjectSelect) subjectSelect.innerHTML = '<option value="" disabled selected>┅ I-type ang paglalarawan para makita ang mungkahi ┅</option>';
+    const subjectInput = document.getElementById('complaintSubject');
+    if (subjectInput) {
+        subjectInput.value = '';
+        subjectInput.dataset.rawValue = '';
+    }
     clearTitleSuggestion();
     hideLawInfoPanel();
     const anon = document.getElementById('isAnonymous');
@@ -4406,6 +2954,9 @@ function resetComplaintForm() {
     if (anonGroup) anonGroup.style.display = 'none';
     toggleAnonymityWarning();
     updateAutoPriorityBadge();
+
+    const titleEl = document.getElementById('complaintTitle');
+    if (titleEl) delete titleEl.dataset.userEdited;
 }
 
 function ensureComplaintContainer() {
@@ -4495,7 +3046,6 @@ function showComplaintSuccessModal(referenceNumber, onClose) {
 // ============================================================
 
 function attachLiveValidation() {
-    // 150ms debounce for a snappy-but-not-flickery feel
     const debounce = (fn, ms = 150) => {
         let t;
         return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
@@ -4563,7 +3113,6 @@ function _clearLiveError(input) {
 function liveNameCheck(input, force = false) {
     const v = input.value.trim();
 
-    // Don't scream at the user for the first 2 characters
     if (v.length < 2) {
         if (force && v === '') _setLiveError(input, 'Name is required.');
         else _clearLiveError(input);
@@ -4625,19 +3174,14 @@ function liveRequiredCheck(input, msg, force = false) {
 }
 
 function highlightField(role, message) {
-    // Try data-role first
     let el = document.querySelector(`[data-role="${role}"]`);
-
-    // Fallback: direct ID
     if (!el) el = document.getElementById(role);
 
     if (!el) {
-        // Last resort: scroll top + popup
         showErrorModal(message);
         return;
     }
 
-    // If role targets an evidence section (no input), highlight its container
     if (role.startsWith('incidents_evidence')) {
         const section = document.querySelector(`[data-role="${role}"]`);
         if (section) {
@@ -4676,6 +3220,12 @@ function ensureFieldErrorStyles() {
         .field-error { border: 2px solid #e53935 !important; background-color: #fff5f5 !important; }
         .field-error-msg { display: block; margin-top: 6px; color: #e53935; font-size: 12px; font-weight: 500; }
         .party-card.field-error-group, .incident-card.field-error-group { border: 2px solid #e53935 !important; background-color: #fff5f5 !important; }
+        .add-evidence-btn { padding: 6px 14px; border-radius: 20px; border: none; background: linear-gradient(135deg, #2E7D32, #43a047); color: #fff; font-size: 0.75rem; font-weight: 700; cursor: pointer; display: inline-flex; align-items: center; gap: 5px; }
+        .add-evidence-btn:hover { background: linear-gradient(135deg, #1b5e20, #2E7D32); }
+        .evidence-section { background: #fafbfa; border: 1px dashed #cfd8dc; border-radius: 10px; padding: 10px 12px; margin-top: 8px; }
+        .no-evidence { font-size: 0.8rem; color: #999; font-style: italic; padding: 4px 0; }
+        .evidence-file-item { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; margin: 3px 4px 3px 0; background: #e8f5e9; color: #2E7D32; border-radius: 6px; font-size: 0.75rem; font-weight: 600; }
+        .evidence-file-item .remove-evidence-btn { background: none; border: none; color: #c62828; cursor: pointer; padding: 0 2px; font-size: 0.7rem; }
     `;
     document.head.appendChild(style);
 }
@@ -4759,10 +3309,14 @@ window.removeIncidentEvidence = removeIncidentEvidence;
 window.applyTitleSuggestion = applyTitleSuggestion;
 window.toggleAnonymityWarning = toggleAnonymityWarning;
 window.updateAnonymityVisibility = updateAnonymityVisibility;
+window.toggleLawSelection = toggleLawSelection;
+window.updateSelectedLaws = updateSelectedLaws;
 
-console.log('✅ Katarungang Pambarangay Classifier loaded (Card View + Filters + Documentable UI + Live Timer)');
-console.log('📚 Laws:', barangayLaws.length);
+console.log('✅ Katarungang Pambarangay Classifier loaded (POINTING SYSTEM enabled)');
+console.log('📚 Laws loaded from complaint_keywords.js:', (window.BARANGAY_LAWS || []).length);
 console.log('🎯 Victim-aware: minor, senior, woman, pwd, property, public');
 console.log('🚨 Non-jurisdictional handling active');
 console.log('🔒 Selective Anonymity: enabled');
 console.log('⏱️ Live hearing countdown timers active');
+console.log('📅 Incident date/time pre-filled with current date/time');
+console.log('⚖️  Checkbox selection system: enabled (Title/Subject are read-only)');

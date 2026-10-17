@@ -628,9 +628,12 @@ function classifyComplaintType($description, $subject) {
         $scores[$hinted] = ($scores[$hinted] ?? 0) + 4;
     }
 
-    if (empty($scores)) return 'unclassified';
-    arsort($scores);
-    return array_key_first($scores);
+if (empty($scores)) return 'unclassified';
+
+// Rank by score, then break ties by number of distinct keywords matched
+uasort($scores, function($a, $b) { return $b <=> $a; });
+
+return array_key_first($scores);
 }
 
 /* ============================================================

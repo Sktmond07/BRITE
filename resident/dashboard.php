@@ -1266,6 +1266,8 @@ if (isset($_GET['payment']) && $_GET['payment'] === 'success') {
 
 <script src="resident_documents.js"></script>
 <script src="resident_equipment.js"></script>
+
+<script src="complaint_keywords.js"></script>
 <script src="resident_complaint.js"></script>
 
 
