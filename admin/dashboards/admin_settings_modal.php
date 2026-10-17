@@ -528,7 +528,8 @@
                     toast('error', d.message || 'Update failed.');
                 }
             } catch (err) {
-                toast('error', 'Network error.');
+                console.error('[Admin Settings] Save failed:', err);
+                toast('error', err.message || 'Request failed. Check the console.');
             }
             btn.disabled = false;
             btn.innerHTML = '<i class="fas fa-key"></i> Update Password';
@@ -782,7 +783,10 @@
                     <input type="file" id="psPhotoFile" accept="image/png,image/jpeg,image/webp">
                     <div class="ps-hint"><i class="fas fa-info-circle"></i> Max 5 MB. Square images look best.</div>
                 </div>
-                <div class="ps-btn-row">
+                                <div class="ps-btn-row">
+                    <button type="button" class="ps-btn primary" id="psPhotoSave" disabled>
+                        <i class="fas fa-save"></i> Save Photo
+                    </button>
                     ${url ? `<button type="button" class="ps-btn danger" id="psRemovePhoto">
                                 <i class="fas fa-trash"></i> Remove Photo
                              </button>` : ''}
@@ -791,84 +795,178 @@
         </div>`;
     }
 
-    function bindPhoto() {
-        const input = document.getElementById('psPhotoFile');
-        const preview = document.getElementById('psPhotoPreview');
-        const removeBtn = document.getElementById('psRemovePhoto');
-        if (!input) return;
 
-        input.addEventListener('change', async () => {
-            if (!input.files || !input.files[0]) return;
-            const f = input.files[0];
-            if (f.size > 5 * 1024 * 1024) {
-                toast('error', 'Photo must be 5 MB or less.');
-                return;
+function bindPhoto() {
+    const input = document.getElementById('psPhotoFile');
+    const preview = document.getElementById('psPhotoPreview');
+    const saveBtn = document.getElementById('psPhotoSave');
+    const removeBtn = document.getElementById('psRemovePhoto');
+
+    if (!input || !preview || !saveBtn) return;
+
+    // Keep the selected file in memory until Save Photo is clicked.
+    let selectedPhoto = null;
+    let previewUrl = null;
+
+    // Selecting a file only previews it. It does NOT upload it.
+    input.addEventListener('change', () => {
+        const file = input.files && input.files[0];
+
+        if (!file) {
+            selectedPhoto = null;
+            saveBtn.disabled = true;
+            return;
+        }
+
+        if (!file.type.startsWith('image/')) {
+            toast('error', 'Please choose an image file.');
+            input.value = '';
+            selectedPhoto = null;
+            saveBtn.disabled = true;
+            return;
+        }
+
+        if (file.size > 5 * 1024 * 1024) {
+            toast('error', 'Photo must be 5 MB or less.');
+            input.value = '';
+            selectedPhoto = null;
+            saveBtn.disabled = true;
+            return;
+        }
+
+        selectedPhoto = file;
+
+        if (previewUrl) {
+            URL.revokeObjectURL(previewUrl);
+        }
+
+        previewUrl = URL.createObjectURL(file);
+        preview.innerHTML = `<img src="${previewUrl}" alt="Photo preview">`;
+        saveBtn.disabled = false;
+    });
+
+    // Upload only when Save Photo is clicked.
+    saveBtn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+
+        if (!selectedPhoto) {
+            toast('warning', 'Please select a photo first.');
+            return;
+        }
+
+        saveBtn.disabled = true;
+        saveBtn.innerHTML =
+            '<i class="fas fa-spinner fa-spin"></i> Saving...';
+
+        const fd = new FormData();
+        fd.append('action', 'upload_profile_photo');
+        fd.append('photo', selectedPhoto);
+
+        try {
+            const response = await fetch(AJAX, {
+                method: 'POST',
+                body: fd
+            });
+
+            const data = await safeJson(response);
+
+            if (!response.ok || !data.success) {
+                throw new Error(data.message || 'Photo upload failed.');
             }
 
-            // Immediate preview
-            const url = URL.createObjectURL(f);
-            preview.innerHTML = `<img src="${url}" alt="preview">`;
+            PS.photoUrl = data.photo_url;
+            selectedPhoto = null;
+
+            toast('success', data.message || 'Photo uploaded.');
+
+            // Update the top-bar avatar.
+            document.querySelectorAll('.avatar-container').forEach(av => {
+                av.innerHTML = `<img
+                    src="${esc(data.photo_url)}?t=${Date.now()}"
+                    alt="Profile photo"
+                    style="width:100%;height:100%;border-radius:50%;object-fit:cover;">`;
+            });
+
+// Refresh the photo panel only if it exists.
+const photoPanel = document.getElementById('psTabPanel');
+
+if (photoPanel) {
+    photoPanel.innerHTML = tplPhoto();
+    bindPhoto();
+}
+
+        } catch (err) {
+            console.error('[Profile Photo] Upload failed:', err);
+            toast('error', err.message || 'Photo upload failed.');
+        } finally {
+            if (saveBtn.isConnected) {
+                saveBtn.disabled = !selectedPhoto;
+                saveBtn.innerHTML =
+                    '<i class="fas fa-save"></i> Save Photo';
+            }
+        }
+    });
+
+    // Keep the existing Remove Photo functionality.
+    if (removeBtn) {
+        removeBtn.addEventListener('click', async () => {
+            const confirmation = await Swal.fire({
+                icon: 'warning',
+                title: 'Remove profile photo?',
+                showCancelButton: true,
+                confirmButtonText: 'Yes, remove',
+                confirmButtonColor: '#c62828',
+                cancelButtonText: 'Cancel',
+                cancelButtonColor: '#6c757d'
+            });
+
+            if (!confirmation.isConfirmed) return;
 
             const fd = new FormData();
-            fd.append('action', 'upload_profile_photo');
-            fd.append('photo', f);
+            fd.append('action', 'remove_profile_photo');
+
+            removeBtn.disabled = true;
 
             try {
-                const r = await fetch(AJAX, { method: 'POST', body: fd });
-              const d = await safeJson(r);  
-                if (d.success) {
-                    toast('success', d.message || 'Photo uploaded.');
-                    PS.photoUrl = d.photo_url;
-                    // Update the top-bar avatar
-                    document.querySelectorAll('.avatar-container').forEach(av => {
-                        av.innerHTML = `<img src="${esc(d.photo_url)}?t=${Date.now()}" alt="photo" style="width:100%;height:100%;border-radius:50%;object-fit:cover;">`;
-                    });
-                    // Re-render to show the Remove button
-                    document.getElementById('psTabPanel').innerHTML = tplPhoto();
-                    bindPhoto();
-                } else {
-                    toast('error', d.message || 'Upload failed.');
-                    preview.innerHTML = PS.photoUrl
-                        ? `<img src="${esc(PS.photoUrl)}" alt="photo">`
-                        : `<i class="fas fa-user"></i>`;
+                const response = await fetch(AJAX, {
+                    method: 'POST',
+                    body: fd
+                });
+
+                const data = await safeJson(response);
+
+                if (!response.ok || !data.success) {
+                    throw new Error(data.message || 'Photo removal failed.');
                 }
+
+                PS.photoUrl = null;
+
+                document.querySelectorAll('.avatar-container').forEach(av => {
+                    av.innerHTML = '<i class="fas fa-user"></i>';
+                });
+
+                toast('success', data.message || 'Photo removed.');
+
+const photoPanel = document.getElementById('psTabPanel');
+
+if (photoPanel) {
+    photoPanel.innerHTML = tplPhoto();
+    bindPhoto();
+}
+
             } catch (err) {
-                toast('error', 'Network error.');
+                console.error('[Profile Photo] Removal failed:', err);
+                toast('error', err.message || 'Photo removal failed.');
+
+                if (removeBtn.isConnected) {
+                    removeBtn.disabled = false;
+                }
             }
         });
-
-        if (removeBtn) {
-            removeBtn.addEventListener('click', async () => {
-                const c = await Swal.fire({
-                    icon: 'warning',
-                    title: 'Remove profile photo?',
-                    showCancelButton: true,
-                    confirmButtonText: 'Yes, remove',
-                    confirmButtonColor: '#c62828',
-                    cancelButtonText: 'Cancel',
-                    cancelButtonColor: '#6c757d'
-                });
-                if (!c.isConfirmed) return;
-
-                const fd = new FormData();
-                fd.append('action', 'remove_profile_photo');
-                try {
-                    const r = await fetch(AJAX, { method: 'POST', body: fd });
-                  const d = await safeJson(r);
-                    if (d.success) {
-                        toast('success', d.message || 'Photo removed.');
-                        PS.photoUrl = null;
-                        document.getElementById('psTabPanel').innerHTML = tplPhoto();
-                        bindPhoto();
-                    } else {
-                        toast('error', d.message || 'Remove failed.');
-                    }
-                } catch (err) {
-                    toast('error', 'Network error.');
-                }
-            });
-        }
     }
+}
+
 
 })();
 </script>

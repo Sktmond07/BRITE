@@ -4040,7 +4040,9 @@ function displayCurrentDate() {
 }
 
 function renderReports() {
-    return `<div class="content-card"><div class="section-title"><i class="fas fa-chart-line"></i> Reports & Analytics</div><div class="section-sub">Generate barangay reports</div><p style="padding:20px 0;">📊 Statistical reports will be available here.</p></div>`;
+    return window.briteRenderReportsView
+        ? window.briteRenderReportsView()
+        : '<div class="content-card">Loading Reports...</div>';
 }
 
 function renderSettings() {
@@ -4469,10 +4471,16 @@ standaloneItems.forEach(item => {
             document.getElementById('dashboardBody').innerHTML = renderDashboardDefault();
             closeCertification();
             setTimeout(initAdminDashboard, 50);
-        } else if (view === 'reports') {
-            document.getElementById('dashboardBody').innerHTML = renderReports();
-            closeCertification();
-        } else if (view === 'settings') {
+       } else if (view === 'reports') {
+    document.getElementById('dashboardBody').innerHTML = renderReports();
+    closeCertification();
+
+    setTimeout(function () {
+        if (typeof briteInitReports === 'function') {
+            briteInitReports();
+        }
+    }, 50);
+} else if (view === 'settings') {
             document.getElementById('dashboardBody').innerHTML = renderSettings();
             closeCertification();
         } else if (view === 'emergencies') {
@@ -5265,5 +5273,6 @@ if (typeof showConfirmationModal === 'undefined') {
 
 <!-- Household Management JavaScript -->
 <script src="household.js"></script>
+<script src="reports.js"></script>
 </body>
 </html> 

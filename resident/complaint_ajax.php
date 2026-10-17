@@ -403,6 +403,237 @@ function validateWording($text, $minLen = 15, $fieldLabel = 'Description') {
 }
 
 /* ============================================================
+   KATARUNGANG PAMBARANGAY CLASSIFIER
+   ------------------------------------------------------------
+   Classifies a complaint into one of the KP-covered case types
+   listed in the Katarungang Pambarangay Handbook
+   (Annex: Cases Under Katarungang Pambarangay, pp. 22–23 / PDF 40–41).
+
+   Returns one of the 27 valid `complaints.complaint_type` ENUM values:
+     dispute, nuisance, boundary, domestic, property,
+     publication_honor, public_order, documents_identity,
+     physical_injury, suicide_related, unlawful_arrest,
+     minor_family, abandonment_duty, property_rights,
+     threats_coercion, labor_threats, privacy_secrets,
+     theft_property, fraud_deceit, mortgaged_property,
+     property_damage, sexual_offense, false_accusation,
+     check_issuance, non_kp_referral, civil_dispute, unclassified
+   ============================================================ */
+
+function classifyComplaintType($description, $subject) {
+    $desc = strtolower(' ' . (string)$description . ' ');
+    $subj = strtolower(trim((string)$subject));
+
+    $rules = [
+        // Art. 154 — Unlawful Use of Means of Publication & Utterances
+        'publication_honor' => [
+            'libel','cyber libel','paninirang puri','paninira','masamang salita',
+            'nagpost','nag-post','nagcomment','post sa facebook','post sa fb',
+            'post sa social media','online libel','naglibel','nag-udyok',
+            'unlawful utterance','unlawful publication',
+        ],
+        // Art. 155 — Alarms and Scandals
+        'public_order' => [
+            'iskandalo','nag-iskandalo','gulo','nagkagulo','sigaw','nagsisigaw',
+            'videoke','karaoke','nagpapatugtog','maingay','ingay','alarms',
+            'scandal','public disturbance','breach of peace','disturbing the peace',
+        ],
+        // Art. 175, 178, 179 — Documents / Identity
+        'documents_identity' => [
+            'pekeng dokumento','pekeng certificate','pekeng id','falsification',
+            'forged','forgery','nagpeke','nagpeke ng','pekeng pangalan',
+            'fictitious name','alias','concealing true name','pekeng uniporme',
+            'pekeng badge','illegal use of uniform','illegal use of insignia',
+        ],
+        // Art. 252, 265, 266 — Physical Injuries
+        'physical_injury' => [
+            'sinaktan','sinasaktan','binugbog','binubugbog','sinuntok','sinusuntok',
+            'sinipa','sinisipa','sinampal','sinasampal','pinalo','pinapalo',
+            'tinulak','tinutulak','sinakal','sinasakal','sinabunutan','kinalmot',
+            'kinagat','nasugatan','nasaktan','bugbog','sugat','pasa','namaga',
+            'nagbugbugan','nag-rambol','nagrarambol','rumble','affray','brawl',
+            'malubhang sugat','seryosong sugat','naospital dahil sa pananakit',
+        ],
+        // Art. 253 — Giving Assistance to Consummated Suicide
+        'suicide_related' => [
+            'pagpapakamatay','pagpapatiwakal','nagpakamatay','nagpatiwakal',
+            'suicide','suicidal','tulong sa pagpapakamatay','nag-udyok magpakamatay',
+        ],
+        // Art. 269 — Unlawful Arrest
+        'unlawful_arrest' => [
+            'unlawful arrest','illegal arrest','illegal na pag-aresto','kinulong',
+            'kinukulong','hinuli ng walang warrant','hinuli ng walang kaso',
+            'detained','nakakulong','preso','walang warrant','walang kaso',
+            'walang basehan','dinakip','dinadakip',
+        ],
+        // Art. 271, 276, 277, 338 — Minor / Family
+        'minor_family' => [
+            'bata','batang','menor','minor','sanggol','baby','anak',
+            'inudyukan ang bata','batang tumakas','batang lumayas','naglayas',
+            'iniwang bata','iniwang sanggol','pinabayaang bata','inabandonang bata',
+            'swindling a minor','niloko ang bata','dinaya ang bata',
+            'simple seduction','nag-akit','inakit','binuntis','nabuntis',
+            'iniwan sa ere','iniwang buntis',
+        ],
+        // Art. 275, 277 — Abandonment of Person in Danger / Duty
+        'abandonment_duty' => [
+            'iniwan sa panganib','iniwan sa peligro','iniwan sa sakuna',
+            'iniwan sa aksidente','pinabayaan sa panganib','inabandona',
+            'hindi tinulungan','hindi sinaklolohan','walang pakialam sa panganib',
+            'abandonment','inabandona ang','iniwan sa',
+        ],
+        // Art. 280, 281 — Trespass
+        'property_rights' => [
+            'pumasok sa bahay','pinasok ang bahay','pumasok nang walang pahintulot',
+            'pumasok sa bakuran','pinasok ang bakuran','trespass','trespassing',
+            'nagtrespass','pumasok sa lupa','pinasok ang lupa',
+            'pumasok sa property','pinasok ang property',
+            'sinakop ang lupa','sinakop ang property','kinuha ang lupa',
+            'inasamang lupa','pagsakop ng lupa','occupation of real property',
+            'usurpation','usurpation of real rights',
+        ],
+        // Art. 283, 285, 286, 287, 288, 289 — Threats & Coercion
+        'threats_coercion' => [
+            'banta','nagbanta','nagbabanta','binantaan','binabantaan','tinakot',
+            'tinatakot','pananakot','pangamba','nagbantang sasaktan',
+            'nagbantang papatayin','pinagbantaan','grave coercion','light coercion',
+            'grave threats','light threats','pinilit','pinipilit','sapilitan',
+            'tinutukan','tinutukan ng baril','tinutukan ng patalim',
+            'pinilit magbayad','pinilit pumirma','compulsory',
+        ],
+        // Art. 290, 291 — Secrets / Privacy
+        'privacy_secrets' => [
+            'binuksan ang liham','binuksan ang sulat','binuksan ang email',
+            'binuksan ang mail','ninakaw ang liham','binabasa ang liham',
+            'discovering secrets','revealing secrets','abuse of authority',
+            'isinumbong ang sikreto','isiniwalat ang sikreto','inihayag ang sekreto',
+            'abuso ng kapangyarihan','nagsiwalat','nagsumbong',
+        ],
+        // Art. 309, 310, PD 1612 — Theft & Fencing
+        'theft_property' => [
+            'nakaw','nagnakaw','nanakaw','ninakaw','ninakawan','pagnanakaw',
+            'magnanakaw','mandurukot','nadukutan','dinukot','dukot',
+            'kinuha ang wallet','kinuha ang cellphone','kinuha ang bag',
+            'kinuha ang pitaka','kinuha ang pera','akyat bahay','akyat-bahay',
+            'theft','stealing','stolen','thief',
+            'fencing','fence','stolen property','stolen goods','nakaw na gamit',
+            'bumili ng nakaw','tumanggap ng nakaw','nagtago ng nakaw','kinupkop',
+            'pd 1612','fencing of stolen',
+        ],
+        // Art. 312, 313 — Boundary / Real Rights
+        'boundary' => [
+            'hangganan','mojon','boundary','boundaries','bakod','fence',
+            'binago ang hangganan','binago ang mojon','binago ang bakod',
+            'inilipat ang mojon','inilipat ang bakod','altering boundaries',
+            'altering landmarks','altering boundary',
+        ],
+        // Art. 315, 316, 317, 318 — Fraud / Swindling / Estafa
+        'fraud_deceit' => [
+            'estafa','nag-estafa','niloko','niloloko','nanloko','manloloko',
+            'dinaya','dinadaya','nangdaya','mandaraya','daya','pandaraya',
+            'panloloko','panlilinlang','naglinlang','nilinlang','swindling',
+            'other deceits','other forms of swindling','niloko sa pera',
+            'niloko sa negosyo','nag-estafa ng pera',
+        ],
+        // Art. 319 — Mortgaged Property
+        'mortgaged_property' => [
+            'sangla','sinangla','nakasanla','nagsangla','pagsangla',
+            'mortgage','mortgaged','removal of mortgaged property',
+            'sale of mortgaged property','pledge of mortgaged property',
+            'inalis ang nakasanlang','ibinenta ang nakasanlang',
+        ],
+        // Art. 328, 329 — Malicious Mischief / Other Mischiefs
+        'property_damage' => [
+            'sinira','sinisira','nasira','paninira','nagsira','magsira',
+            'binasag','binabasag','nagbasag','binaboy','ginulo',
+            'sinunog','pagsunog','malicious mischief','mischief','damage',
+            'destroy','vandalism','vandalized','winasak','nawasak','giniba',
+            'pinutol','napunit','pinunit','tapon ng basura','nagtapon ng basura',
+            'nagkakalat ng basura','binuhusan ng dumi',
+        ],
+        // Art. 338, 339 — Sexual Offenses
+        'sexual_offense' => [
+            'malaswa','malaswang','kalaswaan','hipo','hinipo','humipo','hipuin',
+            'hinawakan','humawak','ginalaw','hinimas','sinipsip','dinilaan',
+            'hinagkan','hinalikan','acts of lasciviousness','lascivious',
+            'indecent','obscene','lewd','molestation','molested',
+            'binastos','binabastos','nambabastos','pambabastos',
+        ],
+        // Art. 363 — Incriminating Innocent Persons
+        'false_accusation' => [
+            'bintang','nagbintang','binantaan','paratang','nagparatang',
+            'pinagbintangan','pinagparatangan','sinungaling','nagsinungaling',
+            'pagsisinungaling','gawa-gawa','gawa-gawang kwento','imbento',
+            'nag-imbento','itinuro','itinuturo','incriminating innocent',
+            'false accusation','false witness','false testimony',
+        ],
+        // BP 22 — Issuing Checks Without Sufficient Funds
+        'check_issuance' => [
+            'tumalbog','tumatalbog','bounced check','bouncing check','bad check',
+            'dishonored check','insufficient funds','walang pondo','kulang ang pondo',
+            'walang laman ang','tseke','cheke','check','cheque',
+            'bp 22','issuing checks',
+        ],
+        // Civil / neighborhood disputes
+        'civil_dispute' => [
+            'utang','pautang','lending','hindi nagbabayad','hindi binabayaran',
+            'singil','pagsingil','bayad','kontrata','kasunduan','neighbor dispute',
+            'kapitbahay','alitan','hidwaan',
+        ],
+        // Non-KP: RA 9165 / PD 1602 / Labor / Gov / High-penalty offenses
+        'non_kp_referral' => [
+            'droga','drugs','shabu','marijuana','drug pusher','drug den',
+            'jueteng','tupada','sabong','cockfighting','illegal gambling',
+            'labor dispute','dole','nlrc','hindi sumasahod','unpaid wages',
+            'rape','ginahasa','murder','homicide','kidnapping','carnapping',
+            'robbery with violence','terrorism','arson',
+        ],
+    ];
+
+    // Score
+    $scores = [];
+    foreach ($rules as $type => $keywords) {
+        $score = 0;
+        foreach ($keywords as $kw) {
+            if (strpos($desc, $kw) !== false) {
+                $score += (strpos($kw, ' ') !== false) ? 3 : 1;
+            }
+        }
+        if ($score > 0) $scores[$type] = $score;
+    }
+
+    // Subject hint
+    $subjectHint = [
+        'physical altercation'          => 'physical_injury',
+        'threat/intimidation'           => 'threats_coercion',
+        'violence against women (vawc)' => 'domestic',
+        'child protection concern'      => 'minor_family',
+        'drug related issue'            => 'non_kp_referral',
+        'theft/robbery'                 => 'theft_property',
+        'illegal gambling'              => 'non_kp_referral',
+        'illegal structure'             => 'property_rights',
+        'noise complaint'               => 'public_order',
+        'waste management'              => 'property_damage',
+        'scandal'                       => 'public_order',
+        'cyber libel'                   => 'publication_honor',
+        'verbal abuse'                  => 'publication_honor',
+        'property/boundary issue'       => 'boundary',
+        'neighbor dispute'              => 'civil_dispute',
+        'lending/utang issue'           => 'civil_dispute',
+        'abandoned vehicle'             => 'nuisance',
+        'obstruction on public way'     => 'public_order',
+    ];
+    if (isset($subjectHint[$subj])) {
+        $hinted = $subjectHint[$subj];
+        $scores[$hinted] = ($scores[$hinted] ?? 0) + 4;
+    }
+
+    if (empty($scores)) return 'unclassified';
+    arsort($scores);
+    return array_key_first($scores);
+}
+
+/* ============================================================
    DUPLICATE DETECTION — 4-LAYER MODEL
    ============================================================
    Layer 1: normalize text (case, accents, punctuation, spaces, common shorthands)
@@ -1026,26 +1257,29 @@ $priority = classifyAutoPriority($description, $complaint_subject, $is_escalated
     $escalation_refer_to= mysqli_real_escape_string($conn, $escalation_refer_to);
     $escalation_note    = mysqli_real_escape_string($conn, $escalation_note);
 
-    $typeMap = [
-        'Lending/Utang Issue' => 'dispute','Property/Boundary Issue' => 'boundary',
-        'Neighbor Dispute' => 'dispute','Noise Complaint' => 'nuisance',
-        'Waste Management' => 'nuisance','Animal Complaint' => 'nuisance',
-        'Road/Infrastructure' => 'other','Physical Altercation' => 'other',
-        'Threat/Intimidation' => 'other','Verbal Abuse' => 'other',
-        'Scandal' => 'nuisance','Theft/Robbery' => 'property',
-        'Cyber Libel' => 'other','Child Protection Concern' => 'domestic',
-        'Violence Against Women (VAWC)' => 'domestic','Illegal Gambling' => 'other',
-        'Drug Related Issue' => 'other','Illegal Vendors' => 'other',
-        'Abandoned Vehicle' => 'nuisance','Obstruction on Public Way' => 'nuisance',
-        'Illegal Structure' => 'property','Water Supply Issue' => 'other',
-        'Electrical Problem' => 'other','Zoning Violation' => 'property',
-        'Health Concern' => 'other','Calamity Assistance' => 'other',
-        'Social Services Concern' => 'other','Employment/Livelihood Issue' => 'other',
-        'Education Assistance' => 'other','Medical Assistance' => 'other',
-        'Death/Burial Assistance' => 'other','Senior Citizen Concern' => 'other',
-        'PWD Concern' => 'other','Solo Parent Concern' => 'other','Other Concern' => 'other',
+    /* ============================================================
+       AUTO-CLASSIFY complaint_type FROM THE KP HANDBOOK
+       ------------------------------------------------------------
+       The subject dropdown is only a hint. The actual complaint_type
+       is derived from the description using the Katarungang Pambarangay
+       Handbook's list of cases (pp. 22–23 / PDF 40–41).
+       ============================================================ */
+    $complaint_type = classifyComplaintType($description, $complaint_subject);
+
+    // Safety net — guarantee a valid ENUM value
+    $validTypes = [
+        'dispute','nuisance','boundary','domestic','property',
+        'publication_honor','public_order','documents_identity',
+        'physical_injury','suicide_related','unlawful_arrest',
+        'minor_family','abandonment_duty','property_rights',
+        'threats_coercion','labor_threats','privacy_secrets',
+        'theft_property','fraud_deceit','mortgaged_property',
+        'property_damage','sexual_offense','false_accusation',
+        'check_issuance','non_kp_referral','civil_dispute','unclassified',
     ];
-    $complaint_type = $typeMap[$complaint_subject] ?? 'other';
+    if (!in_array($complaint_type, $validTypes, true)) {
+        $complaint_type = 'unclassified';
+    }
 
     $reference_number = generateReferenceNumber();
     $has_evidence = 0;

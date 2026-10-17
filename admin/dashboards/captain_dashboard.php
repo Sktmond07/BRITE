@@ -2750,7 +2750,7 @@ $dxJson = json_encode($dxData, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSO
 </div>
             <div class="nav-item" data-view="household"><i class="fas fa-home"></i><span>Households</span></div>
 
-            <div class="nav-item" onclick="window.location.href='reports.php'"><i class="fas fa-chart-line"></i><span>Reports</span></div>
+            <div class="nav-item" data-view="reports"><i class="fas fa-chart-line"></i><span>Reports</span></div>
         </div>
         <div class="sidebar-footer">
             <div class="admin-badge">
@@ -8278,7 +8278,16 @@ function navigateTo(view) {
         if (typeof window.__renderHouseholdDashboard === 'function') {
             window.__renderHouseholdDashboard();
         }
-    }
+    }else if (view === 'reports') {
+    document.getElementById('dashboardBody').innerHTML =
+        window.briteRenderCaptainReportsView();
+
+    setTimeout(function () {
+        if (typeof window.briteInitCaptainReports === 'function') {
+            window.briteInitCaptainReports();
+        }
+    }, 50);
+}
 }
 document.querySelectorAll('.nav-item[data-view]').forEach(item => { item.addEventListener('click', () => navigateTo(item.getAttribute('data-view'))); });
 function displayCurrentDate() { const el = document.getElementById('currentDate'); if (el) el.innerHTML = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }); }
@@ -8478,5 +8487,7 @@ async function disablePush() {
 
 document.addEventListener('DOMContentLoaded', initNotifications);
 </script>
+
+<script src="captain_reports.js"></script>
 </body>
 </html>
